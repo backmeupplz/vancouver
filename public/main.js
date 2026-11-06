@@ -124,8 +124,8 @@ function groundFor(near) {
 const g_aniso = () => Math.min(8, renderer.capabilities.getMaxAnisotropy())
 
 // ---------- light ----------
-scene.add(new THREE.HemisphereLight(0xdfeaff, 0x5a5440, 1.7))
-const sun = new THREE.DirectionalLight(0xfff1dc, 2.5)
+scene.add(new THREE.HemisphereLight(0xe8eef8, 0x8a8070, 2.0))
+const sun = new THREE.DirectionalLight(0xfff1dc, 2.3)
 const SUN = new THREE.Vector3(-0.55, 0.62, 0.56).normalize() // afternoon, from the south-west
 sun.castShadow = true
 sun.shadow.mapSize.setScalar(mobile ? 2048 : 4096)
@@ -139,24 +139,36 @@ const chunks = new Map()
 const chunk = (x, y) => { const k = `${Math.floor(x / CH)},${Math.floor(y / CH)}`; if (!chunks.has(k)) chunks.set(k, {}); return chunks.get(k) }
 
 // ---------- buildings ----------
-const PAL = [ // wall and roof colours per class: house, apartment, glass tower, brick, concrete, white
-  { wall: [0xe8e4da, 0xd9d2c3, 0xc9c0ad, 0xa9b4b8, 0xd8c8a8, 0xbfcfd8, 0x9fb7c8, 0xd6c48a, 0xa8b894, 0xc98a6a, 0xf0ece0, 0x8fa4b4], roof: [0x4a4f55, 0x5f6366, 0x6e6a66, 0x7a5a48, 0x3e4349, 0x8a8a86, 0x6b4d3c, 0x8c4a3a, 0x52606a] },
-  { wall: [0xe8dcc4, 0xd8c8a8, 0xf0ece4, 0xd2cabc, 0xe2ddd2, 0xc8c6c0, 0xe6d2b0], roof: [0x9a9a96, 0x8c8e8e, 0xa8a49c] },
-  { wall: [0x7fa6c4, 0x8cb3cf, 0x6f97b8, 0x9cbfd6, 0x5f87a8, 0xa8c4d4, 0x78a0b0], roof: [0xb8c2c8, 0x9aa6ae, 0xc4ccd0] },
-  { wall: [0xa8604a, 0x9a5442, 0xb57058, 0x8e4e3e], roof: [0x6e5a50, 0x7c6a60] },
-  { wall: [0xc9c2b2, 0xd6cfbf, 0xb8b4aa, 0xe0d8c6], roof: [0x8e8e8a, 0x9a9890, 0x7e8080] },
-  { wall: [0xeeeeea, 0xe4e6e6, 0xf2f0ea], roof: [0xbcbcb8, 0xc8c8c4] },
-]
+// Facade styles, chosen per building (vertex attribute aWin = style, distance along the walls, height
+// above the ground, per-building seed): 0 plain, 1 punched windows, 2 curtain wall, 3 balcony slabs
+// and glass, 4 punched windows over a glass storefront.
+const HOUSE_WALL = [0xf2efe6, 0xe8e0cc, 0xd9d2c3, 0xc9d6dc, 0xb8c8d4, 0xe6d6a8, 0xb8c8a8, 0xd8a890, 0xf0e8d8, 0xa8b8c4, 0xe0c8b0]
+const HOUSE_ROOF = [0x4a4f55, 0x5f6366, 0x6e6a66, 0x7a5a48, 0x3e4349, 0x8c4a3a, 0x9a5038, 0x52606a, 0x6b4d3c]
+const LOW_WALL = [0xe8dcc4, 0xf0ece4, 0xd8c8a8, 0xe2ddd2, 0xc8c6c0, 0xe6d2b0, 0xd0b898, 0xc8d0d4]
+const BRICK = [0xa8604a, 0x9a5442, 0xb57058, 0x8e4e3e, 0xb86a50]
+const TOWER_FRAME = [0xf6f6f2, 0xf0f2f0, 0xe8eef0, 0xf2ece0, 0xeadcc0, 0xe4e6e6, 0xe8d0b0]
+const FLAT_ROOF = [0xc4c6c4, 0xb4b8b8, 0xd2d0ca, 0xa8acae, 0xbcb8b0, 0x9ea4a8, 0x5a6068, 0x6a7078, 0x7c8288]
 const nb = (o = after, u32())
 const v3 = (x, y, z) => new THREE.Vector3(x, y, z)
 const n_ = new THREE.Vector3(), e1 = new THREE.Vector3(), e2 = new THREE.Vector3()
-// one triangle with its own flat normal, wound so the normal points along `want`
-function tri(B, a, b, d, color, want, win = [0, 0, 0, 0, 0, 0, 0, 0, 0]) {
+const ROOFW = (seed) => [0, 0, 999, seed] // roofs: no windows, no contact shadow
+// one triangle with its own flat normal, wound so the normal points along `want`; w = per-vertex aWin
+function tri(B, a, b, d, color, want, w) {
   n_.crossVectors(e1.subVectors(b, a), e2.subVectors(d, a)).normalize()
-  if (n_.dot(want) < 0) { [b, d] = [d, b]; n_.negate(); win = [...win.slice(0, 3), ...win.slice(6, 9), ...win.slice(3, 6)] }
+  let ws = w.length === 4 ? [w, w, w] : [w.slice(0, 4), w.slice(4, 8), w.slice(8, 12)]
+  if (n_.dot(want) < 0) { [b, d] = [d, b]; n_.negate(); ws = [ws[0], ws[2], ws[1]] }
   for (const p of [a, b, d]) { B.pos.push(p.x, p.y, p.z); B.nor.push(n_.x * 127, n_.y * 127, n_.z * 127); B.col.push(color.r * 255, color.g * 255, color.b * 255) }
-  B.win.push(...win)
+  for (const x of ws) B.win.push(...x)
 }
+function inPoly(x, z, pts) {
+  let c = false
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const a = pts[i], b = pts[j]
+    if ((a.y > z) !== (b.y > z) && x < ((b.x - a.x) * (z - a.y)) / (b.y - a.y) + a.x) c = !c
+  }
+  return c
+}
+const units = [] // rooftop plant: x, y, z, sx, sy, sz, grey
 const UP = v3(0, 1, 0)
 for (let b = 0; b < nb; b++) {
   const n = u16(), base = i16() / 10, h = u16() / 10, mn = u16() / 10, k = u8(), pitched = u8()
@@ -165,38 +177,64 @@ for (let b = 0; b < nb; b++) {
   let roof = null
   if (pitched) roof = { cx: i16() / 2, cy: i16() / 2, a: i16() / 1000, hl: u16() / 10, hw: u16() / 10, ridge: u16() / 10 }
   if (THREE.ShapeUtils.isClockWise(pts)) pts.reverse()
-  let cx = 0, cz = 0
-  for (const p of pts) { cx += p.x / n; cz += p.y / n }
+  let cx = 0, cz = 0, x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity
+  for (const p of pts) { cx += p.x / n; cz += p.y / n; x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); z0 = Math.min(z0, p.y); z1 = Math.max(z1, p.y) }
   const B = chunk(cx, -cz).b ??= { pos: [], nor: [], col: [], win: [] }
-  const pal = PAL[k]
-  const wallC = new THREE.Color(pick(pal.wall)).offsetHSL(0, 0, (rand() - 0.5) * 0.06)
-  const roofC = new THREE.Color(pick(pal.roof)).offsetHSL(0, 0, (rand() - 0.5) * 0.06)
-  const winType = h < 4 ? 0 : k === 2 ? 2 : (k === 1 || k === 5) && h > 20 ? 3 : k === 0 && !roof && h < 8 ? 0 : 1 // 0 none, 1 punched windows, 2 curtain wall, 3 slab + glass ribbon
+  const seed = rand(), r = rand(), tower = h > 20
+  let style, wall, roofHex
+  if (tower) {
+    style = k === 2 && r < 0.55 ? 2 : r < 0.15 ? 2 : r < 0.9 ? 3 : 1
+    wall = style === 1 ? pick([...LOW_WALL, ...BRICK.slice(0, 2)]) : pick(TOWER_FRAME)
+    roofHex = pick(FLAT_ROOF)
+  } else if (k === 0) { // houses and small buildings
+    style = h < 4 ? 0 : 1; wall = pick(HOUSE_WALL); roofHex = roof ? 0 : pick(FLAT_ROOF)
+  } else if (k === 3) { style = 1; wall = pick(BRICK); roofHex = pick([0x8a7a70, 0x9a8a80, 0xb0aaa0]) }
+  else if (k === 4 || k === 2) { style = h < 5 ? 0 : 4; wall = pick([...LOW_WALL, 0xb8c4cc, 0xd8d8d4, 0xc4a888]); roofHex = pick(FLAT_ROOF) }
+  else { style = h > 9 && r < 0.4 ? 3 : 1; wall = pick([...LOW_WALL, ...TOWER_FRAME]); roofHex = pick(FLAT_ROOF) }
+  const wallC = new THREE.Color(wall).offsetHSL(0, 0, (rand() - 0.5) * 0.05)
+  const roofC = new THREE.Color(roofHex || 0).offsetHSL(0, 0, (rand() - 0.5) * 0.05)
   const y0 = base + mn, y1 = base + h
+  const flat = !roof
+  const par = flat && h >= 5 && n <= 80 ? (tower ? 1.2 : 0.8) : 0 // parapet
   let u = 0
   for (let i = 0; i < n; i++) {
     const a = pts[i], p = pts[(i + 1) % n]
     const len = Math.hypot(p.x - a.x, p.y - a.y) || 1
     const out = v3((p.y - a.y) / len, 0, -(p.x - a.x) / len)
-    c.copy(wallC).multiplyScalar(0.84 + 0.16 * Math.abs(out.x))
     const A = v3(a.x, y0, a.y), P = v3(p.x, y0, p.y), Pt = v3(p.x, y1, p.y), At = v3(a.x, y1, a.y)
-    const w = (uu, yy) => [winType, uu, yy - base]
-    tri(B, A, P, Pt, c, out, [...w(u, y0), ...w(u + len, y0), ...w(u + len, y1)])
-    tri(B, A, Pt, At, c, out, [...w(u, y0), ...w(u + len, y1), ...w(u, y1)])
+    const w = (uu, yy) => [style, uu, yy - base, seed]
+    tri(B, A, P, Pt, wallC, out, [...w(u, y0), ...w(u + len, y0), ...w(u + len, y1)])
+    tri(B, A, Pt, At, wallC, out, [...w(u, y0), ...w(u + len, y1), ...w(u, y1)])
+    if (par) { // the outside of the parapet in the wall's colour, its inside in shade
+      const Pp = v3(p.x, y1 + par, p.y), Ap = v3(a.x, y1 + par, a.y), pw = ROOFW(seed), inC = c.copy(roofC).multiplyScalar(0.72).clone()
+      tri(B, At, Pt, Pp, wallC, out, pw); tri(B, At, Pp, Ap, wallC, out, pw)
+      const inn = out.clone().negate()
+      tri(B, At, Pt, Pp, inC, inn, pw); tri(B, At, Pp, Ap, inC, inn, pw)
+    }
     u += len
   }
-  if (!roof) {
+  if (flat) {
     const top = pts.map((p) => v3(p.x, y1, p.y))
-    for (const [a, bb, cc] of THREE.ShapeUtils.triangulateShape(pts, [])) tri(B, top[a], top[bb], top[cc], roofC, UP)
+    for (const [a, bb, cc] of THREE.ShapeUtils.triangulateShape(pts, [])) tri(B, top[a], top[bb], top[cc], roofC, UP, ROOFW(seed))
     if (h > 18 && n >= 4) { // a plant room on top of the taller buildings
       const pk = pts.map((p) => new THREE.Vector2(cx + (p.x - cx) * 0.38, cz + (p.y - cz) * 0.38)), y2 = y1 + 3 + rand() * 2.5
-      const pc = c.copy(roofC).offsetHSL(0, 0, 0.08).clone()
+      const pc = new THREE.Color(rand() < 0.5 ? wall : roofHex).offsetHSL(0, 0, 0.04)
       for (let i = 0; i < pk.length; i++) { // (triangulateShape may have dropped a repeated last point)
         const a = pk[i], p = pk[(i + 1) % pk.length], len = Math.hypot(p.x - a.x, p.y - a.y) || 1, out = v3((p.y - a.y) / len, 0, -(p.x - a.x) / len)
-        const sh = pc.clone().multiplyScalar(0.8 + 0.2 * Math.abs(out.x))
-        tri(B, v3(a.x, y1, a.y), v3(p.x, y1, p.y), v3(p.x, y2, p.y), sh, out); tri(B, v3(a.x, y1, a.y), v3(p.x, y2, p.y), v3(a.x, y2, a.y), sh, out)
+        tri(B, v3(a.x, y1, a.y), v3(p.x, y1, p.y), v3(p.x, y2, p.y), pc, out, ROOFW(seed)); tri(B, v3(a.x, y1, a.y), v3(p.x, y2, p.y), v3(a.x, y2, a.y), pc, out, ROOFW(seed))
       }
-      for (const [a, bb, cc] of THREE.ShapeUtils.triangulateShape(pk, [])) tri(B, v3(pk[a].x, y2, pk[a].y), v3(pk[bb].x, y2, pk[bb].y), v3(pk[cc].x, y2, pk[cc].y), pc, UP)
+      for (const [a, bb, cc] of THREE.ShapeUtils.triangulateShape(pk, [])) tri(B, v3(pk[a].x, y2, pk[a].y), v3(pk[bb].x, y2, pk[bb].y), v3(pk[cc].x, y2, pk[cc].y), roofC.clone().offsetHSL(0, 0, 0.06), UP, ROOFW(seed))
+    }
+    // rooftop units (air handlers, vents) scattered over flat roofs
+    const area = (x1 - x0) * (z1 - z0)
+    if (h >= 4 && area > 120) {
+      const want = Math.min(7, Math.round(area / 260) + (rand() < 0.5 ? 1 : 0))
+      for (let t = 0, got = 0; t < want * 4 && got < want; t++) {
+        const ux = x0 + rand() * (x1 - x0), uz = z0 + rand() * (z1 - z0), sx = 1.4 + rand() * 3, sz = 1.2 + rand() * 2.2
+        if (!inPoly(ux, uz, pts) || !inPoly(ux + sx, uz, pts) || !inPoly(ux - sx, uz, pts) || !inPoly(ux, uz + sz, pts) || !inPoly(ux, uz - sz, pts)) continue
+        if (h > 18 && Math.hypot(ux - cx, uz - cz) < 0.45 * Math.min(x1 - x0, z1 - z0)) continue // the plant room is there
+        units.push(ux, y1, uz, sx, 0.8 + rand() * 1.4, sz, 0.75 + rand() * 0.25); got++
+      }
     }
     continue
   }
@@ -204,56 +242,85 @@ for (let b = 0; b < nb; b++) {
   const { cx: rx, cy: ry, a, hl, hw, ridge } = roof, O = 0.45 // eave overhang
   const ax = v3(Math.cos(a), 0, -Math.sin(a)), bx = v3(-Math.sin(a), 0, -Math.cos(a))
   const C = v3(rx, 0, -ry), at = (s, t, y) => C.clone().addScaledVector(ax, s).addScaledVector(bx, t).setY(y)
-  const yr = base + ridge, L = hl + O, Wd = hw + O, gable = hl / hw > 1.15, r = gable ? L : Math.max(0.01, L - Wd)
-  const rc = new THREE.Color(pick(PAL[0].roof)).offsetHSL(0, 0, (rand() - 0.5) * 0.08)
+  const yr = base + ridge, L = hl + O, Wd = hw + O, gable = hl / hw > 1.15, rr = gable ? L : Math.max(0.01, L - Wd)
+  const rc = new THREE.Color(pick(HOUSE_ROOF)).offsetHSL(0, 0, (rand() - 0.5) * 0.08)
   for (const s of [1, -1]) {
     const side = bx.clone().multiplyScalar(s).add(UP)
-    tri(B, at(-L, s * Wd, y1), at(L, s * Wd, y1), at(r, 0, yr), rc, side)
-    tri(B, at(-L, s * Wd, y1), at(r, 0, yr), at(-r, 0, yr), rc, side)
+    tri(B, at(-L, s * Wd, y1), at(L, s * Wd, y1), at(rr, 0, yr), rc, side, ROOFW(seed))
+    tri(B, at(-L, s * Wd, y1), at(rr, 0, yr), at(-rr, 0, yr), rc, side, ROOFW(seed))
     const end = ax.clone().multiplyScalar(s)
-    if (gable) tri(B, at(s * hl, Wd, y1), at(s * hl, -Wd, y1), at(s * hl, 0, yr), c.copy(wallC).multiplyScalar(0.92), end)
-    else tri(B, at(s * L, Wd, y1), at(s * L, -Wd, y1), at(s * r, 0, yr), rc, end.clone().add(UP))
+    if (gable) tri(B, at(s * hl, Wd, y1), at(s * hl, -Wd, y1), at(s * hl, 0, yr), wallC, end, ROOFW(seed))
+    else tri(B, at(s * L, Wd, y1), at(s * L, -Wd, y1), at(s * rr, 0, yr), rc, end.clone().add(UP), ROOFW(seed))
   }
 }
 const bmat = new THREE.MeshLambertMaterial({ vertexColors: true })
 bmat.onBeforeCompile = (s) => {
   s.vertexShader = s.vertexShader
-    .replace('#include <common>', '#include <common>\nattribute vec3 aWin;\nvarying vec3 vWin;')
+    .replace('#include <common>', '#include <common>\nattribute vec4 aWin;\nvarying vec4 vWin;')
     .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWin = aWin;')
-  // windows fade to their average colour once a floor is under ~3 px tall, so they never shimmer
+  // every pattern fades to its average colour once a floor is under ~3 px tall, so it never shimmers
   s.fragmentShader = s.fragmentShader
-    .replace('#include <common>', '#include <common>\nvarying vec3 vWin;')
+    .replace('#include <common>', `#include <common>
+      varying vec4 vWin;
+      vec3 srgb(vec3 c) { return pow(c, vec3(2.2)); } // colours below are picked as on screen; lighting is linear
+      float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float thin(float width, float fw) { return smoothstep(0.6, 1.3, width / fw); } // 1 while a feature is over ~a pixel wide
+      float box(vec2 f, vec2 lo, vec2 hi, vec2 fw) { vec2 a = smoothstep(lo - fw, lo + fw, f) * (1.0 - smoothstep(hi - fw, hi + fw, f)); return a.x * a.y; }`)
     .replace('#include <color_fragment>', `#include <color_fragment>
-      if (vWin.x > 0.5) {
-        float type = vWin.x;
-        bool curtain = type > 1.5 && type < 2.5, ribbon = type > 2.5;
-        vec2 g = vec2(vWin.y / (curtain ? 1.6 : ribbon ? 1.45 : 3.0), vWin.z / (ribbon ? 3.0 : 3.2));
-        vec2 fw = max(fwidth(g), vec2(1e-4));
-        float detail = clamp(1.6 - 2.5 * max(fw.x, fw.y), 0.0, 1.0);
-        vec2 f = fract(g);
-        vec3 base = diffuseColor.rgb, pat, avg;
-        if (ribbon) { // residential tower: light floor slab, then a band of teal glass split by mullions
-          float slab = 1.0 - smoothstep(0.22 - fw.y, 0.22 + fw.y, f.y);
-          float mull = 1.0 - smoothstep(0.07 - fw.x, 0.07 + fw.x, f.x);
-          vec3 glass = vec3(0.30, 0.50, 0.58) * (0.8 + 0.35 * f.y), slabC = min(base * 1.15, vec3(1.0));
-          pat = mix(mix(glass, base, mull), slabC, slab);
-          avg = mix(mix(vec3(0.34, 0.55, 0.62), base, 0.07), slabC, 0.22);
-        } else if (curtain) { // glass tower: teal panes in a light grid, brighter towards the top of each floor
-          vec2 lo = vec2(0.1, 0.16);
-          vec2 inside = smoothstep(lo - fw, lo + fw, f);
-          float w = inside.x * inside.y;
-          vec3 frame = vec3(0.86, 0.9, 0.92), glass = vec3(0.32, 0.62, 0.7) * (0.7 + 0.42 * f.y + 0.08 * sin(vWin.y * 0.05 + vWin.z * 0.02));
-          pat = mix(frame, glass, w);
-          avg = mix(frame, vec3(0.35, 0.64, 0.72), 0.86);
-        } else { // punched windows
-          vec2 lo = vec2(0.3, 0.32), hi = vec2(0.8, 0.85);
-          vec2 inside = smoothstep(lo - fw, lo + fw, f) * (1.0 - smoothstep(hi - fw, hi + fw, f));
-          vec3 glass = vec3(0.24, 0.33, 0.42) * (0.9 + 0.2 * sin(vWin.y * 0.11 + vWin.z * 0.37));
-          pat = mix(base, glass, inside.x * inside.y * 0.85);
-          avg = mix(base, vec3(0.24, 0.33, 0.42), 0.25 * 0.85);
+      float style = vWin.x, seed = vWin.w, z = vWin.z;
+      vec3 base = diffuseColor.rgb;
+      // glass colour per building: teal, blue, sea green, deep blue
+      vec3 glassC = srgb(seed < 0.45 ? vec3(0.42, 0.72, 0.78) : seed < 0.65 ? vec3(0.42, 0.60, 0.78) : seed < 0.85 ? vec3(0.40, 0.70, 0.66) : vec3(0.30, 0.46, 0.62));
+      if (style > 0.5) {
+        vec3 pat, avg;
+        if (style > 2.5 && style < 3.5) { // balconies: a light slab, its shadow, then glass between mullions; some bays solid
+          // every feature fades to its own coverage once it is thinner than a pixel, so nothing sub-pixel can shimmer
+          vec2 g = vec2(vWin.y / 3.2, z / 3.0), fw = max(fwidth(g), vec2(1e-4)), f = fract(g);
+          float detail = clamp(1.6 - 2.5 * max(fw.x, fw.y), 0.0, 1.0);
+          float bay = floor(vWin.y / 4.5), solid = step(0.72, hash(vec2(bay, seed * 91.0)));
+          float slab = mix(0.36, 1.0 - smoothstep(0.36 - fw.y, 0.36 + fw.y, f.y), thin(0.36, fw.y));
+          float shadeL = (1.0 - smoothstep(0.36 - fw.y, 0.36 + fw.y, f.y)) * 0.0 + smoothstep(0.36 - fw.y, 0.36 + fw.y, f.y) * (1.0 - smoothstep(0.44 - fw.y, 0.44 + fw.y, f.y));
+          float shade = mix(0.08, shadeL, thin(0.08, fw.y));
+          float mull = mix(0.04, 1.0 - smoothstep(0.04 - fw.x, 0.04 + fw.x, f.x), thin(0.04, fw.x));
+          vec3 glass = glassC * (0.85 + 0.45 * mix(0.7, f.y, thin(0.5, fw.y)));
+          vec2 g2 = vec2(vWin.y / 2.25, z / 3.0), fw2 = max(fwidth(g2), vec2(1e-4));
+          vec3 wallBay = mix(base, glassC * 0.8, mix(0.19, box(fract(g2), vec2(0.3, 0.38), vec2(0.7, 0.86), fw2 * 1.5), thin(0.4, max(fw2.x, fw2.y))) * 0.85);
+          pat = mix(mix(glass, base, mull), wallBay, solid);
+          pat = mix(pat, glassC * 0.45, shade);
+          pat = mix(pat, min(base * 1.12, vec3(1.0)), slab);
+          avg = mix(glassC * 0.9, base * 1.1, 0.48);
+          diffuseColor.rgb = mix(avg, pat, detail);
+        } else if (style > 1.5 && style < 2.5) { // curtain wall: light frame grid, glass brighter towards each floor's top
+          vec2 g = vec2(vWin.y / 1.6, z / 3.4), fw = max(fwidth(g), vec2(1e-4)), f = fract(g);
+          float detail = clamp(1.6 - 2.5 * max(fw.x, fw.y), 0.0, 1.0);
+          vec2 lo = vec2(0.13, 0.26);
+          float ix = mix(0.87, smoothstep(lo.x - fw.x, lo.x + fw.x, f.x), thin(lo.x, fw.x));
+          float iy = mix(0.74, smoothstep(lo.y - fw.y, lo.y + fw.y, f.y), thin(lo.y, fw.y));
+          vec3 glass = glassC * (0.72 + 0.45 * mix(0.6, f.y, thin(0.5, fw.y)) + 0.06 * sin(vWin.y * 0.05 + z * 0.02));
+          pat = mix(base, glass, ix * iy);
+          avg = mix(base, glassC * 0.95, 0.64);
+          diffuseColor.rgb = mix(avg, pat, detail);
+        } else { // punched windows; style 4 adds a storefront on the ground floor
+          vec2 g = vec2(vWin.y / 3.0, z / 3.2), fw = max(fwidth(g), vec2(1e-4)), f = fract(g);
+          float detail = clamp(1.6 - 2.5 * max(fw.x, fw.y), 0.0, 1.0);
+          vec3 glass = srgb(vec3(0.40, 0.52, 0.62)) * (0.8 + 0.35 * f.y);
+          float w = box(f, vec2(0.28, 0.3), vec2(0.78, 0.84), fw);
+          pat = mix(base, glass, w * 0.9);
+          pat = mix(pat, base * 0.82, mix(0.02, box(f, vec2(0.28, 0.26), vec2(0.78, 0.3), fw), thin(0.04, fw.y)) * 0.8); // sill
+          avg = mix(base, glass, 0.25 * 0.9);
+          vec3 col = mix(avg, pat, detail);
+          if (style > 3.5 && z < 4.2) { // storefront: glass in a dark frame under a light sign band
+            vec2 sg = vec2(vWin.y / 2.6, z / 4.2), sfw = max(fwidth(sg), vec2(1e-4)), sf = fract(sg);
+            float sdet = clamp(1.6 - 2.5 * max(sfw.x, sfw.y), 0.0, 1.0);
+            vec3 shop = mix(srgb(vec3(0.16, 0.2, 0.24)), glassC * 0.9, box(sf, vec2(0.06, 0.05), vec2(0.94, 0.72), sfw));
+            shop = mix(shop, min(base * 1.12, vec3(1.0)), step(0.8, sf.y));
+            col = mix(mix(srgb(vec3(0.3, 0.38, 0.44)), base, 0.2), shop, sdet);
+          }
+          diffuseColor.rgb = col;
         }
-        diffuseColor.rgb = mix(avg, pat, detail);
-      }`)
+      }
+      // contact shadow where walls meet the ground
+      diffuseColor.rgb *= mix(0.62, 1.0, smoothstep(0.0, 5.0, z));`)
 }
 for (const ch of chunks.values()) {
   const B = ch.b; if (!B) continue
@@ -261,12 +328,23 @@ for (const ch of chunks.values()) {
   g.setAttribute('position', new THREE.Float32BufferAttribute(B.pos, 3))
   g.setAttribute('normal', new THREE.BufferAttribute(new Int8Array(B.nor), 3, true))
   g.setAttribute('color', new THREE.BufferAttribute(new Uint8Array(B.col), 3, true))
-  g.setAttribute('aWin', new THREE.Float32BufferAttribute(B.win, 3))
+  g.setAttribute('aWin', new THREE.Float32BufferAttribute(B.win, 4))
   const m = new THREE.Mesh(g, bmat)
   m.castShadow = m.receiveShadow = true
   scene.add(m)
   delete ch.b
 }
+const roofUnits = (() => {
+  const n = units.length / 7, m = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0), new THREE.MeshLambertMaterial(), n)
+  const mm = new THREE.Matrix4()
+  for (let i = 0; i < n; i++) {
+    const [x, y, z, sx, sy, sz, g] = units.slice(i * 7, i * 7 + 7)
+    m.setMatrixAt(i, mm.makeScale(sx, sy, sz).setPosition(x, y, z)); m.setColorAt(i, c.setRGB(g * 0.92, g * 0.95, g))
+  }
+  m.computeBoundingSphere(); m.castShadow = m.receiveShadow = true
+  scene.add(m)
+  return m
+})()
 
 // ---------- trees: painted billboards (the camera never changes its tilt, so a flat picture reads as a tree),
 // drawn when zoomed in; zoomed out their crowns are painted into the ground ----------
@@ -274,37 +352,41 @@ const nt = u32()
 const treeGroup = new THREE.Group()
 const ATL = 256, atlas = document.createElement('canvas')
 atlas.width = ATL * 4; atlas.height = ATL * 2
-{ // 6 broadleaf and 2 conifer pictures in grey, tinted per tree
-  const g2 = atlas.getContext('2d'), INK = '#141a14'
+{ // 6 broadleaf and 2 conifer pictures in grey, tinted per tree: leaf clumps lit from the upper left
+  const g2 = atlas.getContext('2d'), RIM = 'rgba(16,24,14,0.85)'
+  const grey = (l) => `rgb(${255 * l},${255 * l},${255 * l})`
   for (let v = 0; v < 8; v++) {
     const ox = (v % 4) * ATL, oy = Math.floor(v / 4) * ATL, r = mulberry(v + 11)
     const X = (x) => ox + x * ATL, Y = (y) => oy + y * ATL
-    g2.fillStyle = INK; g2.fillRect(X(0.465), Y(0.7), ATL * 0.07, ATL * 0.29)
-    g2.fillStyle = '#6b5240'; g2.fillRect(X(0.475), Y(0.7), ATL * 0.05, ATL * 0.28)
+    g2.fillStyle = '#4a3a2e'; g2.fillRect(X(0.47), Y(0.72), ATL * 0.06, ATL * 0.27)
     if (v < 6) {
-      const puffs = []
-      for (let i = 0; i < 18; i++) { const a = r() * Math.PI * 2, d = Math.sqrt(r()) * 0.28; puffs.push([0.5 + Math.cos(a) * d, 0.45 + Math.sin(a) * d * 0.8, 0.14 + r() * 0.08]) }
-      puffs.sort((a, b) => a[1] - b[1])
-      g2.fillStyle = INK
-      for (const [x, y, rr] of puffs) { g2.beginPath(); g2.arc(X(x), Y(y), (rr + 0.025) * ATL, 0, 7); g2.fill() }
-      for (const [x, y, rr] of puffs) {
-        const gr = g2.createRadialGradient(X(x - rr * 0.35), Y(y - rr * 0.4), 0, X(x), Y(y), rr * ATL)
-        const lift = 1 - (y - 0.2) * 0.5
-        gr.addColorStop(0, `rgb(${255 * lift},${255 * lift},${255 * lift})`); gr.addColorStop(1, `rgb(${150 * lift},${150 * lift},${150 * lift})`)
-        g2.fillStyle = gr; g2.beginPath(); g2.arc(X(x), Y(y), rr * ATL, 0, 7); g2.fill()
-        g2.strokeStyle = 'rgba(20,26,20,0.55)'; g2.lineWidth = ATL * 0.008
-        g2.beginPath(); g2.arc(X(x), Y(y), rr * ATL, 0.1, 1.9); g2.stroke()
+      // the crown's outline: a few big lobes; then many small clumps inside it, shaded by where they sit
+      const lobes = []
+      for (let i = 0; i < 7; i++) { const a = r() * Math.PI * 2, d = Math.sqrt(r()) * 0.17; lobes.push([0.5 + Math.cos(a) * d, 0.44 + Math.sin(a) * d * 0.85, 0.2 + r() * 0.06]) }
+      g2.fillStyle = RIM
+      for (const [x, y, rr] of lobes) { g2.beginPath(); g2.arc(X(x), Y(y), (rr + 0.012) * ATL, 0, 7); g2.fill() }
+      g2.save(); g2.beginPath()
+      for (const [x, y, rr] of lobes) { g2.moveTo(X(x) + rr * ATL, Y(y)); g2.arc(X(x), Y(y), rr * ATL, 0, 7) }
+      g2.clip()
+      g2.fillStyle = grey(0.42); g2.fillRect(ox, oy, ATL, ATL)
+      const clumps = []
+      for (let i = 0; i < 70; i++) clumps.push([0.18 + r() * 0.64, 0.12 + r() * 0.62, 0.035 + r() * 0.045])
+      clumps.sort((a, b) => a[1] - b[1])
+      for (const [x, y, rr] of clumps) {
+        const light = Math.max(0.35, Math.min(1, 1.15 - (y - 0.15) * 0.9 - (x - 0.3) * 0.5)) // top-left lit, bottom-right in shade
+        g2.fillStyle = grey(light * 0.62); g2.beginPath(); g2.arc(X(x + rr * 0.15), Y(y + rr * 0.2), rr * ATL, 0, 7); g2.fill()
+        g2.fillStyle = grey(light); g2.beginPath(); g2.arc(X(x), Y(y), rr * 0.82 * ATL, 0, 7); g2.fill()
       }
+      g2.restore()
     } else {
-      const tiers = 6
-      const tier = (grow, fill) => {
-        for (let i = 0; i < tiers; i++) {
-          const y0 = 0.04 + i * 0.13, y1 = y0 + 0.26 + i * 0.02, w = 0.09 + i * 0.055 + grow
-          g2.fillStyle = fill(i); g2.beginPath(); g2.moveTo(X(0.5), Y(y0 - grow)); g2.lineTo(X(0.5 + w), Y(y1 + grow * 0.5)); g2.lineTo(X(0.5 - w), Y(y1 + grow * 0.5)); g2.closePath(); g2.fill()
-        }
+      const tiers = 7
+      for (let i = 0; i < tiers; i++) {
+        const y0 = 0.03 + i * 0.11, y1 = y0 + 0.24 + i * 0.015, w = 0.08 + i * 0.05
+        g2.fillStyle = RIM; g2.beginPath(); g2.moveTo(X(0.5), Y(y0 - 0.012)); g2.lineTo(X(0.5 + w + 0.012), Y(y1 + 0.006)); g2.lineTo(X(0.5 - w - 0.012), Y(y1 + 0.006)); g2.closePath(); g2.fill()
+        const gr = g2.createLinearGradient(X(0.5 - w), 0, X(0.5 + w), 0), l = 1 - i * 0.04
+        gr.addColorStop(0, grey(0.95 * l)); gr.addColorStop(0.5, grey(0.7 * l)); gr.addColorStop(1, grey(0.42 * l))
+        g2.fillStyle = gr; g2.beginPath(); g2.moveTo(X(0.5), Y(y0)); g2.lineTo(X(0.5 + w), Y(y1)); g2.lineTo(X(0.5 - w), Y(y1)); g2.closePath(); g2.fill()
       }
-      tier(0.025, () => INK)
-      tier(0, (i) => { const gr = g2.createLinearGradient(X(0.3), 0, X(0.7), 0); const l = 1 - i * 0.05; gr.addColorStop(0, `rgb(${235 * l},${235 * l},${235 * l})`); gr.addColorStop(1, `rgb(${120 * l},${120 * l},${120 * l})`); return gr })
     }
   }
 }
@@ -312,7 +394,7 @@ const atlasTex = new THREE.CanvasTexture(atlas)
 atlasTex.colorSpace = THREE.SRGBColorSpace
 atlasTex.anisotropy = 4
 const treeMat = new THREE.ShaderMaterial({
-  uniforms: { map: { value: atlasTex } },
+  uniforms: { map: { value: atlasTex }, sat: { value: 1.2 }, gain: { value: new THREE.Vector3(1, 1, 1) } },
   vertexShader: `attribute vec3 iPos; attribute vec2 iSize; attribute vec3 iCol; attribute float iVar;
     varying vec2 vUv; varying vec3 vCol;
     void main() {
@@ -323,14 +405,16 @@ const treeMat = new THREE.ShaderMaterial({
       mv.xy += position.xy * iSize;
       gl_Position = projectionMatrix * mv;
     }`,
-  fragmentShader: `uniform sampler2D map; varying vec2 vUv; varying vec3 vCol;
+  fragmentShader: `uniform sampler2D map; uniform float sat; uniform vec3 gain; varying vec2 vUv; varying vec3 vCol;
     void main() {
       vec4 t = texture2D(map, vUv);
-      if (t.a < 0.05) discard;
-      gl_FragColor = vec4(vCol * t.rgb * 1.55, smoothstep(0.3, 0.7, t.a));
+      if (t.a < 0.04) discard;
+      vec3 cc = vCol * t.rgb * 1.3;
+      cc = max(mix(vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), cc, sat), 0.0) * gain;
+      gl_FragColor = vec4(cc, t.a);
       #include <colorspace_fragment>
     }`,
-  alphaToCoverage: true,
+  transparent: true, // drawn after the ink pass, far to near, against the scene's depth (see draw)
 })
 const quad = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0)
 const tlists = new Map()
@@ -341,10 +425,11 @@ for (let i = 0; i < nt; i++) {
   tlists.get(key).push([x, y, z, k, col, h])
 }
 for (const [key, list] of tlists) {
+  list.sort((a, b) => b[1] * 0.866 - b[2] * 0.5 - (a[1] * 0.866 - a[2] * 0.5)) // far (north, low) first
   const n = list.length, P = new Float32Array(n * 3), S = new Float32Array(n * 2), C = new Float32Array(n * 3), V = new Float32Array(n)
   let lo = Infinity, hi = -Infinity
   list.forEach(([x, y, z, k, col, h], i) => {
-    const conif = k === 5, r = conif ? Math.max(1.8, h * 0.2) : Math.min(8.5, Math.max(2.6, h * 0.36))
+    const conif = k === 5, r = conif ? Math.max(2.2, h * 0.24) : Math.min(11, Math.max(3.6, h * 0.48))
     P.set([x, z, -y], i * 3)
     S.set([conif ? r * 2.6 : r * 2.5, h * 0.866 * (conif ? 1.05 : 1.08)], i * 2)
     c.set(meta.treePal[col]).offsetHSL(0, 0, (rand() - 0.5) * 0.06); C.set([c.r, c.g, c.b], i * 3)
@@ -357,10 +442,13 @@ for (const [key, list] of tlists) {
   g.setAttribute('iCol', new THREE.InstancedBufferAttribute(C, 3)); g.setAttribute('iVar', new THREE.InstancedBufferAttribute(V, 1))
   const [cx, cy] = key.split(',').map((v) => (+v + 0.5) * CH)
   g.boundingSphere = new THREE.Sphere(new THREE.Vector3(cx, (lo + hi) / 2, -cy), CH * 0.75 + (hi - lo))
-  treeGroup.add(new THREE.Mesh(g, treeMat))
+  const mesh = new THREE.Mesh(g, treeMat)
+  mesh.renderOrder = -cy // chunks further north first
+  treeGroup.add(mesh)
 }
 treeGroup.visible = false
-scene.add(treeGroup)
+const treeScene = new THREE.Scene()
+treeScene.add(treeGroup)
 const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), tp = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0)
 
 // ---------- boats: pointed white hulls with a cabin, a mast on the sailboats ----------
@@ -376,12 +464,12 @@ for (let i = 0; i < nbo; i++) {
   q.setFromAxisAngle(up, a)
   m4.compose(tp.set(x, z, -y), q, sc.set(L, 1.1, L)); hulls.setMatrixAt(i, m4); cabins.setMatrixAt(i, m4)
   hulls.setColorAt(i, c.set(rand() < 0.86 ? 0xf6f6f2 : pick([0x2a4d7a, 0xb03a2e, 0x333840])))
-  if (rand() < 0.4) mastM.push(new THREE.Matrix4().makeTranslation(x, z + 1 + L * 0.55, -y).multiply(new THREE.Matrix4().makeScale(0.18, L * 1.1, 0.18)))
+  if (rand() < 0.4) mastM.push(new THREE.Matrix4().makeTranslation(x, z + 1 + L * 0.55, -y).multiply(new THREE.Matrix4().makeScale(0.3, L * 1.1, 0.3)))
 }
 const masts = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ color: 0xe8e8e4 }), mastM.length)
 mastM.forEach((m, i) => masts.setMatrixAt(i, m))
 for (const m of [hulls, cabins, masts]) { m.computeBoundingSphere(); m.castShadow = true; scene.add(m) }
-const boatDetail = [cabins, masts] // sub-pixel zoomed out, where they would only shimmer
+const boatDetail = [cabins, masts, roofUnits] // sub-pixel zoomed out, where they would only shimmer
 
 // ---------- bridges ----------
 const nbr = u32()
@@ -594,9 +682,9 @@ function updateShadows() {
 const rt = new THREE.WebGLRenderTarget(1, 1, { samples: 4, type: THREE.HalfFloatType })
 rt.depthTexture = new THREE.DepthTexture(1, 1)
 const ink = new THREE.ShaderMaterial({
-  uniforms: { tColor: { value: rt.texture }, tDepth: { value: rt.depthTexture }, px: { value: new THREE.Vector2() }, range: { value: 1 }, thr: { value: 1 }, ink: { value: 0 } },
+  uniforms: { tColor: { value: rt.texture }, tDepth: { value: rt.depthTexture }, sat: { value: 1.2 }, gain: { value: new THREE.Vector3(1, 1, 1) }, px: { value: new THREE.Vector2() }, range: { value: 1 }, thr: { value: 1 }, ink: { value: 0 } },
   vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
-  fragmentShader: `uniform sampler2D tColor, tDepth; uniform vec2 px; uniform float range, thr, ink; varying vec2 vUv;
+  fragmentShader: `uniform sampler2D tColor, tDepth; uniform vec2 px; uniform float range, thr, ink, sat; uniform vec3 gain; varying vec2 vUv;
     float d(vec2 o) { return texture2D(tDepth, vUv + o * px).x * range; }
     void main() {
       vec4 col = texture2D(tColor, vUv);
@@ -604,11 +692,13 @@ const ink = new THREE.ShaderMaterial({
       float lap = max(abs(d(vec2(1.0, 0.0)) + d(vec2(-1.0, 0.0)) - 2.0 * c), abs(d(vec2(0.0, 1.0)) + d(vec2(0.0, -1.0)) - 2.0 * c));
       float e = smoothstep(thr, thr * 6.0, lap) * ink; // faint creases fade in instead of switching on
       vec3 cc = mix(col.rgb, col.rgb * vec3(0.16, 0.18, 0.22), e);
-      cc = max(mix(vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), cc, 1.22), 0.0); // the illustration's saturation
+      cc = max(mix(vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), cc, sat), 0.0); // the illustration's saturation (less zoomed out)
+      cc *= gain; // and its brighter, cooler light (fitted on side-by-side renders)
       gl_FragColor = vec4(cc, 1.0);
       #include <colorspace_fragment>
+      gl_FragDepth = texture2D(tDepth, vUv).x; // the scene's depth, for the trees drawn on top
     }`,
-  depthTest: false, depthWrite: false,
+  depthTest: true, depthWrite: true, depthFunc: THREE.AlwaysDepth,
 })
 const post = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), ink)
 post.frustumCulled = false
@@ -621,8 +711,17 @@ function draw() {
   ink.uniforms.range.value = cam.far - cam.near
   ink.uniforms.thr.value = 0.35 / (K * cam.zoom) // metres per CSS pixel
   ink.uniforms.ink.value = THREE.MathUtils.smoothstep(cam.zoom, 0.05, 0.16)
+  ink.uniforms.sat.value = 0.96 + 0.24 * THREE.MathUtils.smoothstep(cam.zoom, 0.04, 0.2)
+  const near = THREE.MathUtils.smoothstep(cam.zoom, 0.04, 0.12) // the grade is for the close views; zoomed out the colours already match
+  ink.uniforms.gain.value.set(1 + 0.1 * near, 1 + 0.17 * near, 1 + 0.38 * near)
+  renderer.info.autoReset = false; renderer.info.reset()
   renderer.setRenderTarget(rt); renderer.render(scene, cam)
   renderer.setRenderTarget(null); renderer.render(postScene, postCam)
+  if (treeGroup.visible) {
+    treeMat.uniforms.sat.value = ink.uniforms.sat.value * 0.88
+    treeMat.uniforms.gain.value.copy(ink.uniforms.gain.value)
+    renderer.autoClear = false; renderer.render(treeScene, cam); renderer.autoClear = true
+  }
 }
 
 // trees under ~4 px and cars under ~2 px are not drawn (the ground has the crowns painted in)
@@ -635,6 +734,7 @@ function loop() {
   if (treesOn !== treeGroup.visible) { treeGroup.visible = treesOn; renderer.shadowMap.needsUpdate = true }
   groundFor(treesOn)
   for (const m of boatDetail) m.visible = cam.zoom >= 0.12
+  masts.visible = cam.zoom >= 0.3 // thinner than a pixel below that
   const carsOn = cam.zoom >= 0.1 && !document.hidden
   if (carsOn !== cars.visible) { cars.visible = carsOn; traffic.postMessage({ run: carsOn }) }
   updateShadows()
@@ -643,6 +743,6 @@ function loop() {
 cars.visible = false
 loop()
 document.addEventListener('visibilitychange', () => { dirty = true })
-window.view = { cam, controls, setView, zAt, roads }
+window.view = { cam, controls, setView, zAt, roads, renderer }
 status('')
 $('#hint').hidden = false

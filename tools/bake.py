@@ -24,9 +24,9 @@ CW = {0: 15.2, 1: 13.3, 2: 11.4, 3: 9.5, 4: 7.6}  # carriageway width by road cl
 SS = 2  # supersampling for the texture
 HSTEP = 20.0  # terrain grid, metres
 REGIONS = [
-    dict(name='main', osm='data/osm.json', bbox=(49.232, -123.172, 49.318, -123.080),
+    dict(name='main', osm='data/osm.json', parking='data/parking.json', bbox=(49.232, -123.172, 49.318, -123.080),
          sea=(49.2855, -123.160), home=(49.28, -123.12)),
-    dict(name='ubc', osm='data/osm-ubc.json', bbox=(49.240, -123.275, 49.282, -123.220),
+    dict(name='ubc', osm='data/osm-ubc.json', parking='data/parking-ubc.json', bbox=(49.240, -123.275, 49.282, -123.220),
          sea=(49.280, -123.245), home=(49.262, -123.248)),
 ]
 
@@ -159,12 +159,12 @@ AREA = {  # paint order, colour
     'residential': (0, (118, 152, 86)), 'commercial': (1, (162, 160, 152)), 'retail': (1, (165, 160, 150)),
     'industrial': (1, (150, 142, 128)), 'railway': (1, (140, 132, 120)), 'construction': (1, (176, 160, 130)),
     'brownfield': (1, (170, 155, 125)),
-    'grass': (2, (128, 170, 78)), 'meadow': (2, (138, 172, 82)), 'recreation_ground': (2, (122, 168, 76)),
-    'cemetery': (2, (118, 150, 84)), 'park': (2, (116, 162, 72)), 'garden': (3, (110, 156, 70)),
+    'grass': (2, (114, 156, 74)), 'meadow': (2, (138, 172, 82)), 'recreation_ground': (2, (110, 154, 72)),
+    'cemetery': (2, (118, 150, 84)), 'park': (2, (106, 150, 70)), 'garden': (3, (110, 156, 70)),
     'golf_course': (3, (126, 178, 80)), 'grassland': (2, (140, 170, 90)), 'scrub': (3, (98, 128, 66)),
     'playground': (4, (178, 160, 120)), 'pitch': (4, (98, 168, 70)), 'track': (5, (168, 142, 118)),
     'stadium': (4, (150, 150, 145)),
-    'wood': (5, (52, 92, 46)), 'forest': (5, (52, 92, 46)), 'wetland': (5, (92, 124, 82)),
+    'wood': (5, (36, 72, 48)), 'forest': (5, (36, 72, 48)), 'wetland': (5, (92, 124, 82)),
     'beach': (6, (226, 210, 168)), 'sand': (6, (222, 206, 164)),
     'marina': (-1, None), 'swimming_pool': (8, (96, 196, 222)),
 }
@@ -221,16 +221,19 @@ CITY_W = -123.2245  # Vancouver's western city limit (Blanca St); street-tree da
 q = lambda v: max(-32767, min(32767, int(round(v * 2))))  # half-metre int16
 out = bytearray()
 # tree colours, early autumn: shared with the page through meta.json (index = palette entry)
-TPAL = {0: [0x5d9a2e, 0x6fae3a, 0x4f8a2a, 0x7ab844, 0x3f7a2c, 0x8cc04a, 0x5a9638, 0x6a9e30],
+TPAL = {0: [0x3f8a2e, 0x4f9a36, 0x2f7a2c, 0x5aa040, 0x3a7030, 0x6aac44, 0x478e3a, 0x58962e],
         1: [0xc9a227, 0xd8b23a, 0xb8a434, 0xe0c048], 2: [0xd98f22, 0xe07a26, 0xc96a24, 0xe89a3a],
         3: [0xb8452a, 0xa8342c, 0xc0502e, 0x9a2f36], 4: [0x9a6a32, 0x8a7034, 0xa88a40],
-        5: [0x3f7a3a, 0x356e3a, 0x4a8440, 0x2f6634, 0x55904a, 0x3c7442]}
+        5: [0x2f5e3c, 0x2a5638, 0x376840, 0x244c30, 0x41744c, 0x30603e],
+        6: [0x3a6a30, 0x447436, 0x2f5e2c, 0x4e7c3a, 0x38642e]}  # broadleaf in the woods
 PAL_LIST = [c for k in sorted(TPAL) for c in TPAL[k]]
 PAL_AT = {k: sum(len(TPAL[j]) for j in sorted(TPAL) if j < k) for k in TPAL}
 
 
-def tree_colour(k):  # about a third of the deciduous trees have turned
+def tree_colour(k, wood=False):  # about a quarter of the deciduous trees have turned
     if k not in (0, 5) and random.random() < 0.7: k = 0
+    if k == 0 and wood: k = 6
+    if k == 3 and random.random() < 0.6: k = 2  # maples mostly orange, some red
     return PAL_AT[k] + random.randrange(len(TPAL[k]))
 
 
@@ -337,9 +340,9 @@ for R in REGIONS:
 
     dist = ndimage.distance_transform_edt(water) * RES
     t = np.clip(dist / 140, 0, 1)[..., None]
-    shallow, deep = np.array([78, 150, 196]), np.array([22, 70, 140])
+    shallow, deep = np.array([56, 122, 170]), np.array([22, 56, 104])
     wc = shallow * (1 - t) ** 1.6 + deep * (1 - (1 - t) ** 1.6)
-    wc = np.where((dist < 6)[..., None], np.array([120, 190, 210]), wc)
+    wc = np.where((dist < 6)[..., None], np.array([98, 162, 194]), wc)
     noise = ndimage.gaussian_filter(np.random.rand(TH, TW), 6)
     wc = wc * (0.92 + 0.16 * (noise - noise.min()) / (np.ptp(noise) + 1e-9))[..., None]
     wimg = Image.fromarray(wc.astype(np.uint8)).resize((W2, H2), Image.BILINEAR)
@@ -348,8 +351,8 @@ for R in REGIONS:
 
     for e in piers:
         sh = shapes(e)
-        if sh: fill_shape(dr, sh, (200, 196, 186))
-        else: dr.line([px(p) for p in line(e)], fill=(200, 196, 186), width=int(3 / RES * SS))
+        if sh: fill_shape(dr, sh, (184, 164, 128))
+        else: dr.line([px(p) for p in line(e)], fill=(184, 164, 128), width=int(3 / RES * SS))
     for l in rails: dr.line([px(p) for p in l], fill=(118, 108, 98), width=int(3 / RES * SS))
     for casing in (True, False):
         for l, w in sorted(roads, key=lambda r: r[1]):
@@ -468,7 +471,27 @@ for R in REGIONS:
             # each footprint pulled in by its own few centimetres: walls of overlapping or touching
             # buildings are never coplanar, so they cannot z-fight
             all_buildings.append((inset(r, random.uniform(0.03, 0.3)), base, h, mn, kind(t, h, c), roof))
-    print('buildings', len(all_buildings) - nb0)
+    # the same building mapped twice with different outlines (often two approximations of a round tower):
+    # keep the bigger one when most of a footprint is already covered by a kept one of about the same height
+    rows = sorted(all_buildings[nb0:], key=lambda b: -area(b[0]))
+    top = np.zeros((int(HM) + 2, int(WM) + 2), np.float32)
+    kept_b = []
+    for b in rows:
+        r, base, h, mn = b[0], b[1], b[2], b[3]
+        xs = [p[0] - X0 for p in r]; ys = [Y1 - p[1] for p in r]
+        x0_, y0_ = max(0, int(min(xs))), max(0, int(min(ys))); x1_, y1_ = min(top.shape[1], int(max(xs)) + 2), min(top.shape[0], int(max(ys)) + 2)
+        if x1_ <= x0_ or y1_ <= y0_: continue
+        m = Image.new('L', (x1_ - x0_, y1_ - y0_), 0)
+        ImageDraw.Draw(m).polygon([(x - x0_, y - y0_) for x, y in zip(xs, ys)], fill=1)
+        m = np.array(m, bool)
+        if m.sum() >= 4:
+            under = top[y0_:y1_, x0_:x1_][m]
+            same = (under > 0) & (np.abs(under - h) < max(3.0, 0.3 * h))
+            if same.mean() > 0.5 and mn == 0: continue
+        cell_ = top[y0_:y1_, x0_:x1_]; cell_[m] = np.maximum(cell_[m], h)
+        kept_b.append(b)
+    print('buildings', len(kept_b), 'dropped as duplicates', len(rows) - len(kept_b))
+    all_buildings[nb0:] = kept_b
 
     # ---------- trees ----------
     fp = ndimage.binary_dilation(np.array(footprint) > 0, iterations=1)
@@ -502,7 +525,7 @@ for R in REGIONS:
                 w_ = wood[i, j]
                 k = 5 if w_ and random.random() < 0.7 else random.choice([0, 0, 0, 0, 0, 1, 2, 3]) if not w_ else random.choice([0, 0, 0, 1])
                 hh = random.uniform(16, 38) if k == 5 else random.uniform(7, 16) + (4 if w_ else 0)
-                all_trees.append((x, y, zat(x, y), k, tree_colour(k), hh))
+                all_trees.append((x, y, zat(x, y), k, tree_colour(k, w_), hh))
     for x, y, k, h in city_trees:
         if inbox((x, y)) and not in_void(x, y) and not fp[cell(x, y)]: all_trees.append((x, y, zat(x, y), k, tree_colour(k), h))
     print('trees', len(all_trees) - nt0)
@@ -518,7 +541,7 @@ for R in REGIONS:
     # crowns painted into the ground: what the trees look like zoomed out, where the page skips them
     gd = ImageDraw.Draw(ground)
     for x, y, z, k, ci, h in all_trees[nt0:]:
-        r = max(0.6, (h * 0.17 if k == 5 else min(7, max(2, h * 0.28))) / RES)
+        r = max(0.8, (h * 0.24 if k == 5 else min(11, max(3.6, h * 0.48))) / RES)
         c = PAL_LIST[ci]; col = tuple(int(((c >> s_) & 255) * 0.82) for s_ in (16, 8, 0))
         cx_, cy_ = (x - X0) / RES, (Y1 - y) / RES
         gd.ellipse((cx_ - r, cy_ - r, cx_ + r, cy_ + r), fill=col)
@@ -641,9 +664,46 @@ for R in REGIONS:
                 zebra.append([(bx + dx * s1 + nx_ * s2, by + dy * s1 + ny_ * s2) for s1, s2 in ((-1.3, -0.28), (1.3, -0.28), (1.3, 0.28), (-1.3, 0.28))])
                 o += 1.1
     zebra_items = [(bbox_of(z), z) for z in zebra]
+    # parked cars: along the kerbs of residential and collector streets, and in rows on surface lots
+    CARC = [(243, 242, 236), (196, 200, 205), (43, 47, 53), (194, 58, 47), (47, 94, 166), (91, 96, 104), (34, 52, 90),
+            (63, 122, 75), (214, 204, 180), (139, 37, 51), (236, 235, 229), (154, 161, 170), (240, 194, 50)]
+    parked = []  # (x, y, angle)
+    for l, w in roads:
+        if w not in (4, 5, 6) or len(l) < 2: continue
+        half = w * 1.9 / 2 - 1.15
+        for (x1, y1), (x2, y2) in zip(l, l[1:]):
+            L = math.dist((x1, y1), (x2, y2))
+            if L < 14: continue
+            ux, uy = (x2 - x1) / L, (y2 - y1) / L
+            for side in (1, -1):
+                s_ = 8 + random.random() * 3
+                while s_ < L - 8:
+                    if random.random() < 0.55: parked.append((x1 + ux * s_ - uy * half * side, y1 + uy * s_ + ux * half * side, math.atan2(uy, ux)))
+                    s_ += random.uniform(5.8, 6.8)
+    for e in json.load(open(R['parking']))['elements']:
+        for outers, _ in shapes(e):
+            r = outers[0]
+            if len(r) < 4 or area(r) < 150: continue
+            cx_, cy_, ang, hl, hw, ar = obb(r)
+            ca, sa = math.cos(ang), math.sin(ang)
+            v = -hw + 3
+            while v < hw - 2.4:  # two rows nose to nose, then an aisle
+                for dv in (0, 5.2):
+                    if v + dv > hw - 2.4: break
+                    u = -hl + 1.5
+                    while u < hl - 1.2:
+                        x, y = cx_ + u * ca - (v + dv) * sa, cy_ + u * sa + (v + dv) * ca
+                        if inside((x, y), r) and random.random() < 0.72: parked.append((x, y, ang + math.pi / 2))
+                        u += 2.6
+                v += 16.4
+    park_cells = {}
+    for x, y, a in parked:
+        if inbox((x, y)): park_cells.setdefault((int(x // TILE), int(y // TILE)), []).append((x, y, a, random.choice(CARC)))
+    lots = [(bbox_of(r), r) for e in json.load(open(R['parking']))['elements'] for o, _ in shapes(e) for r in o[:1]]
+    print('parked cars', len(parked), 'lots', len(lots))
     tree_cells = {}
     for x, y, z, k, ci, h in all_trees[nt0:]:
-        tree_cells.setdefault((int((x + 0.42 * h) // TILE), int((y + 0.38 * h) // TILE)), []).append((x + 0.42 * h, y + 0.38 * h, (h * 0.2 if k == 5 else min(8.5, max(2.6, h * 0.36)))))
+        tree_cells.setdefault((int((x + 0.42 * h) // TILE), int((y + 0.38 * h) // TILE)), []).append((x + 0.42 * h, y + 0.38 * h, (h * 0.24 if k == 5 else min(11, max(3.6, h * 0.48)))))
     S2 = int(TILE / TRES) * 2  # drawn at twice the size, then halved
     kpx, n_ = S2 / TILE, int(TILE / RES)
     wc8 = wc.astype(np.uint8)
@@ -668,14 +728,22 @@ for R in REGIONS:
                     for r in inners: d.polygon([P(p) for p in r], fill=(146, 150, 126))
             wm = Image.fromarray((wcrop * 255).astype(np.uint8)).resize((S2, S2), Image.BILINEAR).filter(ImageFilter.GaussianBlur(3))
             img.paste(Image.fromarray(crop(wc8, 0)).resize((S2, S2), Image.BILINEAR), (0, 0), wm)
+            ys_, xs_ = np.nonzero(wcrop[::4, ::4])
+            if len(xs_):  # small wave marks on the water, like the drawing's
+                for k_ in np.random.choice(len(xs_), min(len(xs_), 900), replace=False):
+                    px_, py_ = (xs_[k_] * 4 + random.random() * 4) * S2 / n_, (ys_[k_] * 4 + random.random() * 4) * S2 / n_
+                    L_ = random.uniform(1.2, 3) * kpx
+                    d.line([(px_, py_), (px_ + L_, py_ - L_ * 0.12)], fill=(70, 128, 176), width=max(2, int(0.35 * kpx)))
             for it in pier_items:
                 if inb(it[0]):
-                    if len(it) == 2: d.polygon([P(p) for p in it[1]], fill=(200, 196, 186))
-                    else: d.line([P(p) for p in it[2]], fill=(200, 196, 186), width=int(3 * kpx))
+                    if len(it) == 2: d.polygon([P(p) for p in it[1]], fill=(184, 164, 128))
+                    else: d.line([P(p) for p in it[2]], fill=(184, 164, 128), width=int(3 * kpx))
             for b, l in rail_items:
                 if inb(b): d.line([P(p) for p in l], fill=(112, 102, 92), width=int(3 * kpx))
             # real street widths: carriageway, then (outside downtown) a grass boulevard, then the sidewalk
-            vis = [(l, w * 1.9 if w >= 2.4 else w, not inside(l[len(l) // 2], DT)) for b, l, w in road_items if inb(b)]
+            for b, r in lots:
+                if inb(b): d.polygon([P(p) for p in r], fill=(122, 125, 129))
+            vis = [(l, w * 1.9 if w >= 2.4 else w, w == 4 and not inside(l[len(l) // 2], DT)) for b, l, w in road_items if inb(b)]
             for layer in (0, 1, 2):
                 for l, w, blvd in sorted(vis, key=lambda r: r[1]):
                     pts = [P(p) for p in l]
@@ -687,6 +755,26 @@ for R in REGIONS:
                     d.line(pts, fill=col, width=int((w + extra) * kpx), joint='curve')
             for l, w, _ in vis:
                 if w >= 11: d.line([P(p) for p in l], fill=(222, 196, 92), width=max(2, int(0.35 * kpx)))
+                if w >= 11:  # dashed lane lines between the lanes of each direction
+                    for side in (1, -1):
+                        off = w / 4 * side
+                        for (x1, y1), (x2, y2) in zip(l, l[1:]):
+                            L = math.dist((x1, y1), (x2, y2))
+                            if L < 1: continue
+                            ux, uy = (x2 - x1) / L, (y2 - y1) / L
+                            s_ = 1.0
+                            while s_ < L - 3:
+                                a_ = (x1 + ux * s_ - uy * off, y1 + uy * s_ + ux * off)
+                                b_ = (a_[0] + ux * 3, a_[1] + uy * 3)
+                                d.line([P(a_), P(b_)], fill=(226, 226, 220), width=max(2, int(0.3 * kpx)))
+                                s_ += 9
+            for (x, y, a, col) in [t for a_ in (-1, 0, 1) for b_ in (-1, 0, 1) for t in park_cells.get((ti + a_, tj + b_), [])]:
+                ca, sa = math.cos(a), math.sin(a)
+                rect = lambda hl, hw, dx=0, dy=0: [P((x + dx + u * ca - v * sa, y + dy + u * sa + v * ca)) for u, v in ((-hl, -hw), (hl, -hw), (hl, hw), (-hl, hw))]
+                d.polygon(rect(2.3, 1.0, 0.35, -0.35), fill=(70, 72, 76))  # shadow
+                d.polygon(rect(2.2, 0.9), fill=col)
+                d.polygon(rect(1.15, 0.78, ca * 0.15, sa * 0.15), fill=(40, 52, 64))  # glass
+                d.polygon(rect(0.75, 0.72, -ca * 0.05, -sa * 0.05), fill=tuple(min(255, int(v * 1.08)) for v in col))  # roof
             for b, z in zebra_items:
                 if inb(b): d.polygon([P(p) for p in z], fill=(232, 232, 226))
             sh = Image.new('L', (S2, S2), 0); sd2 = ImageDraw.Draw(sh)
