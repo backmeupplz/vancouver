@@ -30,6 +30,7 @@ const world = { x0: BASE.x0, y0: BASE.y0, x1: BASE.x0 + BASE.width * BASE.k, y1:
 // ---------------------------------------------------------------- GL
 const canvas = $('#map')
 const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, premultipliedAlpha: true })
+if (!gl) { $('#nogl').hidden = false; $('#controls').hidden = $('#info').hidden = true; throw new Error('WebGL 2 is not available') }
 const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s }
 const prog = gl.createProgram()
 gl.attachShader(prog, sh(gl.VERTEX_SHADER, `#version 300 es

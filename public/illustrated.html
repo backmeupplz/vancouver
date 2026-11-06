@@ -34,6 +34,9 @@
   #info.min .more { display: none; }
   #info details { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
   #info summary { cursor: pointer; color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; font-weight: 650; }
+  #nogl { left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(360px, calc(100% - 32px)); padding: 16px; font-size: 14px; }
+  #nogl a { color: var(--text); }
+  [hidden] { display: none !important; }
   #controls { left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; gap: 4px; padding: 5px; }
   #controls button { font: inherit; color: var(--text); background: none; border: 0; border-radius: 8px; padding: 7px 11px; cursor: pointer; white-space: nowrap; }
   #controls button:hover { background: rgba(255,255,255,0.08); }
@@ -61,6 +64,7 @@
     </details>
   </div>
 </div>
+<div id="nogl" class="panel" hidden>This viewer needs WebGL&nbsp;2, which this browser doesn't support or has turned off. Try a current Chrome, Firefox or Safari, or see @imnotchalk's illustration on the original site, <a href="https://vancouver.isoworld.xyz/">vancouver.isoworld.xyz</a>.</div>
 <div id="controls" class="panel">
   <button id="zoomOut" title="Zoom out (−)" aria-label="Zoom out">−</button>
   <button id="zoomIn" title="Zoom in (+)" aria-label="Zoom in">+</button>
