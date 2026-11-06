@@ -493,6 +493,7 @@ if (!fromHash()) { // as the Illustrated tab opens: the whole central drawing
 }
 fit()
 addEventListener('resize', fit)
+queueMicrotask(() => onView()) // the tab links carry the view from the start
 addEventListener('hashchange', () => { fromHash(); dirty = true })
 let hashT = 0
 function onView() {
