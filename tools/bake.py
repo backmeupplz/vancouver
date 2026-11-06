@@ -339,10 +339,10 @@ for R in REGIONS:
     in_void = lambda x, y: void[cell(x, y)]
 
     dist = ndimage.distance_transform_edt(water) * RES
-    t = np.clip(dist / 140, 0, 1)[..., None]
-    shallow, deep = np.array([56, 122, 170]), np.array([22, 56, 104])
+    t = np.clip(dist / 45, 0, 1)[..., None]
+    shallow, deep = np.array([40, 98, 150]), np.array([22, 58, 108])
     wc = shallow * (1 - t) ** 1.6 + deep * (1 - (1 - t) ** 1.6)
-    wc = np.where((dist < 6)[..., None], np.array([98, 162, 194]), wc)
+    wc = np.where((dist < 3)[..., None], np.array([70, 128, 168]), wc)
     noise = ndimage.gaussian_filter(np.random.rand(TH, TW), 6)
     wc = wc * (0.92 + 0.16 * (noise - noise.min()) / (np.ptp(noise) + 1e-9))[..., None]
     wimg = Image.fromarray(wc.astype(np.uint8)).resize((W2, H2), Image.BILINEAR)
@@ -706,6 +706,12 @@ for R in REGIONS:
         tree_cells.setdefault((int((x + 0.42 * h) // TILE), int((y + 0.38 * h) // TILE)), []).append((x + 0.42 * h, y + 0.38 * h, (h * 0.24 if k == 5 else min(11, max(3.6, h * 0.48)))))
     S2 = int(TILE / TRES) * 2  # drawn at twice the size, then halved
     kpx, n_ = S2 / TILE, int(TILE / RES)
+    RIPPLE = Image.new('L', (S2, S2), 0); rd_ = ImageDraw.Draw(RIPPLE)  # 4 m lattice: seamless across tiles
+    for gy in range(0, TILE, 4):
+        for gx in range(0, TILE, 4):
+            cx_, cy_ = (gx + (2 if (gy // 4) % 2 else 0)) * kpx, gy * kpx
+            rr = 0.55 * kpx
+            rd_.polygon([(cx_ - rr * 1.6, cy_), (cx_, cy_ - rr), (cx_ + rr * 1.6, cy_), (cx_, cy_ + rr)], fill=int(60 + 50 * random.random()))
     wc8 = wc.astype(np.uint8)
     tiles = []
     for ti in range(int(X0 // TILE), int(X1 // TILE) + 1):
@@ -728,12 +734,9 @@ for R in REGIONS:
                     for r in inners: d.polygon([P(p) for p in r], fill=(146, 150, 126))
             wm = Image.fromarray((wcrop * 255).astype(np.uint8)).resize((S2, S2), Image.BILINEAR).filter(ImageFilter.GaussianBlur(3))
             img.paste(Image.fromarray(crop(wc8, 0)).resize((S2, S2), Image.BILINEAR), (0, 0), wm)
-            ys_, xs_ = np.nonzero(wcrop[::4, ::4])
-            if len(xs_):  # small wave marks on the water, like the drawing's
-                for k_ in np.random.choice(len(xs_), min(len(xs_), 900), replace=False):
-                    px_, py_ = (xs_[k_] * 4 + random.random() * 4) * S2 / n_, (ys_[k_] * 4 + random.random() * 4) * S2 / n_
-                    L_ = random.uniform(1.2, 3) * kpx
-                    d.line([(px_, py_), (px_ + L_, py_ - L_ * 0.12)], fill=(70, 128, 176), width=max(2, int(0.35 * kpx)))
+            if wcrop.any():  # the drawing's ripples: a lattice of small light diamonds on open water, fading near the shore
+                shore = Image.fromarray((crop(dist > 8, False) * 255).astype(np.uint8)).resize((S2, S2), Image.BILINEAR).filter(ImageFilter.GaussianBlur(6))
+                img.paste(Image.new('RGB', (S2, S2), (78, 138, 186)), (0, 0), Image.fromarray((np.array(RIPPLE) * (np.array(shore) / 255.0)).astype(np.uint8)))
             for it in pier_items:
                 if inb(it[0]):
                     if len(it) == 2: d.polygon([P(p) for p in it[1]], fill=(184, 164, 128))

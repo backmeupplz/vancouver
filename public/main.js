@@ -464,9 +464,9 @@ for (let i = 0; i < nbo; i++) {
   q.setFromAxisAngle(up, a)
   m4.compose(tp.set(x, z, -y), q, sc.set(L, 1.1, L)); hulls.setMatrixAt(i, m4); cabins.setMatrixAt(i, m4)
   hulls.setColorAt(i, c.set(rand() < 0.86 ? 0xf6f6f2 : pick([0x2a4d7a, 0xb03a2e, 0x333840])))
-  if (rand() < 0.4) mastM.push(new THREE.Matrix4().makeTranslation(x, z + 1 + L * 0.55, -y).multiply(new THREE.Matrix4().makeScale(0.3, L * 1.1, 0.3)))
+  if (rand() < 0.4) mastM.push(new THREE.Matrix4().makeTranslation(x - Math.cos(a) * L * 0.08, z + 1 + L * 0.45, -y + Math.sin(a) * L * 0.08).multiply(new THREE.Matrix4().makeScale(0.22, L * 0.9, 0.22)))
 }
-const masts = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ color: 0xe8e8e4 }), mastM.length)
+const masts = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ color: 0xf4f4f0 }), mastM.length)
 mastM.forEach((m, i) => masts.setMatrixAt(i, m))
 for (const m of [hulls, cabins, masts]) { m.computeBoundingSphere(); m.castShadow = true; scene.add(m) }
 const boatDetail = [cabins, masts, roofUnits] // sub-pixel zoomed out, where they would only shimmer
