@@ -25,7 +25,7 @@
   #hint { left: 12px; bottom: 12px; }
   #credit { right: 12px; bottom: 12px; }
   a { color: #9cc3e6; }
-  @media (max-width: 600px) { #hint { display: none } }
+  @media (max-width: 600px) { #hint { display: none } #credit { left: 12px; font-size: 11px } }
 </style>
 <link rel="stylesheet" href="tabs.css">
 <script type="importmap">{ "imports": { "three": "./vendor/three.module.min.js" } }</script>
@@ -34,8 +34,8 @@
 <canvas></canvas>
 <nav class="tabs"><a href="/" aria-current="page">In code</a><a href="/illustrated">Illustrated</a></nav>
 <div id="status">Loading Vancouver…</div>
-<div id="hint" class="corner" hidden>Drag to pan, scroll to zoom, right-drag to tilt and turn</div>
-<div id="credit" class="corner">Map data © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a> · <a href="https://git.borodutch.com/backmeupplz/vancouver">Source code</a></div>
+<div id="hint" class="corner" hidden>Drag to pan, scroll to zoom, right-drag to turn</div>
+<div id="credit" class="corner">Map data © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>, <a href="https://opendata.vancouver.ca/">City of Vancouver</a> (trees, LiDAR heights), terrain MRDEM (NRCan) · <a href="https://git.borodutch.com/backmeupplz/vancouver">Source code</a></div>
 <script type="module" src="main.js"></script>
 </body>
 </html>

@@ -192,9 +192,25 @@ function frame(now) {
     gl.disable(gl.BLEND)
   }
   const key = `${v.cx},${v.cy},${v.s},${cw},${ch}`
-  if (key !== lastSent) { lastSent = key; worker.postMessage({ view: { vx: v.cx - cw / 2 / v.s, vy: v.cy - ch / 2 / v.s, s: v.s, cw, ch, dpr } }) }
+  if (key !== lastSent) { lastSent = key; shareView(); worker.postMessage({ view: { vx: v.cx - cw / 2 / v.s, vy: v.cy - ch / 2 / v.s, s: v.s, cw, ch, dpr } }) }
   if (anim || fling || uploads.length) render()
 }
+
+// the view travels in the URL (#x,y,s in drawing px), shared with the In code tab
+let hashT = 0
+function shareView() {
+  clearTimeout(hashT)
+  hashT = setTimeout(() => {
+    const h = `#${Math.round(v.cx)},${Math.round(v.cy)},${v.s.toFixed(4)}`
+    history.replaceState(null, '', h)
+    for (const a of document.querySelectorAll('.tabs a')) a.hash = h
+  }, 150)
+}
+function fromHash() {
+  const [x, y, s] = location.hash.slice(1).split(',').map(Number)
+  if ([x, y, s].every(Number.isFinite) && s > 0) { anim = null; Object.assign(v, { cx: x, cy: y, s }); render(); return true }
+}
+addEventListener('hashchange', fromHash)
 
 // ---------------------------------------------------------------- input
 const pts = new Map()
@@ -249,4 +265,4 @@ addEventListener('keydown', (e) => {
 })
 addEventListener('resize', resize)
 if (phone) $('#about').click()
-resize(); fitDrawing(true)
+resize(); if (!fromHash()) fitDrawing(true)

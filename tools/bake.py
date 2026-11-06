@@ -1,33 +1,40 @@
-# Bakes data/osm.json into the files the page draws:
-#   public/ground.jpg   top-down ground texture (water, parks, beaches, streets)
-#   public/city.bin     buildings, trees, boats, bridges as packed int16/uint16
-#   public/meta.json    world size + landmarks
-# Run: uv run --with numpy,pillow,scipy python3 tools/bake.py
-import json, math, random, struct
+# Bakes the downloaded data into the files the page draws, for two regions (central Vancouver and UBC):
+#   public/ground-<region>.jpg   top-down ground texture (water, parks, beaches, streets)
+#   public/city.bin              terrain, buildings, trees, boats, bridges and the road graph, packed
+#   public/meta.json             regions, landmarks
+# Coordinates are isoworld's (vancouver.isoworld.xyz) east-north-up metres, so the code and the
+# illustrated tab share one camera: origin and scale fitted against their road network, heights
+# against MRDEM (see FRAME below).
+# Run: uv run --with numpy,pillow,scipy,rasterio python3 tools/bake.py
+import csv, heapq, json, math, random, struct
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 from scipy import ndimage
 
 random.seed(7)
-S, W, N, E = 49.232, -123.172, 49.318, -123.080
-LAT0, LON0 = (S + N) / 2, (W + E) / 2
-KX = 111320 * math.cos(math.radians(LAT0))
-KY = 110574
+np.random.seed(7)
+# ---------- frame: isoworld's ENU, fitted (ICP on 4400 junctions, 2.9 m median; heights 1.5 m sd) ----------
+LAT_O, LON_O, SC = 49.28606407, -123.10901045, 0.99744659
+KX = 111320 * math.cos(math.radians(49.2845)) / SC
+KY = 110574 / SC
+ZC = (-19.0387, -3.697e-4, -1.2792e-4, -1.6638e-7)  # their z = DEM + c + aE + bN + d r^2
 RES = 2.0  # metres per texture pixel
 SS = 2  # supersampling for the texture
-WM, HM = (E - W) * KX, (N - S) * KY  # world size, metres
-TW, TH = int(WM / RES), int(HM / RES)
+HSTEP = 20.0  # terrain grid, metres
+REGIONS = [
+    dict(name='main', osm='data/osm.json', bbox=(49.232, -123.172, 49.318, -123.080),
+         sea=(49.2855, -123.160), home=(49.28, -123.12)),
+    dict(name='ubc', osm='data/osm-ubc.json', bbox=(49.240, -123.275, 49.282, -123.220),
+         sea=(49.280, -123.245), home=(49.262, -123.248)),
+]
 
 
-def xy(p):  # lat/lon -> metres, origin at centre, +y north
-    return ((p['lon'] - LON0) * KX, (p['lat'] - LAT0) * KY)
+def ll(lat, lon):  # lat/lon -> world metres (east, north)
+    return ((lon - LON_O) * KX, (lat - LAT_O) * KY)
 
 
-def px(pt, ss=SS):  # metres -> texture pixel
-    return ((pt[0] + WM / 2) / RES * ss, (HM / 2 - pt[1]) / RES * ss)
-
-
-els = json.load(open('data/osm.json'))['elements']
+def xy(p):
+    return ll(p['lat'], p['lon'])
 
 
 def join_rings(lines):
@@ -66,9 +73,71 @@ def line(e):
     return [xy(p) for p in e.get('geometry', []) if p]
 
 
+def inside(pt, poly):
+    x, y = pt; c = False
+    for i in range(len(poly)):
+        (x1, y1), (x2, y2) = poly[i], poly[i - 1]
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1: c = not c
+    return c
+
+
+def area(r):
+    return abs(sum(r[i][0] * r[i - 1][1] - r[i - 1][0] * r[i][1] for i in range(len(r)))) / 2
+
+
+def cent(r):
+    return (sum(p[0] for p in r) / len(r), sum(p[1] for p in r) / len(r))
+
+
+def hnum(v):
+    try: return float(str(v).split(';')[0].replace('m', '').strip())
+    except ValueError: return None
+
+
+def obb(r):
+    """Smallest rectangle around a ring: (cx, cy, angle, half-length, half-width), length >= width."""
+    best = None
+    for i in range(len(r)):
+        (x1, y1), (x2, y2) = r[i - 1], r[i]
+        a = math.atan2(y2 - y1, x2 - x1); ca, sa = math.cos(a), math.sin(a)
+        us = [x * ca + y * sa for x, y in r]; vs = [-x * sa + y * ca for x, y in r]
+        ar = (max(us) - min(us)) * (max(vs) - min(vs))
+        if best is None or ar < best[0]: best = (ar, a, min(us), max(us), min(vs), max(vs))
+    ar, a, u0, u1, v0, v1 = best
+    uc, vc = (u0 + u1) / 2, (v0 + v1) / 2
+    cx, cy = uc * math.cos(a) - vc * math.sin(a), uc * math.sin(a) + vc * math.cos(a)
+    hl, hw = (u1 - u0) / 2, (v1 - v0) / 2
+    if hw > hl: a += math.pi / 2; hl, hw = hw, hl
+    return cx, cy, a, hl, hw, ar
+
+
+# ---------- terrain (MRDEM 30 m, NRCan, OGL-Canada) ----------
+def terrain(x0, y0, nx, ny):
+    import rasterio
+    from rasterio.warp import transform
+    xs = x0 + np.arange(nx) * HSTEP; ys = y0 + np.arange(ny) * HSTEP
+    E, N = np.meshgrid(xs, ys)
+    lon = LON_O + E / KX; lat = LAT_O + N / KY
+    url = '/vsicurl/https://canelevation-dem.s3.ca-central-1.amazonaws.com/mrdem-30/mrdem-30-dtm.tif'
+    with rasterio.open(url) as src:
+        px_, py_ = transform('EPSG:4326', src.crs, lon.ravel().tolist(), lat.ravel().tolist())
+        px_, py_ = np.array(px_), np.array(py_)
+        win = rasterio.windows.from_bounds(px_.min() - 90, py_.min() - 90, px_.max() + 90, py_.max() + 90, src.transform)
+        win = win.round_offsets().round_lengths()
+        a = src.read(1, window=win).astype(np.float64)
+        t = src.window_transform(win)
+    c = (px_ - t.c) / t.a - 0.5; r = (py_ - t.f) / t.e - 0.5
+    dem = ndimage.map_coordinates(np.nan_to_num(a, nan=0.0), [r, c], order=1, mode='nearest').reshape(ny, nx)
+    return np.maximum(dem, 0), E, N
+
+
+def zfit(dem, E, N):
+    return dem + ZC[0] + ZC[1] * E + ZC[2] * N + ZC[3] * (E * E + N * N)
+
+
 # ---------- classify ----------
 AREA = {  # paint order, colour
-    'residential': (0, (128, 148, 100)), 'commercial': (1, (162, 160, 152)), 'retail': (1, (165, 160, 150)),
+    'residential': (0, (118, 152, 86)), 'commercial': (1, (162, 160, 152)), 'retail': (1, (165, 160, 150)),
     'industrial': (1, (150, 142, 128)), 'railway': (1, (140, 132, 120)), 'construction': (1, (176, 160, 130)),
     'brownfield': (1, (170, 155, 125)),
     'grass': (2, (128, 170, 78)), 'meadow': (2, (138, 172, 82)), 'recreation_ground': (2, (122, 168, 76)),
@@ -83,321 +152,454 @@ AREA = {  # paint order, colour
 ROAD = {'motorway': 8, 'trunk': 8, 'primary': 7, 'secondary': 6, 'tertiary': 5, 'trunk_link': 5, 'primary_link': 5,
         'secondary_link': 5, 'tertiary_link': 4, 'residential': 4, 'unclassified': 4, 'living_street': 3,
         'service': 2.4, 'pedestrian': 3, 'footway': 1.2, 'cycleway': 1.4, 'path': 1.1, 'track': 1.6, 'steps': 1.2}
+# road class for traffic: 0 motorway/trunk, 1 primary, 2 secondary, 3 tertiary, 4 residential
+DRIVE = {'motorway': 0, 'trunk': 0, 'motorway_link': 0, 'trunk_link': 1, 'primary': 1, 'primary_link': 1,
+         'secondary': 2, 'secondary_link': 2, 'tertiary': 3, 'tertiary_link': 3, 'residential': 4, 'unclassified': 4,
+         'living_street': 4}
 
-areas, waters, coast, roads, bridges, rails, piers, marinas, blds, parts = [], [], [], [], [], [], [], [], [], []
-special = {}
-for e in els:
-    t = e.get('tags', {})
-    if 'building:part' in t:
-        parts.append(e); continue
-    if 'building' in t:
-        blds.append(e); continue
-    if t.get('natural') == 'coastline':
-        coast.append(line(e)); continue
-    if t.get('natural') == 'water' or ('water' in t and t.get('natural') != 'coastline'):
-        waters.append(e); continue
-    if t.get('leisure') == 'marina':
-        marinas.append(e)
-    if t.get('man_made') in ('pier', 'breakwater'):
-        piers.append(e); continue
-    if 'railway' in t and e['type'] == 'way' and t['railway'] in ('rail', 'light_rail') and t.get('tunnel') != 'yes':
-        rails.append(line(e)); continue
-    hw = t.get('highway')
-    if hw and e['type'] == 'way':
-        if t.get('tunnel') in ('yes', 'building_passage') or t.get('area') == 'yes' or hw not in ROAD: continue
-        if t.get('bridge') == 'yes' and hw in ('trunk', 'primary', 'secondary', 'trunk_link', 'tertiary', 'cycleway', 'footway'):
-            bridges.append((line(e), ROAD[hw], t.get('name', '')))
-        else:
-            roads.append((line(e), ROAD[hw]))
-        continue
-    for k in ('natural', 'landuse', 'leisure'):
-        if t.get(k) in AREA and AREA[t[k]][1]:
-            areas.append((AREA[t[k]][0], AREA[t[k]][1], e, t[k])); break
-
-# ---------- texture ----------
-W2, H2 = TW * SS, TH * SS
-img = Image.new('RGB', (W2, H2), (146, 150, 126))
-dr = ImageDraw.Draw(img)
+# LiDAR footprints (City of Vancouver 2009): height above ground and roof type, indexed by centroid
+lidar = {}
+for f in json.load(open('data/bf2009.geojson'))['features']:
+    p = f['properties']; g = p.get('geo_point_2d')
+    if not g or p.get('maxht_m') is None: continue
+    x, y = ll(g['lat'], g['lon'])
+    lidar.setdefault((int(x // 40), int(y // 40)), []).append((x, y, p))
+print('lidar footprints', sum(map(len, lidar.values())))
 
 
-def fill_shape(draw, sh, col, hole=None):
-    for outers, inners in sh:
-        for r in outers: draw.polygon([px(p) for p in r], fill=col)
-        for r in inners: draw.polygon([px(p) for p in r], fill=hole if hole is not None else (146, 150, 126))
+def lidar_for(r):
+    xs = [p[0] for p in r]; ys = [p[1] for p in r]; best = None
+    for gx in range(int(min(xs) // 40), int(max(xs) // 40) + 1):
+        for gy in range(int(min(ys) // 40), int(max(ys) // 40) + 1):
+            for x, y, p in lidar.get((gx, gy), []):
+                if inside((x, y), r) and (best is None or (p.get('area_m2') or 0) > (best.get('area_m2') or 0)): best = p
+    return best
 
 
-# land-use classes, low to high
-woodmask = Image.new('L', (TW, TH), 0); wd = ImageDraw.Draw(woodmask)
-parkmask = Image.new('L', (TW, TH), 0); pd = ImageDraw.Draw(parkmask)
-resmask = Image.new('L', (TW, TH), 0); rd = ImageDraw.Draw(resmask)
-for order, col, e, kind in sorted(areas, key=lambda a: a[0]):
-    sh = shapes(e)
-    jit = tuple(max(0, min(255, c + random.randint(-6, 6))) for c in col)
-    for outers, inners in sh:
-        # holes in multipolygons: paint by mask so lower layers show through
-        if inners:
-            xs = [px(p) for r in outers for p in r]
-            x0, y0 = int(max(0, min(p[0] for p in xs))), int(max(0, min(p[1] for p in xs)))
-            x1, y1 = int(min(W2, max(p[0] for p in xs)) + 1), int(min(H2, max(p[1] for p in xs)) + 1)
-            if x1 <= x0 or y1 <= y0: continue
-            m = Image.new('L', (x1 - x0, y1 - y0), 0); md = ImageDraw.Draw(m)
-            for r in outers: md.polygon([(a - x0, b - y0) for a, b in map(px, r)], fill=255)
-            for r in inners: md.polygon([(a - x0, b - y0) for a, b in map(px, r)], fill=0)
-            img.paste(jit, (x0, y0, x1, y1), m)
-        else:
-            for r in outers: dr.polygon([px(p) for p in r], fill=jit)
-        tgt = wd if kind in ('wood', 'forest') else pd if kind in ('park', 'grass', 'garden', 'recreation_ground', 'cemetery', 'meadow', 'golf_course', 'grassland', 'scrub') else rd if kind == 'residential' else None
-        if tgt:
-            for r in outers: tgt.polygon([px(p, 1) for p in r], fill=255)
-            for r in inners: tgt.polygon([px(p, 1) for p in r], fill=0)
+# public trees (City of Vancouver): genus decides the autumn colour class
+FALLC = {  # 1 yellow, 2 orange, 3 red, 4 brown, 5 conifer; 0 stays green
+    1: 'FRAXINUS TILIA BETULA GINKGO GLEDITSIA CERCIDIPHYLLUM ULMUS LIRIODENDRON ZELKOVA POPULUS SALIX CATALPA ROBINIA KOELREUTERIA',
+    2: 'PRUNUS MALUS SORBUS PYRUS AMELANCHIER STEWARTIA PARROTIA CRATAEGUS METASEQUOIA TAXODIUM CARPINUS',
+    3: 'ACER LIQUIDAMBAR NYSSA CORNUS OXYDENDRUM CERCIS',
+    4: 'QUERCUS FAGUS AESCULUS PLATANUS CASTANEA JUGLANS',
+    5: 'THUJA PSEUDOTSUGA PICEA PINUS CHAMAECYPARIS TSUGA ABIES SEQUOIADENDRON CEDRUS SEQUOIA TAXUS CUPRESSOCYPARIS ARAUCARIA CALOCEDRUS',
+}
+GENUS = {g: k for k, s in FALLC.items() for g in s.split()}
+city_trees = []
+with open('data/trees.csv', encoding='utf-8-sig') as fh:
+    for row in csv.DictReader(fh, delimiter=';'):
+        try:
+            lat, lon = map(float, row['geo_point_2d'].split(','))
+            h = float(row['height_m'] or 0) or 8.0
+        except ValueError: continue
+        x, y = ll(lat, lon)
+        k = GENUS.get(row['genus_name'], 0)
+        if k == 0 and random.random() < 0.15: k = random.choice([1, 2, 3])  # unknown genera turn too
+        city_trees.append((x, y, k, h))
+print('city trees', len(city_trees))
+CITY_W = -123.2245  # Vancouver's western city limit (Blanca St); street-tree data covers the city only
 
-# sea: coastline lines are walls, flood from English Bay
-wall = Image.new('L', (TW, TH), 0); wdw = ImageDraw.Draw(wall)
-for l in coast: wdw.line([px(p, 1) for p in l], fill=255, width=2)
-lab, _ = ndimage.label(np.array(wall) == 0)
-seed = px(xy({'lat': 49.2855, 'lon': -123.160}), 1)
-sea = lab == lab[int(seed[1]), int(seed[0])]
-sea |= ndimage.binary_dilation(sea) & (np.array(wall) > 0)  # swallow the wall line
-water = sea.copy()
-lakes = Image.new('L', (TW, TH), 0); ld = ImageDraw.Draw(lakes)
-for e in waters:
-    for outers, inners in shapes(e):
-        for r in outers: ld.polygon([px(p, 1) for p in r], fill=255)
-        for r in inners: ld.polygon([px(p, 1) for p in r], fill=0)
-water |= np.array(lakes) > 0
-print('sea fraction', sea.mean())
-# the North Shore is cut away into the dark, like the painting: every big land
-# mass that is not connected to Vancouver itself
-land_lab, nl = ndimage.label(~water)
-home = px(xy({'lat': 49.28, 'lon': -123.12}), 1)
-sizes = ndimage.sum(np.ones_like(land_lab), land_lab, range(nl + 1))
-void = (land_lab != land_lab[int(home[1]), int(home[0])]) & (sizes[land_lab] * RES * RES > 300000) & (land_lab > 0)
-in_void = lambda x, y: void[min(TH - 1, max(0, int((HM / 2 - y) / RES))), min(TW - 1, max(0, int((x + WM / 2) / RES)))]
-
-# water colour by distance to shore
-dist = ndimage.distance_transform_edt(water) * RES
-t = np.clip(dist / 140, 0, 1)[..., None]
-shallow, deep = np.array([78, 150, 196]), np.array([22, 70, 140])
-wc = shallow * (1 - t) ** 1.6 + deep * (1 - (1 - t) ** 1.6)
-wc = np.where((dist < 6)[..., None], np.array([120, 190, 210]), wc)  # surf line
-noise = ndimage.gaussian_filter(np.random.rand(TH, TW), 6)
-wc = wc * (0.92 + 0.16 * (noise - noise.min()) / (np.ptp(noise) + 1e-9))[..., None]
-wimg = Image.fromarray(wc.astype(np.uint8)).resize((W2, H2), Image.BILINEAR)
-wmask = Image.fromarray((water * 255).astype(np.uint8)).resize((W2, H2), Image.NEAREST).filter(ImageFilter.GaussianBlur(1))
-img.paste(wimg, (0, 0), wmask)
-
-# piers, rails, roads (casing then fill)
-for e in piers:
-    sh = shapes(e)
-    if sh: fill_shape(dr, sh, (200, 196, 186))
-    else: dr.line([px(p) for p in line(e)], fill=(200, 196, 186), width=int(3 / RES * SS))
-for l in rails: dr.line([px(p) for p in l], fill=(118, 108, 98), width=int(3 / RES * SS))
-for casing in (True, False):
-    for l, w in sorted(roads, key=lambda r: r[1]):
-        pts = [px(p) for p in l]
-        if w < 2:
-            if not casing: dr.line(pts, fill=(214, 206, 186), width=max(1, int(w / RES * SS)))
-            continue
-        ww = int((w + (1.6 if casing else 0)) / RES * SS)
-        col = (120, 122, 118) if casing else (196, 196, 190) if w >= 6 else (182, 182, 176)
-        dr.line(pts, fill=col, width=ww, joint='curve')
-
-# gentle texture grain so flat fills read like the painting
-grain = (ndimage.gaussian_filter(np.random.rand(H2 // 4, W2 // 4), 1.2) - 0.5) * 26
-grain = np.array(Image.fromarray(((grain + 128)).clip(0, 255).astype(np.uint8)).resize((W2, H2), Image.BILINEAR), dtype=np.int16) - 128
-arr = np.clip(np.array(img, dtype=np.int16) + grain[..., None], 0, 255).astype(np.uint8)
-ground = Image.fromarray(arr).resize((TW, TH), Image.LANCZOS)
-vm = Image.fromarray((void * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(1.5))
-ground.paste((11, 16, 22), (0, 0), vm)
-ground.save('public/ground.jpg', quality=88)
-
-# ---------- buildings ----------
-DOWNTOWN = [(49.2955, -123.1440), (49.2830, -123.1095), (49.2745, -123.1000), (49.2700, -123.1045), (49.2755, -123.1290),
-            (49.2860, -123.1440), (49.2905, -123.1500)]  # rough peninsula (West End + downtown + Yaletown)
-DT = [xy({'lat': a, 'lon': b}) for a, b in DOWNTOWN]
-
-
-def inside(pt, poly):
-    x, y = pt; c = False
-    for i in range(len(poly)):
-        (x1, y1), (x2, y2) = poly[i], poly[i - 1]
-        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1: c = not c
-    return c
-
-
-def area(r):
-    return abs(sum(r[i][0] * r[i - 1][1] - r[i - 1][0] * r[i][1] for i in range(len(r)))) / 2
-
-
-def hnum(v):
-    try: return float(str(v).split(';')[0].replace('m', '').strip())
-    except ValueError: return None
-
-
-def height(t, a, c):
-    h = hnum(t.get('height'))
-    if h: return h, hnum(t.get('min_height')) or 0
-    lv = hnum(t.get('building:levels'))
-    mn = (hnum(t.get('building:min_level')) or 0) * 3.1
-    if lv: return lv * 3.1 + (1.5 if lv > 3 else 0.8), mn
-    b = t.get('building', t.get('building:part', 'yes'))
-    if b in ('house', 'detached', 'semidetached_house', 'residential') and a < 400: return random.uniform(6.5, 9.5), 0
-    if b in ('garage', 'garages', 'shed', 'roof', 'carport', 'hut', 'kiosk'): return 3.0, 0
-    if inside(c, DT):  # unknown downtown block: towers if big enough
-        if a > 500: return random.choice([random.uniform(25, 60), random.uniform(60, 120), random.uniform(15, 30)]), 0
-        return random.uniform(10, 24), 0
-    if a > 2500: return random.uniform(8, 16), 0
-    if a > 600: return random.uniform(9, 14), 0
-    return random.uniform(6, 9), 0
-
-
-def cent(r):
-    return (sum(p[0] for p in r) / len(r), sum(p[1] for p in r) / len(r))
-
-
-part_cells = {}
-for e in parts:
-    for outers, _ in shapes(e):
-        c = cent(outers[0]); part_cells.setdefault((int(c[0] // 50), int(c[1] // 50)), []).append(c)
-
-
-def has_parts(r):
-    xs = [p[0] for p in r]; ys = [p[1] for p in r]
-    for gx in range(int(min(xs) // 50), int(max(xs) // 50) + 1):
-        for gy in range(int(min(ys) // 50), int(max(ys) // 50) + 1):
-            if any(inside(c, r) for c in part_cells.get((gx, gy), [])): return True
-    return False
-
-
-# colour classes the shader maps to palettes: 0 house, 1 apartment, 2 glass tower, 3 brick, 4 concrete/commercial, 5 white
-def kind(t, h, c):
-    b = t.get('building', t.get('building:part', 'yes'))
-    mat = t.get('building:material', '') + t.get('building:colour', '')
-    if 'glass' in mat or (h > 40 and random.random() < 0.8): return 2
-    if 'brick' in mat or (inside(c, DT) and h < 30 and random.random() < 0.25): return 3
-    if b in ('house', 'detached', 'semidetached_house', 'garage', 'shed') or (h < 10 and not inside(c, DT)): return 0
-    if b in ('apartments', 'residential') or (inside(c, DT) and h < 40): return 1 if random.random() < 0.6 else 5
-    return 4
-
-
-building_rows = []
-footprint = Image.new('L', (TW, TH), 0); fd = ImageDraw.Draw(footprint)
-landmarks = []  # footprints drawn by hand in main.js; OSM parts inside them are dropped
-for e in blds:
-    name = e.get('tags', {}).get('name', '')
-    for outers, _ in shapes(e):
-        r = outers[0]; c = cent(r)
-        if 'BC Place' in name: special['bcplace'] = [round(c[0]), round(c[1]), round(math.sqrt(area(r) / math.pi))]; landmarks.append(r)
-        if name == 'Science World': special['scienceworld'] = [round(c[0]), round(c[1])]; landmarks.append(r)
-for e in blds + parts:
-    t = e.get('tags', {})
-    for outers, _ in shapes(e):
-        r = outers[0]
-        if r[0] == r[-1]: r = r[:-1]
-        if len(r) < 3 or len(r) > 250: continue
-        c = cent(r)
-        if abs(c[0]) > WM / 2 or abs(c[1]) > HM / 2 or in_void(*c): continue
-        a = area(r)
-        fd.polygon([px(p, 1) for p in r], fill=255)
-        if any(inside(c, lm) for lm in landmarks): continue
-        if 'building' in t and not t.get('height') and not t.get('building:levels') and has_parts(r): continue
-        h, mn = height(t, a, c)
-        building_rows.append((r, h, mn, kind(t, h, c)))
-
-# ---------- trees ----------
-fp = ndimage.binary_dilation(np.array(footprint) > 0, iterations=1)
-roadm = Image.new('L', (TW, TH), 0); rmd = ImageDraw.Draw(roadm)
-for l, w in roads:
-    if w >= 2: rmd.line([px(p, 1) for p in l], fill=255, width=max(1, int((w + 1) / RES)))
-for e in piers: rmd.line([px(p, 1) for p in line(e)], fill=255, width=2)
-roadm = np.array(roadm) > 0
-open_ = ~(water | fp | roadm)
-d_road = ndimage.distance_transform_edt(~roadm) * RES
-wood, park, res = np.array(woodmask) > 0, np.array(parkmask) > 0, np.array(resmask) > 0
-prob = np.zeros((TH, TW), np.float32)
-prob[res] = 0.32
-prob[res & (d_road > 1.5) & (d_road < 6)] = 0.9  # boulevard trees
-prob[~res & ~park & ~wood & (d_road > 1.5) & (d_road < 5)] = 0.25  # downtown street trees
-prob[park] = 0.18
-prob[park & (d_road < 7)] = 0.4
-prob[wood] = 1.0
-prob[~open_ | void] = 0
-trees = []
-CELL = 7.0
-for gy in np.arange(-HM / 2, HM / 2, CELL):
-    for gx in np.arange(-WM / 2, WM / 2, CELL):
-        x, y = gx + random.random() * CELL, gy + random.random() * CELL
-        i, j = int((HM / 2 - y) / RES), int((x + WM / 2) / RES)
-        if not (0 <= i < TH and 0 <= j < TW): continue
-        p = prob[i, j]
-        if p and random.random() < p:
-            trees.append((x, y, 1 if wood[i, j] else 0))
-print('trees', len(trees))
-
-# ---------- boats in marinas ----------
-mm = Image.new('L', (TW, TH), 0); mmd = ImageDraw.Draw(mm)
-for e in marinas:
-    for outers, _ in shapes(e):
-        for r in outers: mmd.polygon([px(p, 1) for p in r], fill=255)
-pierm = Image.new('L', (TW, TH), 0); pmd = ImageDraw.Draw(pierm)
-for e in piers:
-    sh = shapes(e)
-    if sh:
-        for r in sh[0][0]: pmd.polygon([px(p, 1) for p in r], fill=255)
-    else: pmd.line([px(p, 1) for p in line(e)], fill=255, width=2)
-d_pier = ndimage.distance_transform_edt(np.array(pierm) == 0) * RES
-gy_, gx_ = np.gradient(d_pier)
-cand = water & (np.array(mm) > 0) & (d_pier > 1) & (d_pier < 12)
-boats = []
-for i, j in zip(*np.nonzero(cand)):
-    if random.random() < 0.09:
-        ang = math.atan2(-gy_[i, j], gx_[i, j])  # bow points away from the pier
-        boats.append(((j + 0.5) * RES - WM / 2, HM / 2 - (i + 0.5) * RES, ang))
-# thin out boats that overlap
-kept, grid = [], {}
-for b in boats:
-    k = (int(b[0] // 5), int(b[1] // 5))
-    if any(grid.get((k[0] + a, k[1] + c)) for a in (-1, 0, 1) for c in (-1, 0, 1)): continue
-    grid[k] = 1; kept.append(b)
-boats = kept
-print('boats', len(boats))
-
-# ---------- pack ----------
 q = lambda v: max(-32767, min(32767, int(round(v * 2))))  # half-metre int16
 out = bytearray()
-out += struct.pack('<I', len(building_rows))
-for r, h, mn, k in building_rows:
-    out += struct.pack('<HHHB', len(r), int(min(h, 400) * 10), int(min(mn, 400) * 10), k)
+# tree colours, early autumn: shared with the page through meta.json (index = palette entry)
+TPAL = {0: [0x5d9a2e, 0x6fae3a, 0x4f8a2a, 0x7ab844, 0x3f7a2c, 0x8cc04a, 0x5a9638, 0x6a9e30],
+        1: [0xc9a227, 0xd8b23a, 0xb8a434, 0xe0c048], 2: [0xd98f22, 0xe07a26, 0xc96a24, 0xe89a3a],
+        3: [0xb8452a, 0xa8342c, 0xc0502e, 0x9a2f36], 4: [0x9a6a32, 0x8a7034, 0xa88a40],
+        5: [0x3f7a3a, 0x356e3a, 0x4a8440, 0x2f6634, 0x55904a, 0x3c7442]}
+PAL_LIST = [c for k in sorted(TPAL) for c in TPAL[k]]
+PAL_AT = {k: sum(len(TPAL[j]) for j in sorted(TPAL) if j < k) for k in TPAL}
+
+
+def tree_colour(k):  # about a third of the deciduous trees have turned
+    if k not in (0, 5) and random.random() < 0.5: k = 0
+    return PAL_AT[k] + random.randrange(len(TPAL[k]))
+
+
+meta = {'regions': [], 'origin': [LAT_O, LON_O], 'k': [KX, KY], 'treePal': PAL_LIST}
+all_buildings, all_trees, all_boats, all_bridges, all_roads = [], [], [], [], []
+
+for R in REGIONS:
+    S, W, N, E = R['bbox']
+    X0, Y0 = ll(S, W); X1, Y1 = ll(N, E)
+    WM, HM = X1 - X0, Y1 - Y0
+    TW, TH = int(WM / RES), int(HM / RES)
+    px = lambda pt, ss=SS: ((pt[0] - X0) / RES * ss, (Y1 - pt[1]) / RES * ss)
+    cell = lambda x, y: (min(TH - 1, max(0, int((Y1 - y) / RES))), min(TW - 1, max(0, int((x - X0) / RES))))
+    inbox = lambda p, m=0: X0 + m < p[0] < X1 - m and Y0 + m < p[1] < Y1 - m
+    els = json.load(open(R['osm']))['elements']
+    print('==', R['name'], len(els), 'elements', TW, 'x', TH)
+
+    areas, waters, coast, roads, bridges, rails, piers, marinas, blds, parts, drive = [], [], [], [], [], [], [], [], [], [], []
+    special = {}
+    for e in els:
+        t = e.get('tags', {})
+        if 'building:part' in t:
+            parts.append(e); continue
+        if 'building' in t:
+            blds.append(e); continue
+        if t.get('natural') == 'coastline':
+            coast.append(line(e)); continue
+        if t.get('natural') == 'water' or ('water' in t and t.get('natural') != 'coastline'):
+            waters.append(e); continue
+        if t.get('leisure') == 'marina':
+            marinas.append(e)
+        if t.get('man_made') in ('pier', 'breakwater'):
+            piers.append(e); continue
+        if 'railway' in t and e['type'] == 'way' and t['railway'] in ('rail', 'light_rail') and t.get('tunnel') != 'yes':
+            rails.append(line(e)); continue
+        hw = t.get('highway')
+        if hw and e['type'] == 'way':
+            if t.get('tunnel') in ('yes', 'building_passage') or t.get('area') == 'yes': continue
+            if hw in DRIVE and t.get('access') not in ('private', 'no') and 'nodes' in e: drive.append(e)
+            if hw not in ROAD: continue
+            if t.get('bridge') == 'yes' and hw in ('trunk', 'primary', 'secondary', 'trunk_link', 'tertiary', 'cycleway', 'footway'):
+                bridges.append((line(e), ROAD[hw], t.get('name', '')))
+            else:
+                roads.append((line(e), ROAD[hw]))
+            continue
+        for k in ('natural', 'landuse', 'leisure'):
+            if t.get(k) in AREA and AREA[t[k]][1]:
+                areas.append((AREA[t[k]][0], AREA[t[k]][1], e, t[k])); break
+
+    # ---------- texture ----------
+    W2, H2 = TW * SS, TH * SS
+    img = Image.new('RGB', (W2, H2), (146, 150, 126))
+    dr = ImageDraw.Draw(img)
+
+    def fill_shape(draw, sh, col):
+        for outers, inners in sh:
+            for r in outers: draw.polygon([px(p) for p in r], fill=col)
+            for r in inners: draw.polygon([px(p) for p in r], fill=(146, 150, 126))
+
+    woodmask = Image.new('L', (TW, TH), 0); wd = ImageDraw.Draw(woodmask)
+    parkmask = Image.new('L', (TW, TH), 0); pd = ImageDraw.Draw(parkmask)
+    resmask = Image.new('L', (TW, TH), 0); rd = ImageDraw.Draw(resmask)
+    for order, col, e, kind_ in sorted(areas, key=lambda a: a[0]):
+        sh = shapes(e)
+        jit = tuple(max(0, min(255, c + random.randint(-6, 6))) for c in col)
+        for outers, inners in sh:
+            if inners:
+                xs = [px(p) for r in outers for p in r]
+                x0, y0 = int(max(0, min(p[0] for p in xs))), int(max(0, min(p[1] for p in xs)))
+                x1, y1 = int(min(W2, max(p[0] for p in xs)) + 1), int(min(H2, max(p[1] for p in xs)) + 1)
+                if x1 <= x0 or y1 <= y0: continue
+                m = Image.new('L', (x1 - x0, y1 - y0), 0); md = ImageDraw.Draw(m)
+                for r in outers: md.polygon([(a - x0, b - y0) for a, b in map(px, r)], fill=255)
+                for r in inners: md.polygon([(a - x0, b - y0) for a, b in map(px, r)], fill=0)
+                img.paste(jit, (x0, y0, x1, y1), m)
+            else:
+                for r in outers: dr.polygon([px(p) for p in r], fill=jit)
+            tgt = wd if kind_ in ('wood', 'forest') else pd if kind_ in ('park', 'grass', 'garden', 'recreation_ground', 'cemetery', 'meadow', 'golf_course', 'grassland', 'scrub') else rd if kind_ == 'residential' else None
+            if tgt:
+                for r in outers: tgt.polygon([px(p, 1) for p in r], fill=255)
+                for r in inners: tgt.polygon([px(p, 1) for p in r], fill=0)
+
+    # sea: coastline lines are walls, flooded from a seed in open water
+    wall = Image.new('L', (TW, TH), 0); wdw = ImageDraw.Draw(wall)
+    for l in coast: wdw.line([px(p, 1) for p in l], fill=255, width=2)
+    lab, _ = ndimage.label(np.array(wall) == 0)
+    sx, sy = px(ll(*R['sea']), 1)
+    sea = lab == lab[int(sy), int(sx)]
+    sea |= ndimage.binary_dilation(sea) & (np.array(wall) > 0)
+    water = sea.copy()
+    lakes = Image.new('L', (TW, TH), 0); ld = ImageDraw.Draw(lakes)
+    for e in waters:
+        for outers, inners in shapes(e):
+            for r in outers: ld.polygon([px(p, 1) for p in r], fill=255)
+            for r in inners: ld.polygon([px(p, 1) for p in r], fill=0)
+    water |= np.array(lakes) > 0
+    print('sea fraction', sea.mean())
+    # land not connected to the region's own (the North Shore) is cut away into the dark
+    land_lab, nl = ndimage.label(~water)
+    hx_, hy_ = px(ll(*R['home']), 1)
+    sizes = ndimage.sum(np.ones_like(land_lab), land_lab, range(nl + 1))
+    void = (land_lab != land_lab[int(hy_), int(hx_)]) & (sizes[land_lab] * RES * RES > 300000) & (land_lab > 0)
+    in_void = lambda x, y: void[cell(x, y)]
+
+    dist = ndimage.distance_transform_edt(water) * RES
+    t = np.clip(dist / 140, 0, 1)[..., None]
+    shallow, deep = np.array([78, 150, 196]), np.array([22, 70, 140])
+    wc = shallow * (1 - t) ** 1.6 + deep * (1 - (1 - t) ** 1.6)
+    wc = np.where((dist < 6)[..., None], np.array([120, 190, 210]), wc)
+    noise = ndimage.gaussian_filter(np.random.rand(TH, TW), 6)
+    wc = wc * (0.92 + 0.16 * (noise - noise.min()) / (np.ptp(noise) + 1e-9))[..., None]
+    wimg = Image.fromarray(wc.astype(np.uint8)).resize((W2, H2), Image.BILINEAR)
+    wmask = Image.fromarray((water * 255).astype(np.uint8)).resize((W2, H2), Image.NEAREST).filter(ImageFilter.GaussianBlur(1))
+    img.paste(wimg, (0, 0), wmask)
+
+    for e in piers:
+        sh = shapes(e)
+        if sh: fill_shape(dr, sh, (200, 196, 186))
+        else: dr.line([px(p) for p in line(e)], fill=(200, 196, 186), width=int(3 / RES * SS))
+    for l in rails: dr.line([px(p) for p in l], fill=(118, 108, 98), width=int(3 / RES * SS))
+    for casing in (True, False):
+        for l, w in sorted(roads, key=lambda r: r[1]):
+            pts = [px(p) for p in l]
+            if w < 2:
+                if not casing: dr.line(pts, fill=(214, 206, 186), width=max(1, int(w / RES * SS)))
+                continue
+            ww = int((w + (1.6 if casing else 0)) / RES * SS)
+            col = (188, 184, 172) if casing else (120, 124, 128) if w >= 6 else (132, 134, 136)  # sidewalk, asphalt
+            dr.line(pts, fill=col, width=ww, joint='curve')
+    # centre lines on the big roads
+    for l, w in roads:
+        if w >= 6: dr.line([px(p) for p in l], fill=(214, 196, 120), width=1)
+
+    grain = (ndimage.gaussian_filter(np.random.rand(H2 // 4, W2 // 4), 1.2) - 0.5) * 22
+    grain = np.array(Image.fromarray(((grain + 128)).clip(0, 255).astype(np.uint8)).resize((W2, H2), Image.BILINEAR), dtype=np.int16) - 128
+    arr = np.clip(np.array(img, dtype=np.int16) + grain[..., None], 0, 255).astype(np.uint8)
+    ground = Image.fromarray(arr).resize((TW, TH), Image.LANCZOS)
+    vm = Image.fromarray((void * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(1.5))
+    ground.paste((14, 22, 32), (0, 0), vm)
+
+    # ---------- terrain grid ----------
+    nx, ny = int(WM / HSTEP) + 2, int(HM / HSTEP) + 2
+    dem, GE, GN = terrain(X0, Y0, nx, ny)
+    wgrid = np.array([[water[cell(GE[j, i], GN[j, i])] for i in range(nx)] for j in range(ny)])
+    dem = np.where(ndimage.binary_erosion(wgrid, iterations=1), 0, dem)  # the sea is flat
+    Z = zfit(dem, GE, GN)
+
+    def zat(x, y):  # bilinear on the grid, as the page does
+        fx = min(nx - 1.001, max(0, (x - X0) / HSTEP)); fy = min(ny - 1.001, max(0, (y - Y0) / HSTEP))
+        i, j = int(fx), int(fy); u, v = fx - i, fy - j
+        return (Z[j, i] * (1 - u) * (1 - v) + Z[j, i + 1] * u * (1 - v) + Z[j + 1, i] * (1 - u) * v + Z[j + 1, i + 1] * u * v)
+    sea_z = float(zfit(0, (X0 + X1) / 2, (Y0 + Y1) / 2))
+
+    # ---------- buildings ----------
+    DOWNTOWN = [(49.2955, -123.1440), (49.2830, -123.1095), (49.2745, -123.1000), (49.2700, -123.1045), (49.2755, -123.1290),
+                (49.2860, -123.1440), (49.2905, -123.1500)]
+    DT = [ll(a, b) for a, b in DOWNTOWN]
+
+    def height(t, a, c, lid):
+        h = hnum(t.get('height'))
+        if h: return h, hnum(t.get('min_height')) or 0, None
+        lv = hnum(t.get('building:levels'))
+        mn = (hnum(t.get('building:min_level')) or 0) * 3.1
+        if lid and 'building:part' not in t:
+            ridge = lid['maxht_m']; flat = (lid.get('rooftype') or '').lower() != 'pitched'
+            if lv and lv * 3.1 > ridge * 1.6: return lv * 3.1 + 1.5, mn, None  # rebuilt taller since 2009
+            if flat: return max(2.5, lid.get('hgt_agl') or ridge), 0, None
+            eave = min(ridge - 1.2, max(2.6, 2 * (lid.get('avght_m') or ridge) - ridge))
+            return eave, 0, ridge
+        if lv: return lv * 3.1 + (1.5 if lv > 3 else 0.8), mn, None
+        b = t.get('building', t.get('building:part', 'yes'))
+        if b in ('house', 'detached', 'semidetached_house', 'residential') and a < 400:
+            e = random.uniform(4.5, 6.5); return e, 0, e + random.uniform(2.2, 3.6)
+        if b in ('garage', 'garages', 'shed', 'roof', 'carport', 'hut', 'kiosk'): return 3.0, 0, None
+        if inside(c, DT):
+            if a > 500: return random.choice([random.uniform(25, 60), random.uniform(60, 120), random.uniform(15, 30)]), 0, None
+            return random.uniform(10, 24), 0, None
+        if a > 2500: return random.uniform(8, 16), 0, None
+        if a > 600: return random.uniform(9, 14), 0, None
+        e = random.uniform(4.5, 6.5); return e, 0, e + random.uniform(2, 3.2)
+
+    part_cells = {}
+    for e in parts:
+        for outers, _ in shapes(e):
+            c = cent(outers[0]); part_cells.setdefault((int(c[0] // 50), int(c[1] // 50)), []).append(c)
+
+    def has_parts(r):
+        xs = [p[0] for p in r]; ys = [p[1] for p in r]
+        for gx in range(int(min(xs) // 50), int(max(xs) // 50) + 1):
+            for gy in range(int(min(ys) // 50), int(max(ys) // 50) + 1):
+                if any(inside(c, r) for c in part_cells.get((gx, gy), [])): return True
+        return False
+
+    def kind(t, h, c):  # palette class: 0 house, 1 apartment, 2 glass tower, 3 brick, 4 concrete/commercial, 5 white
+        b = t.get('building', t.get('building:part', 'yes'))
+        mat = t.get('building:material', '') + t.get('building:colour', '')
+        if 'glass' in mat or (h > 40 and random.random() < 0.4): return 2
+        if 'brick' in mat or (inside(c, DT) and h < 30 and random.random() < 0.25): return 3
+        if b in ('house', 'detached', 'semidetached_house', 'garage', 'shed') or (h < 10 and not inside(c, DT)): return 0
+        if b in ('apartments', 'residential') or h >= 12: r = random.random(); return 1 if r < 0.6 else 5 if r < 0.85 else 4
+        return 4
+
+    footprint = Image.new('L', (TW, TH), 0); fd = ImageDraw.Draw(footprint)
+    landmarks = []
+    for e in blds:
+        name = e.get('tags', {}).get('name', '')
+        for outers, _ in shapes(e):
+            r = outers[0]; c = cent(r)
+            if 'BC Place' in name: special['bcplace'] = [round(c[0]), round(c[1]), round(math.sqrt(area(r) / math.pi))]; landmarks.append(r)
+            if name == 'Science World': special['scienceworld'] = [round(c[0]), round(c[1])]; landmarks.append(r)
+    nb0 = len(all_buildings)
+    for e in blds + parts:
+        t = e.get('tags', {})
+        for outers, _ in shapes(e):
+            r = outers[0]
+            if r[0] == r[-1]: r = r[:-1]
+            if len(r) < 3 or len(r) > 250: continue
+            c = cent(r)
+            if not inbox(c) or in_void(*c): continue
+            a = area(r)
+            fd.polygon([px(p, 1) for p in r], fill=255)
+            if any(inside(c, lm) for lm in landmarks): continue
+            if 'building' in t and has_parts(r): continue  # its parts carry the shape; both would z-fight
+            h, mn, ridge = height(t, a, c, lidar_for(r) if 'building:part' not in t else None)
+            base = min(zat(x, y) for x, y in r)
+            roof = None
+            if ridge:
+                cx, cy, ang, hl, hw, ar = obb(r)
+                if a / ar > 0.8 and hw > 2 and ridge - h < hw * 1.4: roof = (cx, cy, ang, hl, hw, ridge)
+            h += random.random() * 0.15  # no two roofs exactly level: overlapping footprints never z-fight
+            all_buildings.append((r, base, h, mn, kind(t, h, c), roof))
+    print('buildings', len(all_buildings) - nb0)
+
+    # ---------- trees ----------
+    fp = ndimage.binary_dilation(np.array(footprint) > 0, iterations=1)
+    roadm = Image.new('L', (TW, TH), 0); rmd = ImageDraw.Draw(roadm)
+    for l, w in roads:
+        if w >= 2: rmd.line([px(p, 1) for p in l], fill=255, width=max(1, int((w + 1) / RES)))
+    for e in piers: rmd.line([px(p, 1) for p in line(e)], fill=255, width=2)
+    roadm = np.array(roadm) > 0
+    open_ = ~(water | fp | roadm)
+    d_road = ndimage.distance_transform_edt(~roadm) * RES
+    wood, park, res = np.array(woodmask) > 0, np.array(parkmask) > 0, np.array(resmask) > 0
+    has_city = lambda x: x > ll(49.26, CITY_W)[0]
+    xs_ = X0 + (np.arange(TW) + 0.5) * RES
+    city_cols = np.array([has_city(x) for x in xs_])[None, :]
+    prob = np.zeros((TH, TW), np.float32)
+    prob[res] = 0.3  # back yards (street trees come from the city's inventory where it has one)
+    prob[res & ~city_cols & (d_road > 1.5) & (d_road < 6)] = 0.9
+    prob[~res & ~park & ~wood & ~city_cols & (d_road > 1.5) & (d_road < 5)] = 0.25
+    prob[park] = 0.18
+    prob[park & (d_road < 7)] = 0.4
+    prob[wood] = 1.0
+    prob[~open_ | void] = 0
+    nt0 = len(all_trees)
+    CELL = 7.0
+    for gy in np.arange(Y0, Y1, CELL):
+        for gx in np.arange(X0, X1, CELL):
+            x, y = gx + random.random() * CELL, gy + random.random() * CELL
+            i, j = cell(x, y)
+            p = prob[i, j]
+            if p and random.random() < p:
+                w_ = wood[i, j]
+                k = 5 if w_ and random.random() < 0.7 else random.choice([0, 0, 0, 0, 0, 1, 2, 3]) if not w_ else random.choice([0, 0, 0, 1])
+                hh = random.uniform(16, 38) if k == 5 else random.uniform(7, 16) + (4 if w_ else 0)
+                all_trees.append((x, y, zat(x, y), k, tree_colour(k), hh))
+    for x, y, k, h in city_trees:
+        if inbox((x, y)) and not in_void(x, y) and not fp[cell(x, y)]: all_trees.append((x, y, zat(x, y), k, tree_colour(k), h))
+    print('trees', len(all_trees) - nt0)
+    # under the 3D trees (zoomed in): their shadows, cast away from the afternoon sun in the south-west
+    plain = ground.copy(); sd = Image.new('L', (TW, TH), 0); sdd = ImageDraw.Draw(sd)
+    for x, y, z, k, ci, h in all_trees[nt0:]:
+        r = (h * 0.17 if k == 5 else min(7, max(2, h * 0.28))) / RES
+        ox, oy = (x - X0) / RES + h * 0.42 / RES, (Y1 - y) / RES - h * 0.38 / RES
+        sdd.ellipse((ox - r, oy - r * 0.8, ox + r, oy + r * 0.8), fill=255)
+    sd = sd.filter(ImageFilter.GaussianBlur(0.8))
+    plain = Image.composite(Image.eval(plain, lambda v: int(v * 0.62)), plain, sd)
+    plain.save(f"public/ground-{R['name']}-plain.jpg", quality=86)
+    # crowns painted into the ground: what the trees look like zoomed out, where the page skips them
+    gd = ImageDraw.Draw(ground)
+    for x, y, z, k, ci, h in all_trees[nt0:]:
+        r = max(0.6, (h * 0.17 if k == 5 else min(7, max(2, h * 0.28))) / RES)
+        c = PAL_LIST[ci]; col = tuple(int(((c >> s_) & 255) * 0.82) for s_ in (16, 8, 0))
+        cx_, cy_ = (x - X0) / RES, (Y1 - y) / RES
+        gd.ellipse((cx_ - r, cy_ - r, cx_ + r, cy_ + r), fill=col)
+    ground.save(f"public/ground-{R['name']}.jpg", quality=86)
+
+    # ---------- boats in marinas ----------
+    mm = Image.new('L', (TW, TH), 0); mmd = ImageDraw.Draw(mm)
+    for e in marinas:
+        for outers, _ in shapes(e):
+            for r in outers: mmd.polygon([px(p, 1) for p in r], fill=255)
+    pierm = Image.new('L', (TW, TH), 0); pmd = ImageDraw.Draw(pierm)
+    for e in piers:
+        sh = shapes(e)
+        if sh:
+            for r in sh[0][0]: pmd.polygon([px(p, 1) for p in r], fill=255)
+        else: pmd.line([px(p, 1) for p in line(e)], fill=255, width=2)
+    d_pier = ndimage.distance_transform_edt(np.array(pierm) == 0) * RES
+    gy_, gx_ = np.gradient(d_pier)
+    cand = water & (np.array(mm) > 0) & (d_pier > 1) & (d_pier < 12)
+    kept, grid = [], {}
+    for i, j in zip(*np.nonzero(cand)):
+        if random.random() < 0.09:
+            b = (X0 + (j + 0.5) * RES, Y1 - (i + 0.5) * RES, math.atan2(-gy_[i, j], gx_[i, j]))
+            k = (int(b[0] // 5), int(b[1] // 5))
+            if any(grid.get((k[0] + a, k[1] + c)) for a in (-1, 0, 1) for c in (-1, 0, 1)): continue
+            grid[k] = 1; kept.append((b[0], b[1], sea_z, b[2]))
+    all_boats += kept
+
+    # ---------- bridges: deck height = distance to the nearest abutment x ramp slope, over the terrain ----------
+    key = lambda p: (round(p[0], 1), round(p[1], 1))
+    ground_v = {key(p) for l, _ in roads for p in l}
+    adj = {}
+    for l, _, _ in bridges:
+        for a, b in zip(l, l[1:]):
+            d = math.dist(a, b)
+            adj.setdefault(key(a), []).append((key(b), d)); adj.setdefault(key(b), []).append((key(a), d))
+    dist_ab = {v: 0.0 for v in adj if v in ground_v}
+    pq = [(0.0, v) for v in dist_ab]
+    while pq:
+        d, v = heapq.heappop(pq)
+        if d > dist_ab.get(v, 1e18): continue
+        for u, w in adj[v]:
+            if d + w < dist_ab.get(u, 1e18): dist_ab[u] = d + w; heapq.heappush(pq, (d + w, u))
+    deck_z = {}
+    for l, w, _ in bridges:
+        if len(l) < 2 or not all(inbox(p, 5) for p in l) or any(in_void(*p) for p in l): continue
+        za, zb = zat(*l[0]), zat(*l[-1]); tot = sum(math.dist(a, b) for a, b in zip(l, l[1:])) or 1; s = 0
+        pts = []
+        for i, p in enumerate(l):
+            if i: s += math.dist(l[i - 1], p)
+            z = za + (zb - za) * s / tot + min(26.0, dist_ab.get(key(p), 40) * 0.06)
+            pts.append((p[0], p[1], z)); deck_z[key(p)] = z
+        all_bridges.append((pts, w))
+
+    # ---------- road graph for traffic ----------
+    nodes, use = {}, {}
+    for e in drive:
+        for n_, p in zip(e['nodes'], e['geometry']):
+            if p: nodes[n_] = xy(p); use[n_] = use.get(n_, 0) + 1
+        for n_ in (e['nodes'][0], e['nodes'][-1]): use[n_] = use.get(n_, 0) + 1
+    for e in drive:
+        t = e['tags']; cls = DRIVE[t['highway']]
+        ow = t.get('oneway') in ('yes', '1', '-1') or t.get('junction') == 'roundabout' or t['highway'] in ('motorway', 'motorway_link')
+        ids = [n_ for n_ in e['nodes'] if n_ in nodes]
+        if t.get('oneway') == '-1': ids = ids[::-1]
+        lanes = int(hnum(t.get('lanes')) or (2 if cls <= 1 else 1) * (1 if ow else 2))
+        per = max(1, min(4, lanes if ow else lanes // 2))
+        cut = [0] + [i for i in range(1, len(ids) - 1) if use[ids[i]] >= 2] + [len(ids) - 1]
+        for a, b in zip(cut, cut[1:]):
+            seg = ids[a:b + 1]
+            pts = [nodes[n_] for n_ in seg]
+            if len(pts) < 2 or not all(inbox(p, 2) for p in pts) or any(in_void(*p) for p in pts): continue
+            zs = [deck_z.get(key(p), zat(*p)) if t.get('bridge') == 'yes' else zat(*p) for p in pts]
+            all_roads.append((seg[0], seg[-1], cls, ow, per, [(p[0], p[1], z) for p, z in zip(pts, zs)]))
+
+    meta['regions'].append({'name': R['name'], 'x0': X0, 'y0': Y0, 'x1': X1, 'y1': Y1, 'tex': f"ground-{R['name']}.jpg",
+                            'nx': nx, 'ny': ny, 'step': HSTEP, 'zoff': len(out)})
+    out += struct.pack('<HH', nx, ny) + np.round(Z * 10).astype('<i2').tobytes()
+    meta.update(special)
+
+# ---------- pack (after the terrain grids) ----------
+qz = lambda z: max(-32767, min(32767, int(round(z * 10))))  # decimetres
+out += struct.pack('<I', len(all_buildings))
+for r, base, h, mn, k, roof in all_buildings:
+    out += struct.pack('<HhHHBB', len(r), qz(base), int(min(h, 400) * 10), int(min(mn, 400) * 10), k, 1 if roof else 0)
     for x, y in r: out += struct.pack('<hh', q(x), q(y))
-out += struct.pack('<I', len(trees))
-for x, y, k in trees: out += struct.pack('<hhB', q(x), q(y), k)
-out += struct.pack('<I', len(boats))
-for x, y, a in boats: out += struct.pack('<hhh', q(x), q(y), int(a * 1000))
-# bridge deck height: distance along the bridge network to the nearest abutment
-# (a vertex shared with a ground road), times a ramp slope, capped
-import heapq
-key = lambda p: (round(p[0], 1), round(p[1], 1))
-ground_v = {key(p) for l, _ in roads for p in l}
-adj = {}
-for l, _, _ in bridges:
-    for a, b in zip(l, l[1:]):
-        d = math.dist(a, b)
-        adj.setdefault(key(a), []).append((key(b), d)); adj.setdefault(key(b), []).append((key(a), d))
-dist_ab = {v: 0.0 for v in adj if v in ground_v}
-pq = [(0.0, v) for v in dist_ab]
-while pq:
-    d, v = heapq.heappop(pq)
-    if d > dist_ab.get(v, 1e18): continue
-    for u, w in adj[v]:
-        if d + w < dist_ab.get(u, 1e18): dist_ab[u] = d + w; heapq.heappush(pq, (d + w, u))
-inbox = lambda p: abs(p[0]) < WM / 2 - 5 and abs(p[1]) < HM / 2 - 5
-long_bridges = [(l, w) for l, w, _ in bridges if len(l) > 1 and all(map(inbox, l)) and not any(in_void(*p) for p in l)]
-out += struct.pack('<I', len(long_bridges))
-for l, w in long_bridges:
-    out += struct.pack('<HB', len(l), int(w * 10))
-    for p in l:
-        h = min(26.0, dist_ab.get(key(p), 40) * 0.06)
-        out += struct.pack('<hhH', q(p[0]), q(p[1]), int(h * 10))
+    if roof:
+        cx, cy, ang, hl, hw, ridge = roof
+        out += struct.pack('<hhhHHH', q(cx), q(cy), int(ang * 1000), int(hl * 10), int(hw * 10), int(ridge * 10))
+out += struct.pack('<I', len(all_trees))
+for x, y, z, k, ci, h in all_trees: out += struct.pack('<hhhBBB', q(x), q(y), qz(z), k, ci, int(min(63, h) * 4))
+out += struct.pack('<I', len(all_boats))
+for x, y, z, a in all_boats: out += struct.pack('<hhhh', q(x), q(y), qz(z), int(a * 1000))
+out += struct.pack('<I', len(all_bridges))
+for pts, w in all_bridges:
+    out += struct.pack('<HB', len(pts), int(w * 10))
+    for x, y, z in pts: out += struct.pack('<hhh', q(x), q(y), qz(z))
+# roads: node ids renumbered; each way piece = from, to, class, oneway, lanes per direction, points
+ids = {}
+for a, b, *_ in all_roads:
+    for n_ in (a, b): ids.setdefault(n_, len(ids))
+out += struct.pack('<II', len(ids), len(all_roads))
+for a, b, cls, ow, per, pts in all_roads:
+    out += struct.pack('<IIBBBH', ids[a], ids[b], cls, int(ow), per, len(pts))
+    for x, y, z in pts: out += struct.pack('<hhh', q(x), q(y), qz(z))
 open('public/city.bin', 'wb').write(out)
-json.dump({'w': WM, 'h': HM, 'tw': TW, 'th': TH, 'lat0': LAT0, 'lon0': LON0, 'kx': KX, 'ky': KY, **special}, open('public/meta.json', 'w'))
-print('buildings', len(building_rows), 'bridges', len(long_bridges), 'bytes', len(out))
+json.dump(meta, open('public/meta.json', 'w'))
+print('buildings', len(all_buildings), 'trees', len(all_trees), 'boats', len(all_boats), 'bridges', len(all_bridges),
+      'road pieces', len(all_roads), 'nodes', len(ids), 'bytes', len(out))
