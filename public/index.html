@@ -27,10 +27,12 @@
   a { color: #9cc3e6; }
   @media (max-width: 600px) { #hint { display: none } }
 </style>
+<link rel="stylesheet" href="tabs.css">
 <script type="importmap">{ "imports": { "three": "./vendor/three.module.min.js" } }</script>
 </head>
 <body>
 <canvas></canvas>
+<nav class="tabs"><a href="/" aria-current="page">In code</a><a href="/illustrated">Illustrated</a></nav>
 <div id="status">Loading Vancouver…</div>
 <div id="hint" class="corner" hidden>Drag to pan, scroll to zoom, right-drag to tilt and turn</div>
 <div id="credit" class="corner">Map data © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a> · <a href="https://git.borodutch.com/backmeupplz/vancouver">Source code</a></div>
