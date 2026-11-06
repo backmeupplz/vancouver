@@ -10,6 +10,7 @@ const TILE = 512
 // Their page names the current tile folders; read it so a new version of the map shows up here too.
 let W = 26624, H = 21504, TILES = 'v8', TRAFFIC = 'traffic-v3'
 let BASE = { version: 'v1', x0: -255672, y0: -101424, k: 24, width: 25013, height: 8916 }
+let UBC = { version: 'v1', x0: -45056, y0: 13312, width: 16384, height: 9216 }   // a separate frame, west of the main one
 const [html, avif] = await Promise.all([
   fetch(ORIGIN).then((r) => r.text()).catch(() => ''),
   fetch(ORIGIN + 'tiles-avif-v8/0/0_0.avif').then((r) => r.blob()).then(createImageBitmap).then(() => true, () => false),
@@ -20,11 +21,14 @@ try {
   TRAFFIC = html.match(/startTraffic\(viewer, "([^"]+)"/)?.[1] ?? TRAFFIC
   const b = html.match(/const BASEMAP = (\{[^}]*\})/)?.[1]
   if (b) BASE = JSON.parse(b.replace(/(\w+):/g, '"$1":'))
+  const u = html.match(/const UBC = (\{[^}]*\})/)?.[1]
+  if (u) UBC = JSON.parse(u.replace(/(\w+):/g, '"$1":'))
 } catch {}
 const fmt = avif ? 'avif' : 'webp'
 const pyramid = (id, url, w, h, x0, y0, k, smooth) => ({ id, url, w, h, x0, y0, k, smooth, maxL: Math.ceil(Math.log2(Math.max(w, h))) })
 const basemap = pyramid('b', `${ORIGIN}basemap-${fmt}-${BASE.version}/`, BASE.width, BASE.height, BASE.x0, BASE.y0, BASE.k, true)
 const drawing = pyramid('d', `${ORIGIN}tiles-${fmt}-${TILES}/`, W, H, 0, 0, 1, false)
+const ubc = pyramid('u', `${ORIGIN}ubc-${fmt}-${UBC.version}/`, UBC.width, UBC.height, UBC.x0, UBC.y0, 1, false)
 const world = { x0: BASE.x0, y0: BASE.y0, x1: BASE.x0 + BASE.width * BASE.k, y1: BASE.y0 + BASE.height * BASE.k }
 
 // ---------------------------------------------------------------- GL
@@ -77,6 +81,11 @@ function fitDrawing(now) {
   const s = phone ? (a < W / H ? ch / H : cw / W) : Math.min(cw / W, ch / H)   // phones fill the screen
   const t = { s, cx: W / 2, cy: H / 2 }
   if (now) Object.assign(v, t); else anim = t
+  render()
+}
+function fitAll() {   // every drawn frame, UBC included
+  const x0 = Math.min(0, UBC.x0), y0 = Math.min(0, UBC.y0), x1 = Math.max(W, UBC.x0 + UBC.width), y1 = Math.max(H, UBC.y0 + UBC.height)
+  anim = { s: clampS(0.96 * Math.min(cw / (x1 - x0), ch / (y1 - y0))), cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 }
   render()
 }
 function zoomAt(f, sx = cw / 2, sy = ch / 2) {
@@ -174,7 +183,7 @@ function frame(now) {
   const need = []
   // the drawing is opaque, so the basemap is skipped while the view lies inside it
   const inside = v.cx - cw / 2 / v.s >= 0 && v.cy - ch / 2 / v.s >= 0 && v.cx + cw / 2 / v.s <= W && v.cy + ch / 2 / v.s <= H
-  if (!inside) drawPyramid(basemap, frameNo, need)
+  if (!inside) { drawPyramid(basemap, frameNo, need); drawPyramid(ubc, frameNo, need) }
   drawPyramid(drawing, frameNo, need)
   wanted = need; request(); evict(frameNo)
   if (trafficOn && cars) {
@@ -227,12 +236,12 @@ canvas.addEventListener('dblclick', (e) => zoomAt(2, e.clientX, e.clientY))
 const toggle = (id, fn) => { const b = $(id); b.onclick = () => b.setAttribute('aria-pressed', String(fn())) }
 toggle('#trafficBtn', () => { trafficOn = !trafficOn; worker.postMessage({ enabled: trafficOn }); render(); return trafficOn })
 toggle('#about', () => !$('#info').classList.toggle('min'))
-$('#fit').onclick = () => fitDrawing()
+$('#fit').onclick = fitAll
 $('#zoomIn').onclick = () => zoomAt(1.6)
 $('#zoomOut').onclick = () => zoomAt(1 / 1.6)
 addEventListener('keydown', (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return
-  if (e.key === '0') fitDrawing()
+  if (e.key === '0') fitAll()
   else if (e.key === '+' || e.key === '=') zoomAt(1.6)
   else if (e.key === '-' || e.key === '_') zoomAt(1 / 1.6)
   else if (e.key === 't' || e.key === 'T') $('#trafficBtn').click()
