@@ -6,7 +6,7 @@
 # illustrated tab share one camera: origin and scale fitted against their road network, heights
 # against MRDEM (see FRAME below).
 # Run: uv run --with numpy,pillow,scipy,rasterio python3 tools/bake.py
-import csv, heapq, json, math, random, struct
+import csv, heapq, json, math, os, random, struct
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 from scipy import ndimage
@@ -19,6 +19,8 @@ KX = 111320 * math.cos(math.radians(49.2845)) / SC
 KY = 110574 / SC
 ZC = (-19.0387, -3.697e-4, -1.2792e-4, -1.6638e-7)  # their z = DEM + c + aE + bN + d r^2
 RES = 2.0  # metres per texture pixel
+TILE, TRES = 512, 0.5  # detailed ground tiles: size in metres, metres per pixel
+CW = {0: 15.2, 1: 13.3, 2: 11.4, 3: 9.5, 4: 7.6}  # carriageway width by road class, as the tiles draw it
 SS = 2  # supersampling for the texture
 HSTEP = 20.0  # terrain grid, metres
 REGIONS = [
@@ -92,6 +94,23 @@ def cent(r):
 def hnum(v):
     try: return float(str(v).split(';')[0].replace('m', '').strip())
     except ValueError: return None
+
+
+def inset(r, d):
+    """The ring with every edge moved d metres inwards (mitred, capped at 3d)."""
+    sgn = 1 if sum(r[i - 1][0] * r[i][1] - r[i][0] * r[i - 1][1] for i in range(len(r))) > 0 else -1  # +1: counter-clockwise
+    out = []
+    for i in range(len(r)):
+        (x0, y0), (x1, y1), (x2, y2) = r[i - 1], r[i], r[(i + 1) % len(r)]
+        def nrm(ax, ay, bx, by):
+            l = math.hypot(bx - ax, by - ay) or 1
+            return (-(by - ay) / l * sgn, (bx - ax) / l * sgn)  # inward normal
+        n1, n2 = nrm(x0, y0, x1, y1), nrm(x1, y1, x2, y2)
+        mx, my = n1[0] + n2[0], n1[1] + n2[1]; ml = math.hypot(mx, my)
+        if ml < 1e-6: out.append((x1, y1)); continue
+        k = min(3 * d, d / max(0.2, (mx * n1[0] + my * n1[1]) / ml))
+        out.append((x1 + mx / ml * k, y1 + my / ml * k))
+    return out
 
 
 def obb(r):
@@ -211,7 +230,7 @@ PAL_AT = {k: sum(len(TPAL[j]) for j in sorted(TPAL) if j < k) for k in TPAL}
 
 
 def tree_colour(k):  # about a third of the deciduous trees have turned
-    if k not in (0, 5) and random.random() < 0.5: k = 0
+    if k not in (0, 5) and random.random() < 0.7: k = 0
     return PAL_AT[k] + random.randrange(len(TPAL[k]))
 
 
@@ -423,6 +442,7 @@ for R in REGIONS:
             if 'BC Place' in name: special['bcplace'] = [round(c[0]), round(c[1]), round(math.sqrt(area(r) / math.pi))]; landmarks.append(r)
             if name == 'Science World': special['scienceworld'] = [round(c[0]), round(c[1])]; landmarks.append(r)
     nb0 = len(all_buildings)
+    seen = set()
     for e in blds + parts:
         t = e.get('tags', {})
         for outers, _ in shapes(e):
@@ -435,6 +455,9 @@ for R in REGIONS:
             fd.polygon([px(p, 1) for p in r], fill=255)
             if any(inside(c, lm) for lm in landmarks): continue
             if 'building' in t and has_parts(r): continue  # its parts carry the shape; both would z-fight
+            key_ = (round(c[0] * 2), round(c[1] * 2), round(a / 4))
+            if key_ in seen: continue  # the same footprint mapped twice
+            seen.add(key_)
             h, mn, ridge = height(t, a, c, lidar_for(r) if 'building:part' not in t else None)
             base = min(zat(x, y) for x, y in r)
             roof = None
@@ -442,7 +465,9 @@ for R in REGIONS:
                 cx, cy, ang, hl, hw, ar = obb(r)
                 if a / ar > 0.8 and hw > 2 and ridge - h < hw * 1.4: roof = (cx, cy, ang, hl, hw, ridge)
             h += random.random() * 0.15  # no two roofs exactly level: overlapping footprints never z-fight
-            all_buildings.append((r, base, h, mn, kind(t, h, c), roof))
+            # each footprint pulled in by its own few centimetres: walls of overlapping or touching
+            # buildings are never coplanar, so they cannot z-fight
+            all_buildings.append((inset(r, random.uniform(0.03, 0.3)), base, h, mn, kind(t, h, c), roof))
     print('buildings', len(all_buildings) - nb0)
 
     # ---------- trees ----------
@@ -459,7 +484,7 @@ for R in REGIONS:
     xs_ = X0 + (np.arange(TW) + 0.5) * RES
     city_cols = np.array([has_city(x) for x in xs_])[None, :]
     prob = np.zeros((TH, TW), np.float32)
-    prob[res] = 0.3  # back yards (street trees come from the city's inventory where it has one)
+    prob[res] = 0.42  # back yards (street trees come from the city's inventory where it has one)
     prob[res & ~city_cols & (d_road > 1.5) & (d_road < 6)] = 0.9
     prob[~res & ~park & ~wood & ~city_cols & (d_road > 1.5) & (d_road < 5)] = 0.25
     prob[park] = 0.18
@@ -512,14 +537,32 @@ for R in REGIONS:
         else: pmd.line([px(p, 1) for p in line(e)], fill=255, width=2)
     d_pier = ndimage.distance_transform_edt(np.array(pierm) == 0) * RES
     gy_, gx_ = np.gradient(d_pier)
-    cand = water & (np.array(mm) > 0) & (d_pier > 1) & (d_pier < 12)
+    mmask = np.array(mm) > 0
     kept, grid = [], {}
-    for i, j in zip(*np.nonzero(cand)):
-        if random.random() < 0.09:
-            b = (X0 + (j + 0.5) * RES, Y1 - (i + 0.5) * RES, math.atan2(-gy_[i, j], gx_[i, j]))
-            k = (int(b[0] // 5), int(b[1] // 5))
-            if any(grid.get((k[0] + a, k[1] + c)) for a in (-1, 0, 1) for c in (-1, 0, 1)): continue
-            grid[k] = 1; kept.append((b[0], b[1], sea_z, b[2]))
+
+    def moor(x, y, a, L):
+        if not inbox((x, y)): return
+        i, j = cell(x, y)
+        if not (water[i, j] and mmask[i, j] and d_pier[i, j] > 1.5): return
+        k = (int(x // 2), int(y // 2))
+        if any(grid.get((k[0] + a_, k[1] + c_)) for a_ in (-1, 0, 1) for c_ in (-1, 0, 1)): return
+        grid[k] = 1; kept.append((x, y, sea_z, a, L))
+    # side by side along every pier edge in a marina, sterns to the pier
+    for e in piers:
+        for l in [r for o, _ in shapes(e) for r in o] or [line(e)]:
+            for (x1, y1), (x2, y2) in zip(l, l[1:]):
+                L = math.dist((x1, y1), (x2, y2))
+                if L < 4: continue
+                ux, uy = (x2 - x1) / L, (y2 - y1) / L
+                for side in (1, -1):
+                    nx_, ny_ = -uy * side, ux * side
+                    s_ = 2.5
+                    while s_ < L - 2:
+                        bl = random.uniform(7, 13)
+                        if random.random() < 0.75: moor(x1 + ux * s_ + nx_ * (1.6 + bl / 2), y1 + uy * s_ + ny_ * (1.6 + bl / 2), math.atan2(ny_, nx_), bl)
+                        s_ += random.uniform(4.3, 5.3)
+    for i, j in zip(*np.nonzero(water & mmask & (d_pier > 12))):  # a few at anchor
+        if random.random() < 0.004: moor(X0 + (j + 0.5) * RES, Y1 - (i + 0.5) * RES, random.uniform(-3.14, 3.14), random.uniform(8, 14))
     all_boats += kept
 
     # ---------- bridges: deck height = distance to the nearest abutment x ramp slope, over the terrain ----------
@@ -549,6 +592,7 @@ for R in REGIONS:
         all_bridges.append((pts, w))
 
     # ---------- road graph for traffic ----------
+    nr0 = len(all_roads)
     nodes, use = {}, {}
     for e in drive:
         for n_, p in zip(e['nodes'], e['geometry']):
@@ -569,8 +613,98 @@ for R in REGIONS:
             zs = [deck_z.get(key(p), zat(*p)) if t.get('bridge') == 'yes' else zat(*p) for p in pts]
             all_roads.append((seg[0], seg[-1], cls, ow, per, [(p[0], p[1], z) for p, z in zip(pts, zs)]))
 
+    # ---------- detailed ground tiles: 0.5 m/px, 512 m square on a world grid; the page loads only
+    # the ones on screen, zoomed in. Sidewalks, asphalt, centre lines, crosswalks, tree shadows. ----------
+    os.makedirs(f"public/tiles/{R['name']}", exist_ok=True)
+    bbox_of = lambda pts: (min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts))
+    area_items = [(bbox_of([p for r in o for p in r]), col, o, i) for _, col, e, _k in sorted(areas, key=lambda a: a[0]) for o, i in shapes(e) if o]
+    road_items = [(bbox_of(l), l, w) for l, w in roads if len(l) > 1]
+    pier_items = [(bbox_of(r), r) for e in piers for o, _ in shapes(e) for r in o] + [(bbox_of(line(e)), None, line(e)) for e in piers if not shapes(e) and len(line(e)) > 1]
+    rail_items = [(bbox_of(l), l) for l in rails if len(l) > 1]
+    deg, best = {}, {}
+    for a, b, cls, ow, per, pts in all_roads[nr0:]:
+        for n_ in (a, b): deg[n_] = deg.get(n_, 0) + 1; best[n_] = min(best.get(n_, 9), cls)
+    half = {}
+    for a, b, cls, ow, per, pts in all_roads[nr0:]:
+        for n_ in (a, b): half[n_] = max(half.get(n_, 0), CW[cls] / 2 + 1.5)
+    zebra = []  # crosswalk bars as polygons
+    for a, b, cls, ow, per, pts in all_roads[nr0:]:
+        for n_, p0, p1 in ((a, pts[0], pts[1]), (b, pts[-1], pts[-2])):
+            if deg[n_] < 3 or best[n_] > 3: continue
+            dx, dy = p1[0] - p0[0], p1[1] - p0[1]; L = math.hypot(dx, dy)
+            if L < half[n_] + 5: continue
+            dx, dy = dx / L, dy / L; nx_, ny_ = -dy, dx
+            W = CW[cls]; cx, cy = p0[0] + dx * (half[n_] + 2.2), p0[1] + dy * (half[n_] + 2.2)
+            o = -W / 2 + 0.45
+            while o < W / 2 - 0.2:
+                bx, by = cx + nx_ * o, cy + ny_ * o
+                zebra.append([(bx + dx * s1 + nx_ * s2, by + dy * s1 + ny_ * s2) for s1, s2 in ((-1.3, -0.28), (1.3, -0.28), (1.3, 0.28), (-1.3, 0.28))])
+                o += 1.1
+    zebra_items = [(bbox_of(z), z) for z in zebra]
+    tree_cells = {}
+    for x, y, z, k, ci, h in all_trees[nt0:]:
+        tree_cells.setdefault((int((x + 0.42 * h) // TILE), int((y + 0.38 * h) // TILE)), []).append((x + 0.42 * h, y + 0.38 * h, (h * 0.2 if k == 5 else min(8.5, max(2.6, h * 0.36)))))
+    S2 = int(TILE / TRES) * 2  # drawn at twice the size, then halved
+    kpx, n_ = S2 / TILE, int(TILE / RES)
+    wc8 = wc.astype(np.uint8)
+    tiles = []
+    for ti in range(int(X0 // TILE), int(X1 // TILE) + 1):
+        for tj in range(int(Y0 // TILE), int(Y1 // TILE) + 1):
+            tx0, ty0 = ti * TILE, tj * TILE
+            c0, r0 = int(round((tx0 - X0) / RES)), int(round((Y1 - ty0 - TILE) / RES))
+            def crop(a, fill):
+                o_ = np.full((n_, n_) + a.shape[2:], fill, a.dtype)
+                rs, cs, re, ce = max(0, r0), max(0, c0), min(TH, r0 + n_), min(TW, c0 + n_)
+                if re > rs and ce > cs: o_[rs - r0:re - r0, cs - c0:ce - c0] = a[rs:re, cs:ce]
+                return o_
+            wcrop, vcrop = crop(water, False), crop(void, True)
+            if (wcrop | vcrop).mean() > 0.995: continue
+            P = lambda p: ((p[0] - tx0) * kpx, (ty0 + TILE - p[1]) * kpx)
+            inb = lambda b: b[2] >= tx0 - 10 and b[0] <= tx0 + TILE + 10 and b[3] >= ty0 - 10 and b[1] <= ty0 + TILE + 10
+            img = Image.new('RGB', (S2, S2), (146, 150, 126)); d = ImageDraw.Draw(img)
+            for b, col, outers, inners in area_items:
+                if inb(b):
+                    for r in outers: d.polygon([P(p) for p in r], fill=col)
+                    for r in inners: d.polygon([P(p) for p in r], fill=(146, 150, 126))
+            wm = Image.fromarray((wcrop * 255).astype(np.uint8)).resize((S2, S2), Image.BILINEAR).filter(ImageFilter.GaussianBlur(3))
+            img.paste(Image.fromarray(crop(wc8, 0)).resize((S2, S2), Image.BILINEAR), (0, 0), wm)
+            for it in pier_items:
+                if inb(it[0]):
+                    if len(it) == 2: d.polygon([P(p) for p in it[1]], fill=(200, 196, 186))
+                    else: d.line([P(p) for p in it[2]], fill=(200, 196, 186), width=int(3 * kpx))
+            for b, l in rail_items:
+                if inb(b): d.line([P(p) for p in l], fill=(112, 102, 92), width=int(3 * kpx))
+            # real street widths: carriageway, then (outside downtown) a grass boulevard, then the sidewalk
+            vis = [(l, w * 1.9 if w >= 2.4 else w, not inside(l[len(l) // 2], DT)) for b, l, w in road_items if inb(b)]
+            for layer in (0, 1, 2):
+                for l, w, blvd in sorted(vis, key=lambda r: r[1]):
+                    pts = [P(p) for p in l]
+                    if w < 2:
+                        if layer == 2: d.line(pts, fill=(212, 204, 186), width=max(2, int(w * kpx)), joint='curve')
+                        continue
+                    extra = (7.6 if blvd and w < 12 else 4.0) if layer == 0 else (4.0 if blvd and w < 12 else 0.6) if layer == 1 else 0
+                    col = (196, 192, 182) if layer == 0 else (110, 160, 74) if blvd and w < 12 and layer == 1 else (150, 150, 146) if layer == 1 else (108, 112, 118) if w >= 11 else (120, 123, 127)
+                    d.line(pts, fill=col, width=int((w + extra) * kpx), joint='curve')
+            for l, w, _ in vis:
+                if w >= 11: d.line([P(p) for p in l], fill=(222, 196, 92), width=max(2, int(0.35 * kpx)))
+            for b, z in zebra_items:
+                if inb(b): d.polygon([P(p) for p in z], fill=(232, 232, 226))
+            sh = Image.new('L', (S2, S2), 0); sd2 = ImageDraw.Draw(sh)
+            for (x, y, r) in [t for a_ in (-1, 0, 1) for b_ in (-1, 0, 1) for t in tree_cells.get((ti + a_, tj + b_), [])]:
+                cx_, cy_ = P((x, y)); rr = r * kpx
+                sd2.ellipse((cx_ - rr, cy_ - rr * 0.8, cx_ + rr, cy_ + rr * 0.8), fill=150)
+            img = Image.composite(Image.eval(img, lambda v: int(v * 0.6)), img, sh.filter(ImageFilter.GaussianBlur(3)))
+            g_ = (np.random.rand(S2 // 4, S2 // 4) - 0.5) * 18
+            g_ = np.array(Image.fromarray((g_ + 128).astype(np.uint8)).resize((S2, S2), Image.BILINEAR), dtype=np.int16) - 128
+            arr = np.clip(np.array(img, dtype=np.int16) + g_[..., None], 0, 255).astype(np.uint8)
+            img = Image.fromarray(arr)
+            img.paste((14, 22, 32), (0, 0), Image.fromarray((vcrop * 255).astype(np.uint8)).resize((S2, S2), Image.BILINEAR))
+            img.resize((S2 // 2, S2 // 2), Image.LANCZOS).save(f"public/tiles/{R['name']}/{ti}_{tj}.webp", quality=78, method=4)
+            tiles.append([ti, tj])
+    print('tiles', len(tiles))
+
     meta['regions'].append({'name': R['name'], 'x0': X0, 'y0': Y0, 'x1': X1, 'y1': Y1, 'tex': f"ground-{R['name']}.jpg",
-                            'nx': nx, 'ny': ny, 'step': HSTEP, 'zoff': len(out)})
+                            'nx': nx, 'ny': ny, 'step': HSTEP, 'zoff': len(out), 'tile': TILE, 'tiles': tiles})
     out += struct.pack('<HH', nx, ny) + np.round(Z * 10).astype('<i2').tobytes()
     meta.update(special)
 
@@ -586,7 +720,7 @@ for r, base, h, mn, k, roof in all_buildings:
 out += struct.pack('<I', len(all_trees))
 for x, y, z, k, ci, h in all_trees: out += struct.pack('<hhhBBB', q(x), q(y), qz(z), k, ci, int(min(63, h) * 4))
 out += struct.pack('<I', len(all_boats))
-for x, y, z, a in all_boats: out += struct.pack('<hhhh', q(x), q(y), qz(z), int(a * 1000))
+for x, y, z, a, L in all_boats: out += struct.pack('<hhhhB', q(x), q(y), qz(z), int(a * 1000), int(L * 10))
 out += struct.pack('<I', len(all_bridges))
 for pts, w in all_bridges:
     out += struct.pack('<HB', len(pts), int(w * 10))

@@ -56,37 +56,72 @@ function zAt(x, y) {
   const i = fx | 0, j = fy | 0, u = fx - i, v = fy - j, Z = (a, b) => g.z[b * g.nx + a] / 10
   return Z(i, j) * (1 - u) * (1 - v) + Z(i + 1, j) * u * (1 - v) + Z(i, j + 1) * (1 - u) * v + Z(i + 1, j + 1) * u * v
 }
+// ground: one terrain mesh per 512 m tile. Zoomed out it shows the region texture (tree crowns
+// painted in); zoomed in the region's plain texture, then the tile's own 0.5 m/px picture once loaded.
+const tilesOf = []
 for (const g of grids) {
-  const pos = [], uv = [], idx = []
-  for (let j = 0; j < g.ny; j++) for (let i = 0; i < g.nx; i++) {
-    const x = Math.min(g.x1, g.x0 + i * g.step), y = Math.min(g.y1, g.y0 + j * g.step)
-    pos.push(x, g.z[j * g.nx + i] / 10, -y); uv.push((x - g.x0) / (g.x1 - g.x0), (y - g.y0) / (g.y1 - g.y0))
-    if (i && j) { const a = j * g.nx + i; idx.push(a - g.nx - 1, a - g.nx, a - 1, a - g.nx, a, a - 1) }
-  }
-  const geo = new THREE.BufferGeometry()
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
-  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2))
-  geo.setIndex(idx); geo.computeVertexNormals()
   g.tex.colorSpace = THREE.SRGBColorSpace
   g.tex.anisotropy = renderer.capabilities.getMaxAnisotropy()
-  const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: g.tex }))
-  g.mat = m.material
-  m.receiveShadow = true
-  scene.add(m)
-}
-
-// zoomed in the 3D trees stand on plain ground; zoomed out the crowns painted into the ground stand in for them
-const loader = new THREE.TextureLoader()
-function groundFor(trees) {
-  for (const g of grids) {
-    if (trees && !g.plain) {
-      g.plain = loader.load(g.tex.image.src.replace('.jpg', '-plain.jpg'), (t) => { if (treeGroup.visible) { g.mat.map = t; g.mat.needsUpdate = true; dirty = true } })
-      Object.assign(g.plain, { colorSpace: THREE.SRGBColorSpace, anisotropy: g.tex.anisotropy })
+  const T = g.tile, have = new Set(g.tiles.map(([i, j]) => `${i}_${j}`)), SEG = 26
+  for (let ti = Math.floor(g.x0 / T); ti <= Math.floor(g.x1 / T); ti++) for (let tj = Math.floor(g.y0 / T); tj <= Math.floor(g.y1 / T); tj++) {
+    const x0 = Math.max(g.x0, ti * T), x1 = Math.min(g.x1, (ti + 1) * T), y0 = Math.max(g.y0, tj * T), y1 = Math.min(g.y1, (tj + 1) * T)
+    if (x1 - x0 < 1 || y1 - y0 < 1) continue
+    const pos = [], uv = [], uv1 = [], idx = []
+    for (let j = 0; j <= SEG; j++) for (let i = 0; i <= SEG; i++) {
+      const x = x0 + ((x1 - x0) * i) / SEG, y = y0 + ((y1 - y0) * j) / SEG
+      pos.push(x, zAt(x, y), -y)
+      uv.push((x - g.x0) / (g.x1 - g.x0), (y - g.y0) / (g.y1 - g.y0)); uv1.push((x - ti * T) / T, (y - tj * T) / T)
+      if (i && j) { const a = j * (SEG + 1) + i; idx.push(a - SEG - 2, a - SEG - 1, a - 1, a - SEG - 1, a, a - 1) }
     }
-    const want = trees ? g.plain : g.tex
-    if (want.image && g.mat.map !== want) { g.mat.map = want; g.mat.needsUpdate = true }
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); geo.setAttribute('uv1', new THREE.Float32BufferAttribute(uv1, 2))
+    geo.setIndex(idx); geo.computeVertexNormals()
+    const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: g.tex }))
+    m.receiveShadow = true
+    scene.add(m)
+    tilesOf.push({ g, m, x0, x1, y0, y1, url: have.has(`${ti}_${tj}`) ? `tiles/${g.name}/${ti}_${tj}.webp` : null, tex: null, used: 0 })
   }
 }
+// textures decode off the main thread (createImageBitmap), so streaming tiles never stalls a frame
+const bitmaps = new THREE.ImageBitmapLoader().setOptions({ imageOrientation: 'flipY' })
+const loader = {
+  load(url, ok, _, fail) {
+    const t = new THREE.Texture()
+    t.flipY = false
+    bitmaps.load(url, (b) => { t.image = b; t.needsUpdate = true; ok?.(t) }, undefined, fail)
+    return t
+  },
+}
+const MAXT = mobile ? 16 : 32
+let loading = 0, frameNo = 0
+function setMap(t, map) { if (t.m.material.map !== map) { t.m.material.map = map; t.m.material.needsUpdate = true } }
+function groundFor(near) {
+  frameNo++
+  for (const g of grids) if (near && !g.plain) {
+    g.plain = loader.load(g.tex.image.src.replace('.jpg', '-plain.jpg'), () => { dirty = true; groundFor(treeGroup.visible) })
+    Object.assign(g.plain, { colorSpace: THREE.SRGBColorSpace, anisotropy: g.tex.anisotropy })
+  }
+  // what is on screen, on the ground: the view, stretched north for the 30° tilt, plus a margin for hills
+  const t = controls.target, hw = innerWidth / 2 / (K * cam.zoom) + 120, hh = innerHeight / (K * cam.zoom) + 260
+  const ex0 = t.x - hw, ex1 = t.x + hw, ny0 = -t.z - hh, ny1 = -t.z + hh
+  for (const tile of tilesOf) {
+    const seen = near && tile.x1 > ex0 && tile.x0 < ex1 && tile.y1 > ny0 && tile.y0 < ny1
+    if (seen && tile.url && !tile.tex && loading < 6) {
+      loading++
+      tile.tex = loader.load(tile.url, (tx) => { loading--; if (tile.tex === tx) tile.ready = true; dirty = true; groundFor(treeGroup.visible) }, undefined, () => { loading--; tile.url = null; tile.tex = null })
+      Object.assign(tile.tex, { colorSpace: THREE.SRGBColorSpace, anisotropy: g_aniso(), channel: 1 })
+    }
+    if (seen) tile.used = frameNo
+    setMap(tile, seen && tile.ready && tile.tex ? tile.tex : near && tile.g.plain?.image ? tile.g.plain : tile.g.tex)
+  }
+  const held = tilesOf.filter((t) => t.tex)
+  if (held.length > MAXT) for (const t of held.sort((a, b) => a.used - b.used).slice(0, held.length - MAXT)) {
+    if (t.used === frameNo) break
+    setMap(t, near && t.g.plain?.image ? t.g.plain : t.g.tex); t.tex.image?.close?.(); t.tex.dispose(); t.tex = null; t.ready = false
+  }
+}
+const g_aniso = () => Math.min(8, renderer.capabilities.getMaxAnisotropy())
 
 // ---------- light ----------
 scene.add(new THREE.HemisphereLight(0xdfeaff, 0x5a5440, 1.7))
@@ -136,7 +171,7 @@ for (let b = 0; b < nb; b++) {
   const pal = PAL[k]
   const wallC = new THREE.Color(pick(pal.wall)).offsetHSL(0, 0, (rand() - 0.5) * 0.06)
   const roofC = new THREE.Color(pick(pal.roof)).offsetHSL(0, 0, (rand() - 0.5) * 0.06)
-  const winType = h < 4 ? 0 : k === 2 ? 2 : k === 0 && !roof && h < 8 ? 0 : 1 // 0 none, 1 punched windows, 2 curtain wall
+  const winType = h < 4 ? 0 : k === 2 ? 2 : (k === 1 || k === 5) && h > 20 ? 3 : k === 0 && !roof && h < 8 ? 0 : 1 // 0 none, 1 punched windows, 2 curtain wall, 3 slab + glass ribbon
   const y0 = base + mn, y1 = base + h
   let u = 0
   for (let i = 0; i < n; i++) {
@@ -190,18 +225,34 @@ bmat.onBeforeCompile = (s) => {
     .replace('#include <common>', '#include <common>\nvarying vec3 vWin;')
     .replace('#include <color_fragment>', `#include <color_fragment>
       if (vWin.x > 0.5) {
-        bool curtain = vWin.x > 1.5;
-        vec2 g = vec2(vWin.y / (curtain ? 1.6 : 3.0), vWin.z / 3.2);
+        float type = vWin.x;
+        bool curtain = type > 1.5 && type < 2.5, ribbon = type > 2.5;
+        vec2 g = vec2(vWin.y / (curtain ? 1.6 : ribbon ? 1.45 : 3.0), vWin.z / (ribbon ? 3.0 : 3.2));
         vec2 fw = max(fwidth(g), vec2(1e-4));
         float detail = clamp(1.6 - 2.5 * max(fw.x, fw.y), 0.0, 1.0);
         vec2 f = fract(g);
-        vec3 glass = curtain ? vec3(0.30, 0.42, 0.55) : vec3(0.26, 0.33, 0.42);
-        vec2 lo = curtain ? vec2(0.08, 0.1) : vec2(0.3, 0.32), hi = curtain ? vec2(1.0, 1.0) : vec2(0.8, 0.85);
-        vec2 inside = smoothstep(lo - fw, lo + fw, f) * (1.0 - smoothstep(hi - fw, hi + fw, f));
-        float w = inside.x * inside.y, cover = (hi.x - lo.x) * (hi.y - lo.y);
-        float amt = curtain ? 0.7 : 0.8;
-        vec3 shade = glass * (0.9 + 0.2 * sin(vWin.y * 0.11 + vWin.z * 0.37));
-        diffuseColor.rgb = mix(mix(diffuseColor.rgb, glass, cover * amt), mix(diffuseColor.rgb, shade, w * amt), detail);
+        vec3 base = diffuseColor.rgb, pat, avg;
+        if (ribbon) { // residential tower: light floor slab, then a band of teal glass split by mullions
+          float slab = 1.0 - smoothstep(0.22 - fw.y, 0.22 + fw.y, f.y);
+          float mull = 1.0 - smoothstep(0.07 - fw.x, 0.07 + fw.x, f.x);
+          vec3 glass = vec3(0.30, 0.50, 0.58) * (0.8 + 0.35 * f.y), slabC = min(base * 1.15, vec3(1.0));
+          pat = mix(mix(glass, base, mull), slabC, slab);
+          avg = mix(mix(vec3(0.34, 0.55, 0.62), base, 0.07), slabC, 0.22);
+        } else if (curtain) { // glass tower: teal panes in a light grid, brighter towards the top of each floor
+          vec2 lo = vec2(0.1, 0.16);
+          vec2 inside = smoothstep(lo - fw, lo + fw, f);
+          float w = inside.x * inside.y;
+          vec3 frame = vec3(0.86, 0.9, 0.92), glass = vec3(0.32, 0.62, 0.7) * (0.7 + 0.42 * f.y + 0.08 * sin(vWin.y * 0.05 + vWin.z * 0.02));
+          pat = mix(frame, glass, w);
+          avg = mix(frame, vec3(0.35, 0.64, 0.72), 0.86);
+        } else { // punched windows
+          vec2 lo = vec2(0.3, 0.32), hi = vec2(0.8, 0.85);
+          vec2 inside = smoothstep(lo - fw, lo + fw, f) * (1.0 - smoothstep(hi - fw, hi + fw, f));
+          vec3 glass = vec3(0.24, 0.33, 0.42) * (0.9 + 0.2 * sin(vWin.y * 0.11 + vWin.z * 0.37));
+          pat = mix(base, glass, inside.x * inside.y * 0.85);
+          avg = mix(base, vec3(0.24, 0.33, 0.42), 0.25 * 0.85);
+        }
+        diffuseColor.rgb = mix(avg, pat, detail);
       }`)
 }
 for (const ch of chunks.values()) {
@@ -312,18 +363,25 @@ treeGroup.visible = false
 scene.add(treeGroup)
 const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), tp = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0)
 
-// ---------- boats ----------
+// ---------- boats: pointed white hulls with a cabin, a mast on the sailboats ----------
 const nbo = u32()
-const boats = new THREE.InstancedMesh(new THREE.BoxGeometry(2.6, 1.6, 9).translate(0, 0.8, 0), new THREE.MeshLambertMaterial(), nbo)
+const hullShape = new THREE.Shape([[-0.5, -0.16], [0.28, -0.16], [0.5, 0], [0.28, 0.16], [-0.5, 0.16]].map(([x, y]) => new THREE.Vector2(x, y)))
+const hullGeo = new THREE.ExtrudeGeometry(hullShape, { depth: 1, bevelEnabled: false }).rotateX(-Math.PI / 2)
+const cabinGeo = new THREE.BoxGeometry(0.34, 0.9, 0.2).translate(-0.06, 1.45, 0)
+const hulls = new THREE.InstancedMesh(hullGeo, new THREE.MeshLambertMaterial(), nbo)
+const cabins = new THREE.InstancedMesh(cabinGeo, new THREE.MeshLambertMaterial({ color: 0xdfe4e8 }), nbo)
+const mastM = []
 for (let i = 0; i < nbo; i++) {
-  const x = i16() / 2, y = i16() / 2, z = i16() / 10, a = i16() / 1000, s = 0.6 + rand() * 0.9
-  q.setFromAxisAngle(up, a + Math.PI / 2)
-  boats.setMatrixAt(i, m4.compose(tp.set(x, z, -y), q, sc.set(s, s, s)))
-  boats.setColorAt(i, c.set(rand() < 0.85 ? 0xf4f4f0 : pick([0x2a4d7a, 0xb03a2e, 0x333840])))
+  const x = i16() / 2, y = i16() / 2, z = i16() / 10, a = i16() / 1000, L = u8() / 10
+  q.setFromAxisAngle(up, a)
+  m4.compose(tp.set(x, z, -y), q, sc.set(L, 1.1, L)); hulls.setMatrixAt(i, m4); cabins.setMatrixAt(i, m4)
+  hulls.setColorAt(i, c.set(rand() < 0.86 ? 0xf6f6f2 : pick([0x2a4d7a, 0xb03a2e, 0x333840])))
+  if (rand() < 0.4) mastM.push(new THREE.Matrix4().makeTranslation(x, z + 1 + L * 0.55, -y).multiply(new THREE.Matrix4().makeScale(0.18, L * 1.1, 0.18)))
 }
-boats.computeBoundingSphere()
-boats.castShadow = true
-scene.add(boats)
+const masts = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ color: 0xe8e8e4 }), mastM.length)
+mastM.forEach((m, i) => masts.setMatrixAt(i, m))
+for (const m of [hulls, cabins, masts]) { m.computeBoundingSphere(); m.castShadow = true; scene.add(m) }
+const boatDetail = [cabins, masts] // sub-pixel zoomed out, where they would only shimmer
 
 // ---------- bridges ----------
 const nbr = u32()
@@ -544,8 +602,10 @@ const ink = new THREE.ShaderMaterial({
       vec4 col = texture2D(tColor, vUv);
       float c = d(vec2(0.0));
       float lap = max(abs(d(vec2(1.0, 0.0)) + d(vec2(-1.0, 0.0)) - 2.0 * c), abs(d(vec2(0.0, 1.0)) + d(vec2(0.0, -1.0)) - 2.0 * c));
-      float e = smoothstep(thr, thr * 3.0, lap) * ink;
-      gl_FragColor = vec4(mix(col.rgb, col.rgb * vec3(0.16, 0.18, 0.22), e), 1.0);
+      float e = smoothstep(thr, thr * 6.0, lap) * ink; // faint creases fade in instead of switching on
+      vec3 cc = mix(col.rgb, col.rgb * vec3(0.16, 0.18, 0.22), e);
+      cc = max(mix(vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), cc, 1.22), 0.0); // the illustration's saturation
+      gl_FragColor = vec4(cc, 1.0);
       #include <colorspace_fragment>
     }`,
   depthTest: false, depthWrite: false,
@@ -572,7 +632,9 @@ function loop() {
   if (!dirty) return
   dirty = false
   const treesOn = cam.zoom >= 0.14
-  if (treesOn !== treeGroup.visible) { treeGroup.visible = treesOn; renderer.shadowMap.needsUpdate = true; groundFor(treesOn) }
+  if (treesOn !== treeGroup.visible) { treeGroup.visible = treesOn; renderer.shadowMap.needsUpdate = true }
+  groundFor(treesOn)
+  for (const m of boatDetail) m.visible = cam.zoom >= 0.12
   const carsOn = cam.zoom >= 0.1 && !document.hidden
   if (carsOn !== cars.visible) { cars.visible = carsOn; traffic.postMessage({ run: carsOn }) }
   updateShadows()
