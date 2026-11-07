@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { MapControls } from './vendor/MapControls.js'
+import { createCity, loadPlugins } from './city.js'
 
 // World: east-north-up metres (tools/bake.py); three.js x = east, y = up, z = south.
 // The camera is theirs too (orthographic, looking north, 30° down, 6 drawing px per metre), so a
@@ -29,6 +30,7 @@ function mulberry(a) {
   }
 }
 const pick = (a) => a[Math.floor(rand() * a.length)]
+let city = null // the plugin host (city.js), set once the city is built
 let dirty = true // render on demand: only when the view, the cars or the window changed
 
 status('Downloading the city…', 0.02)
@@ -144,7 +146,8 @@ const g_aniso = () => Math.min(8, renderer.capabilities.getMaxAnisotropy())
 // ---------- light ----------
 scene.add(new THREE.HemisphereLight(0xe8eef8, 0x8a8070, 2.0))
 const sun = new THREE.DirectionalLight(0xfff1dc, 2.3)
-const SUN = new THREE.Vector3(-0.55, 0.62, 0.56).normalize() // afternoon, from the south-west
+const SUN = new THREE.Vector3(-0.55, 0.62, 0.56).normalize() // afternoon, from the south-west (plugins may move it)
+const hemi = scene.children.find((o) => o.isHemisphereLight)
 sun.castShadow = true
 sun.shadow.mapSize.setScalar(mobile ? 2048 : 4096)
 sun.shadow.bias = -0.0005
@@ -711,6 +714,7 @@ controls.addEventListener('change', () => {
   if (!cl.equals(t)) { cam.position.add(cl.clone().sub(t)); t.copy(cl) }
   dirty = true
   onView()
+  city?.emit('view', city.view)
 })
 
 // shadows: a sharp shadow map over what is on screen, redrawn only when the view moves past it
@@ -735,9 +739,9 @@ function updateShadows() {
 const rt = new THREE.WebGLRenderTarget(1, 1, { samples: 4, type: THREE.HalfFloatType })
 rt.depthTexture = new THREE.DepthTexture(1, 1)
 const ink = new THREE.ShaderMaterial({
-  uniforms: { tColor: { value: rt.texture }, tDepth: { value: rt.depthTexture }, sat: { value: 1.2 }, gain: { value: new THREE.Vector3(1, 1, 1) }, px: { value: new THREE.Vector2() }, range: { value: 1 }, thr: { value: 1 }, ink: { value: 0 } },
+  uniforms: { tColor: { value: rt.texture }, tDepth: { value: rt.depthTexture }, sat: { value: 1.2 }, gain: { value: new THREE.Vector3(1, 1, 1) }, tint: { value: new THREE.Vector3(1, 1, 1) }, desat: { value: 0 }, px: { value: new THREE.Vector2() }, range: { value: 1 }, thr: { value: 1 }, ink: { value: 0 } },
   vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
-  fragmentShader: `uniform sampler2D tColor, tDepth; uniform vec2 px; uniform float range, thr, ink, sat; uniform vec3 gain; varying vec2 vUv;
+  fragmentShader: `uniform sampler2D tColor, tDepth; uniform vec2 px; uniform float range, thr, ink, sat, desat; uniform vec3 gain, tint; varying vec2 vUv;
     float d(vec2 o) { return texture2D(tDepth, vUv + o * px).x * range; }
     void main() {
       vec4 col = texture2D(tColor, vUv);
@@ -747,6 +751,7 @@ const ink = new THREE.ShaderMaterial({
       vec3 cc = mix(col.rgb, col.rgb * vec3(0.16, 0.18, 0.22), e);
       cc = max(mix(vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), cc, sat), 0.0); // a little extra saturation (less zoomed out)
       cc *= gain; // brighter, cooler light up close
+      cc = mix(cc, vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), desat) * tint; // plugins' grade (weather, time of day)
       gl_FragColor = vec4(cc, 1.0);
       #include <colorspace_fragment>
       gl_FragDepth = texture2D(tDepth, vUv).x; // the scene's depth, for the trees drawn on top
@@ -775,14 +780,20 @@ function draw() {
     treeMat.uniforms.gain.value.copy(ink.uniforms.gain.value)
     renderer.autoClear = false; renderer.render(treeScene, cam); renderer.autoClear = true
   }
+  if (overlay.children.length) { renderer.autoClear = false; renderer.render(overlay, cam); renderer.autoClear = true }
 }
+const overlay = new THREE.Scene() // plugins' effects, drawn last without outlines
 
 // trees under ~4 px and cars under ~2 px are not drawn (the ground has the crowns painted in)
-function loop() {
+let lastFrame = performance.now()
+function loop(now) {
   requestAnimationFrame(loop)
   controls.update()
+  const dt = Math.min(0.1, (now - lastFrame) / 1000 || 0); lastFrame = now
+  if (city?.animating) dirty = true
   if (!dirty) return
   dirty = false
+  city?.emit('frame', dt, now / 1000)
   const treesOn = cam.zoom >= 0.14
   if (treesOn !== treeGroup.visible) { treeGroup.visible = treesOn; renderer.shadowMap.needsUpdate = true }
   groundFor(treesOn)
@@ -796,12 +807,20 @@ function loop() {
   draw()
 }
 cars.visible = false
-loop()
+requestAnimationFrame(loop)
 document.addEventListener('visibilitychange', () => { dirty = true })
 window.view = { cam, controls, setView, zAt, roads, renderer }
+city = createCity({
+  scene, overlay, camera: cam, renderer, controls, zAt, ll,
+  toLatLon: (x, n) => ({ lat: meta.origin[0] + n / meta.k[1], lon: meta.origin[1] + x / meta.k[0] }),
+  sun, hemi, setSun: (v) => { SUN.copy(v).normalize(); sh.x = NaN; dirty = true },
+  post: { uniforms: { tint: ink.uniforms.tint, desat: ink.uniforms.desat } },
+  requestRender: () => { dirty = true },
+  data: { roads },
+})
+window.city = city
 status('Ready', 1)
 requestAnimationFrame(() => loadingEl.classList.add('done'))
 setTimeout(() => loadingEl.remove(), 800)
 $('#hint').hidden = false
-// cozy procedurally generated lo-fi, with its own small player (plugins/lofi)
-import('./plugins/lofi/lofi.js').then((m) => m.default()).catch((e) => console.warn('lofi', e))
+loadPlugins(city) // plugins/index.json

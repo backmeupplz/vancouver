@@ -44,6 +44,12 @@
   #loading .fill { height: 100%; width: 0; background: var(--accent); border-radius: 2px; transition: width .25s; }
   #loading.error .fill { background: #e8857f; }
   .lofi { --lofi-bottom: 12px; }
+  #tools { right: 12px; top: 12px; display: flex; gap: 2px; padding: 4px; z-index: 20; }
+  #tools[hidden], .tool-panel[hidden] { display: none; }
+  #tools button { font: inherit; color: var(--text); background: none; border: 0; border-radius: 7px; padding: 6px 10px; cursor: pointer; white-space: nowrap; }
+  #tools button:hover, #tools button[aria-expanded="true"], #tools button[aria-pressed="true"] { background: rgba(255, 255, 255, 0.1); }
+  .tool-panel { z-index: 21; padding: 12px 14px; width: min(300px, calc(100% - 24px)); max-height: calc(100% - 120px); overflow-y: auto; }
+  .toast { left: 50%; top: 64px; transform: translateX(-50%); padding: 8px 14px; z-index: 40; }
   @media (max-width: 600px) { #hint { display: none } }
 </style>
 <script type="importmap">{ "imports": { "three": "./vendor/three.module.min.js" } }</script>
@@ -64,6 +70,7 @@
   <h2>Code</h2>
   <p><a href="https://git.borodutch.com/backmeupplz/vancouver">Source code</a> · <a href="https://git.borodutch.com/backmeupplz/vancouver/src/branch/main/PLUGINS.md">Write a plugin</a></p>
 </div>
+<div id="tools" class="panel" hidden></div>
 <div id="hint" class="panel" hidden>Drag to pan · scroll to zoom · right-drag to turn</div>
 <div id="loading" role="status" aria-live="polite"><div class="card"><div class="title">Vancouver in code</div><div class="step">Loading…</div><div class="track"><div class="fill"></div></div></div></div>
 <script>
