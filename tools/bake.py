@@ -178,11 +178,17 @@ DRIVE = {'motorway': 0, 'trunk': 0, 'motorway_link': 0, 'trunk_link': 1, 'primar
 
 # LiDAR footprints (City of Vancouver 2009): height above ground and roof type, indexed by centroid
 lidar = {}
+segments = []  # LiDAR roof sections (one per height level of a building): ring in world metres, height, roof type
 for f in json.load(open('data/bf2009.geojson'))['features']:
     p = f['properties']; g = p.get('geo_point_2d')
     if not g or p.get('maxht_m') is None: continue
     x, y = ll(g['lat'], g['lon'])
     lidar.setdefault((int(x // 40), int(y // 40)), []).append((x, y, p))
+    geo = f['geometry']; polys = geo['coordinates'] if geo['type'] == 'MultiPolygon' else [geo['coordinates']] if geo['type'] == 'Polygon' else []
+    for poly in polys:
+        r = [ll(b, a) for a, b in poly[0]]
+        if r[0] == r[-1]: r = r[:-1]
+        if len(r) >= 3 and (p.get('hgt_agl') or 0) >= 2 and area(r) >= 6: segments.append((r, p['hgt_agl'], (p.get('rooftype') or '').lower()))
 print('lidar footprints', sum(map(len, lidar.values())))
 
 
@@ -470,7 +476,8 @@ for R in REGIONS:
             h += random.random() * 0.15  # no two roofs exactly level: overlapping footprints never z-fight
             # each footprint pulled in by its own few centimetres: walls of overlapping or touching
             # buildings are never coplanar, so they cannot z-fight
-            all_buildings.append((inset(r, random.uniform(0.03, 0.3)), base, h, mn, kind(t, h, c), roof))
+            gid = random.randrange(1, 1 << 30)
+            all_buildings.append((inset(r, random.uniform(0.03, 0.3)), base, h, mn, kind(t, h, c), roof, gid, h, t, r))
     # the same building mapped twice with different outlines (often two approximations of a round tower):
     # keep the bigger one when most of a footprint is already covered by a kept one of about the same height
     rows = sorted(all_buildings[nb0:], key=lambda b: -area(b[0]))
@@ -491,15 +498,77 @@ for R in REGIONS:
         cell_ = top[y0_:y1_, x0_:x1_]; cell_[m] = np.maximum(cell_[m], h)
         kept_b.append(b)
     print('buildings', len(kept_b), 'dropped as duplicates', len(rows) - len(kept_b))
-    all_buildings[nb0:] = kept_b
+
+    # LiDAR sections: where the city's 2009 survey has a building that is still there (a section mostly inside a
+    # current OSM footprint), its sections replace the OSM block: podiums, towers, setbacks at their real heights.
+    # OSM wins where it is clearly taller (rebuilt since 2009) or the survey covers too little of it.
+    G = 2.0; gw, gh = int(WM / G) + 2, int(HM / G) + 2
+    gx = lambda x: (x - X0) / G; gy = lambda y: (Y1 - y) / G
+    ids = Image.new('I', (gw, gh), 0); idd = ImageDraw.Draw(ids)
+    for n_, b in enumerate(kept_b): idd.polygon([(gx(x), gy(y)) for x, y in b[9]], fill=n_ + 1)
+    ids = np.array(ids)
+    seg_of = {}
+    for r, hg, rt in segments:
+        xs = [p[0] for p in r]; ys = [p[1] for p in r]
+        if max(xs) < X0 or min(xs) > X1 or max(ys) < Y0 or min(ys) > Y1: continue
+        x0_, y0_ = max(0, int(gx(min(xs)))), max(0, int(gy(max(ys)))); x1_, y1_ = min(gw, int(gx(max(xs))) + 2), min(gh, int(gy(min(ys))) + 2)
+        if x1_ <= x0_ or y1_ <= y0_: continue
+        m = Image.new('L', (x1_ - x0_, y1_ - y0_), 0)
+        ImageDraw.Draw(m).polygon([(gx(x) - x0_, gy(y) - y0_) for x, y in r], fill=1)
+        m = np.array(m, bool)
+        if not m.any():
+            cc = cent(r); i_, j_ = int(gy(cc[1])), int(gx(cc[0]))
+            under = ids[i_:i_ + 1, j_:j_ + 1].ravel() if 0 <= i_ < gh and 0 <= j_ < gw else np.zeros(0, int)
+        else: under = ids[y0_:y1_, x0_:x1_][m]
+        if not len(under): continue
+        vals, cnt = np.unique(under, return_counts=True)
+        k_ = cnt.argmax()
+        if vals[k_] == 0 or cnt[k_] < 0.5 * len(under): continue
+        seg_of.setdefault(int(vals[k_]) - 1, []).append((r, hg, rt, m.sum() if m.any() else 1))
+    out_rows, nseg, nrep = [], 0, 0
+    for n_, b in enumerate(kept_b):
+        segs = seg_of.get(n_)
+        r_osm, base, h, mn, k, roof, gid, gh_, t, raw = b
+        tagged_h = hnum(t.get('height')) or (hnum(t.get('building:levels')) or 0) * 3.1
+        if segs and mn == 0:
+            covered = sum(sg[3] for sg in segs) * G * G / max(1.0, area(raw))
+            top_h = max(sg[1] for sg in segs)
+            if covered > 0.6 and not (tagged_h and tagged_h > 1.4 * top_h + 3):
+                nrep += 1
+                kk = kind(t, top_h, cent(raw))
+                for r, hg, rt, _ in segs:
+                    rf = None; hh = hg
+                    if rt == 'pitched' and hg < 16:
+                        cx, cy, ang, hl, hw, ar = obb(r)
+                        if area(r) / ar > 0.75 and hw > 2:
+                            hh = max(2.6, hg - min(hw * 0.9, 3.5)); rf = (cx, cy, ang, hl, hw, hg)
+                    hh += random.random() * 0.15
+                    out_rows.append((inset(r, random.uniform(0.03, 0.3)), base, hh, 0, kk, rf, gid, top_h, t, r)); nseg += 1
+                continue
+        out_rows.append(b)
+    print('lidar: replaced', nrep, 'OSM buildings with', nseg, 'sections')
+    all_buildings[nb0:] = out_rows
 
     # ---------- trees ----------
     fp = ndimage.binary_dilation(np.array(footprint) > 0, iterations=1)
-    roadm = Image.new('L', (TW, TH), 0); rmd = ImageDraw.Draw(roadm)
+    # where no tree may stand: the carriageways as the tiles draw them (1.9x the nominal width, plus the kerb),
+    # piers, and sports fields, tracks, playgrounds, car parks, beaches, pools, rail yards, building sites
+    roadm = Image.new('L', (TW * 2, TH * 2), 0); rmd = ImageDraw.Draw(roadm)  # 1 m grid
     for l, w in roads:
-        if w >= 2: rmd.line([px(p, 1) for p in l], fill=255, width=max(1, int((w + 1) / RES)))
-    for e in piers: rmd.line([px(p, 1) for p in line(e)], fill=255, width=2)
-    roadm = np.array(roadm) > 0
+        if w >= 2.4: rmd.line([px(p, 2) for p in l], fill=255, width=max(2, int(round(w * 1.9 + 1.2))), joint='curve')
+    for e in piers: rmd.line([px(p, 2) for p in line(e)], fill=255, width=4)
+    for order, col, e, kind_ in areas:
+        if kind_ in ('pitch', 'track', 'stadium', 'playground', 'beach', 'sand', 'swimming_pool', 'construction', 'railway'):
+            for outers, _ in shapes(e):
+                for r in outers: rmd.polygon([px(p, 2) for p in r], fill=255)
+    for e in json.load(open(R['parking']))['elements']:
+        for outers, _ in shapes(e):
+            for r in outers: rmd.polygon([px(p, 2) for p in r], fill=255)
+    road1 = np.array(roadm) > 0
+    roadm = road1.reshape(TH, 2, TW, 2).max(axis=(1, 3)) if road1.shape == (TH * 2, TW * 2) else road1[::2, ::2]
+    fp1 = np.array(footprint.resize((TW * 2, TH * 2), Image.NEAREST)) > 0
+    blocked1 = road1 | ndimage.binary_dilation(fp1, iterations=1) | np.array(Image.fromarray(water).resize((TW * 2, TH * 2), Image.NEAREST))
+    d_free, (fi, fj) = ndimage.distance_transform_edt(blocked1, return_indices=True)  # nearest free metre for every metre
     open_ = ~(water | fp | roadm)
     d_road = ndimage.distance_transform_edt(~roadm) * RES
     wood, park, res = np.array(woodmask) > 0, np.array(parkmask) > 0, np.array(resmask) > 0
@@ -526,8 +595,16 @@ for R in REGIONS:
                 k = 5 if w_ and random.random() < 0.7 else random.choice([0, 0, 0, 0, 0, 1, 2, 3]) if not w_ else random.choice([0, 0, 0, 1])
                 hh = random.uniform(16, 38) if k == 5 else random.uniform(7, 16) + (4 if w_ else 0)
                 all_trees.append((x, y, zat(x, y), k, tree_colour(k, w_), hh))
-    for x, y, k, h in city_trees:
-        if inbox((x, y)) and not in_void(x, y) and not fp[cell(x, y)]: all_trees.append((x, y, zat(x, y), k, tree_colour(k), h))
+    moved = dropped = 0
+    for x, y, k, h in city_trees:  # street trees: onto the boulevard if the drawing put them on the road
+        if not inbox((x, y)) or in_void(x, y): continue
+        i, j = min(TH * 2 - 1, max(0, int((Y1 - y)))), min(TW * 2 - 1, max(0, int((x - X0))))
+        if blocked1[i, j]:
+            if d_free[i, j] > 4.5: dropped += 1; continue
+            i2, j2 = fi[i, j], fj[i, j]
+            x, y = X0 + j2 + 0.5, Y1 - i2 - 0.5; moved += 1
+        all_trees.append((x, y, zat(x, y), k, tree_colour(k), h))
+    print('street trees moved off roads', moved, 'dropped', dropped)
     print('trees', len(all_trees) - nt0)
     # under the 3D trees (zoomed in): their shadows, cast away from the afternoon sun in the south-west
     plain = ground.copy(); sd = Image.new('L', (TW, TH), 0); sdd = ImageDraw.Draw(sd)
@@ -664,6 +741,14 @@ for R in REGIONS:
                 zebra.append([(bx + dx * s1 + nx_ * s2, by + dy * s1 + ny_ * s2) for s1, s2 in ((-1.3, -0.28), (1.3, -0.28), (1.3, 0.28), (-1.3, 0.28))])
                 o += 1.1
     zebra_items = [(bbox_of(z), z) for z in zebra]
+    pitch_items = []  # sports fields with their markings
+    for order, col, e, kind_ in areas:
+        if kind_ != 'pitch': continue
+        sport = e.get('tags', {}).get('sport', '')
+        for o, _ in shapes(e):
+            r = o[0]
+            if len(r) < 4 or area(r) < 150: continue
+            pitch_items.append((bbox_of(r), r, obb(r), sport))
     # parked cars: along the kerbs of residential and collector streets, and in rows on surface lots
     CARC = [(243, 242, 236), (196, 200, 205), (43, 47, 53), (194, 58, 47), (47, 94, 166), (91, 96, 104), (34, 52, 90),
             (63, 122, 75), (214, 204, 180), (139, 37, 51), (236, 235, 229), (154, 161, 170), (240, 194, 50)]
@@ -780,6 +865,35 @@ for R in REGIONS:
                 d.polygon(rect(0.75, 0.72, -ca * 0.05, -sa * 0.05), fill=tuple(min(255, int(v * 1.08)) for v in col))  # roof
             for b, z in zebra_items:
                 if inb(b): d.polygon([P(p) for p in z], fill=(232, 232, 226))
+            for b, r, (cx, cy, ang, hl, hw, ar), sport in pitch_items:
+                if not inb(b): continue
+                ca, sa = math.cos(ang), math.sin(ang)
+                W_ = lambda u, v: P((cx + u * ca - v * sa, cy + u * sa + v * ca))
+                rect = lambda u0, u1, v0, v1: [W_(u0, v0), W_(u1, v0), W_(u1, v1), W_(u0, v1)]
+                court = any(k in sport for k in ('tennis', 'basketball', 'pickleball', 'volleyball')) or hl * hw < 700
+                if court:
+                    d.polygon([P(p) for p in r], fill=(74, 128, 92) if 'tennis' in sport else (176, 98, 72) if 'basketball' in sport else (70, 120, 150))
+                    d.polygon(rect(-hl + 1, hl - 1, -hw + 1, hw - 1), outline=(236, 236, 230), width=max(2, int(0.15 * kpx)))
+                    d.line([W_(0, -hw + 1), W_(0, hw - 1)], fill=(236, 236, 230), width=max(2, int(0.15 * kpx)))
+                    continue
+                if 'baseball' in sport or 'softball' in sport:  # infield diamond in clay
+                    rr = min(hl, hw) * 0.8
+                    d.polygon([W_(-hl + 2, -hw + 2), W_(-hl + 2 + rr, -hw + 2), W_(-hl + 2, -hw + 2 + rr)], fill=(184, 132, 92))
+                    continue
+                n_s = max(6, int(hl / 4.5))  # mowing stripes across the length
+                for k_ in range(n_s):
+                    u0 = -hl + 2 * hl * k_ / n_s
+                    d.polygon(rect(u0, u0 + 2 * hl / n_s, -hw, hw), fill=(96, 158, 70) if k_ % 2 else (110, 172, 80))
+                lw = max(2, int(0.18 * kpx)), (238, 240, 232)
+                m_ = 1.5
+                d.polygon(rect(-hl + m_, hl - m_, -hw + m_, hw - m_), outline=lw[1], width=lw[0])
+                d.line([W_(0, -hw + m_), W_(0, hw - m_)], fill=lw[1], width=lw[0])
+                cr = min(9.15, hw * 0.3)
+                d.ellipse([W_(0, 0)[0] - cr * kpx, W_(0, 0)[1] - cr * kpx, W_(0, 0)[0] + cr * kpx, W_(0, 0)[1] + cr * kpx], outline=lw[1], width=lw[0])
+                for sgn in (1, -1):  # penalty boxes
+                    bl, bw = min(16.5, hl * 0.3), min(20.15, hw * 0.6)
+                    u = sgn * (hl - m_)
+                    d.polygon(rect(min(u, u - sgn * bl), max(u, u - sgn * bl), -bw, bw), outline=lw[1], width=lw[0])
             sh = Image.new('L', (S2, S2), 0); sd2 = ImageDraw.Draw(sh)
             for (x, y, r) in [t for a_ in (-1, 0, 1) for b_ in (-1, 0, 1) for t in tree_cells.get((ti + a_, tj + b_), [])]:
                 cx_, cy_ = P((x, y)); rr = r * kpx
@@ -802,8 +916,8 @@ for R in REGIONS:
 # ---------- pack (after the terrain grids) ----------
 qz = lambda z: max(-32767, min(32767, int(round(z * 10))))  # decimetres
 out += struct.pack('<I', len(all_buildings))
-for r, base, h, mn, k, roof in all_buildings:
-    out += struct.pack('<HhHHBB', len(r), qz(base), int(min(h, 400) * 10), int(min(mn, 400) * 10), k, 1 if roof else 0)
+for r, base, h, mn, k, roof, gid, gh_, *_ in all_buildings:
+    out += struct.pack('<HhHHBBIH', len(r), qz(base), int(min(h, 400) * 10), int(min(mn, 400) * 10), k, 1 if roof else 0, gid, int(min(gh_, 400) * 10))
     for x, y in r: out += struct.pack('<hh', q(x), q(y))
     if roof:
         cx, cy, ang, hl, hw, ridge = roof

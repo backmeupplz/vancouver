@@ -169,9 +169,10 @@ function inPoly(x, z, pts) {
   return c
 }
 const units = [] // rooftop plant: x, y, z, sx, sy, sz, grey
+const glassRail = [0xb8dce0, 0xc8e4e8, 0xa8ccd8, 0xd8e8ea, 0x98c0cc].map((h) => new THREE.Color(h))
 const UP = v3(0, 1, 0)
 for (let b = 0; b < nb; b++) {
-  const n = u16(), base = i16() / 10, h = u16() / 10, mn = u16() / 10, k = u8(), pitched = u8()
+  const n = u16(), base = i16() / 10, h = u16() / 10, mn = u16() / 10, k = u8(), pitched = u8(), gid = u32(), gH = u16() / 10
   const pts = []
   for (let i = 0; i < n; i++) pts.push(new THREE.Vector2(i16() / 2, -i16() / 2)) // (x, z)
   let roof = null
@@ -180,7 +181,9 @@ for (let b = 0; b < nb; b++) {
   let cx = 0, cz = 0, x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity
   for (const p of pts) { cx += p.x / n; cz += p.y / n; x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); z0 = Math.min(z0, p.y); z1 = Math.max(z1, p.y) }
   const B = chunk(cx, -cz).b ??= { pos: [], nor: [], col: [], win: [] }
-  const seed = rand(), r = rand(), tower = h > 20
+  // style and colours come from the building (gid), so every LiDAR section of one building matches
+  const gr = mulberry(gid), pick = (a) => a[Math.floor(gr() * a.length)]
+  const seed = gr(), r = gr(), tower = gH > 20
   let style, wall, roofHex
   if (tower) {
     style = k === 2 && r < 0.55 ? 2 : r < 0.15 ? 2 : r < 0.9 ? 3 : 1
@@ -191,8 +194,8 @@ for (let b = 0; b < nb; b++) {
   } else if (k === 3) { style = 1; wall = pick(BRICK); roofHex = pick([0x8a7a70, 0x9a8a80, 0xb0aaa0]) }
   else if (k === 4 || k === 2) { style = h < 5 ? 0 : 4; wall = pick([...LOW_WALL, 0xb8c4cc, 0xd8d8d4, 0xc4a888]); roofHex = pick(FLAT_ROOF) }
   else { style = h > 9 && r < 0.4 ? 3 : 1; wall = pick([...LOW_WALL, ...TOWER_FRAME]); roofHex = pick(FLAT_ROOF) }
-  const wallC = new THREE.Color(wall).offsetHSL(0, 0, (rand() - 0.5) * 0.05)
-  const roofC = new THREE.Color(roofHex || 0).offsetHSL(0, 0, (rand() - 0.5) * 0.05)
+  const wallC = new THREE.Color(wall).offsetHSL(0, 0, (gr() - 0.5) * 0.05)
+  const roofC = new THREE.Color(roofHex || 0).offsetHSL(0, 0, (gr() - 0.5) * 0.05)
   const y0 = base + mn, y1 = base + h
   const flat = !roof
   const par = flat && h >= 5 && n <= 80 ? (tower ? 1.2 : 0.8) : 0 // parapet
@@ -213,10 +216,38 @@ for (let b = 0; b < nb; b++) {
     }
     u += len
   }
+  if (style === 3 && h - mn > 9 && n <= 120) { // balconies: a slab and a glass railing on every floor, all the way round
+    const Bb = chunk(cx, -cz).bal ??= { pos: [], nor: [], col: [], win: [] }
+    const D = 1.15, ring = pts.map((p, i) => { // the outline pushed out by D (mitred)
+      const a = pts[(i + n - 1) % n], b = pts[(i + 1) % n]
+      let n1x = p.y - a.y, n1z = -(p.x - a.x), n2x = b.y - p.y, n2z = -(b.x - p.x)
+      const l1 = Math.hypot(n1x, n1z) || 1, l2 = Math.hypot(n2x, n2z) || 1
+      n1x /= l1; n1z /= l1; n2x /= l2; n2z /= l2
+      let mx = n1x + n2x, mz = n1z + n2z; const ml = Math.hypot(mx, mz)
+      if (ml < 1e-6) return new THREE.Vector2(p.x + n1x * D, p.y + n1z * D)
+      mx /= ml; mz /= ml
+      const k = Math.min(D * 2.5, D / Math.max(0.3, mx * n1x + mz * n1z))
+      return new THREE.Vector2(p.x + mx * k, p.y + mz * k)
+    })
+    const slabC = new THREE.Color(wall).offsetHSL(0, 0, 0.05), railC = glassRail[Math.floor(seed * glassRail.length)], pw = ROOFW(seed)
+    for (let fy = y0 + 3; fy < y1 - 2.4; fy += 3) {
+      for (let i = 0; i < n; i++) {
+        const a = pts[i], p = pts[(i + 1) % n], A = ring[i], P = ring[(i + 1) % n]
+        const len = Math.hypot(p.x - a.x, p.y - a.y)
+        if (len < 2.5) continue
+        const out = v3((p.y - a.y) / len, 0, -(p.x - a.x) / len)
+        tri(Bb, v3(a.x, fy, a.y), v3(p.x, fy, p.y), v3(P.x, fy, P.y), slabC, UP, pw); tri(Bb, v3(a.x, fy, a.y), v3(P.x, fy, P.y), v3(A.x, fy, A.y), slabC, UP, pw)
+        const sl = c.copy(slabC).multiplyScalar(0.86 + 0.14 * Math.abs(out.x))
+        tri(Bb, v3(A.x, fy - 0.4, A.y), v3(P.x, fy - 0.4, P.y), v3(P.x, fy, P.y), sl, out, pw); tri(Bb, v3(A.x, fy - 0.4, A.y), v3(P.x, fy, P.y), v3(A.x, fy, A.y), sl, out, pw)
+        const rl = c.copy(railC).multiplyScalar(0.9 + 0.1 * Math.abs(out.x))
+        tri(Bb, v3(A.x, fy, A.y), v3(P.x, fy, P.y), v3(P.x, fy + 1.05, P.y), rl, out, pw); tri(Bb, v3(A.x, fy, A.y), v3(P.x, fy + 1.05, P.y), v3(A.x, fy + 1.05, A.y), rl, out, pw)
+      }
+    }
+  }
   if (flat) {
     const top = pts.map((p) => v3(p.x, y1, p.y))
     for (const [a, bb, cc] of THREE.ShapeUtils.triangulateShape(pts, [])) tri(B, top[a], top[bb], top[cc], roofC, UP, ROOFW(seed))
-    if (h > 18 && n >= 4) { // a plant room on top of the taller buildings
+    if (h > 18 && h >= gH - 1 && n >= 4) { // a plant room on top of the tallest section
       const pk = pts.map((p) => new THREE.Vector2(cx + (p.x - cx) * 0.38, cz + (p.y - cz) * 0.38)), y2 = y1 + 3 + rand() * 2.5
       const pc = new THREE.Color(rand() < 0.5 ? wall : roofHex).offsetHSL(0, 0, 0.04)
       for (let i = 0; i < pk.length; i++) { // (triangulateShape may have dropped a repeated last point)
@@ -243,7 +274,7 @@ for (let b = 0; b < nb; b++) {
   const ax = v3(Math.cos(a), 0, -Math.sin(a)), bx = v3(-Math.sin(a), 0, -Math.cos(a))
   const C = v3(rx, 0, -ry), at = (s, t, y) => C.clone().addScaledVector(ax, s).addScaledVector(bx, t).setY(y)
   const yr = base + ridge, L = hl + O, Wd = hw + O, gable = hl / hw > 1.15, rr = gable ? L : Math.max(0.01, L - Wd)
-  const rc = new THREE.Color(pick(HOUSE_ROOF)).offsetHSL(0, 0, (rand() - 0.5) * 0.08)
+  const rc = new THREE.Color(pick(HOUSE_ROOF)).offsetHSL(0, 0, (gr() - 0.5) * 0.08)
   for (const s of [1, -1]) {
     const side = bx.clone().multiplyScalar(s).add(UP)
     tri(B, at(-L, s * Wd, y1), at(L, s * Wd, y1), at(rr, 0, yr), rc, side, ROOFW(seed))
@@ -322,18 +353,23 @@ bmat.onBeforeCompile = (s) => {
       // contact shadow where walls meet the ground
       diffuseColor.rgb *= mix(0.62, 1.0, smoothstep(0.0, 5.0, z));`)
 }
+const balconies = new THREE.Group() // detail: only drawn once a floor is a few pixels tall
 for (const ch of chunks.values()) {
-  const B = ch.b; if (!B) continue
-  const g = new THREE.BufferGeometry()
-  g.setAttribute('position', new THREE.Float32BufferAttribute(B.pos, 3))
-  g.setAttribute('normal', new THREE.BufferAttribute(new Int8Array(B.nor), 3, true))
-  g.setAttribute('color', new THREE.BufferAttribute(new Uint8Array(B.col), 3, true))
-  g.setAttribute('aWin', new THREE.Float32BufferAttribute(B.win, 4))
-  const m = new THREE.Mesh(g, bmat)
-  m.castShadow = m.receiveShadow = true
-  scene.add(m)
-  delete ch.b
+  for (const [key, parent] of [['b', scene], ['bal', balconies]]) {
+    const B = ch[key]; if (!B) continue
+    const g = new THREE.BufferGeometry()
+    g.setAttribute('position', new THREE.Float32BufferAttribute(B.pos, 3))
+    g.setAttribute('normal', new THREE.BufferAttribute(new Int8Array(B.nor), 3, true))
+    g.setAttribute('color', new THREE.BufferAttribute(new Uint8Array(B.col), 3, true))
+    g.setAttribute('aWin', new THREE.Float32BufferAttribute(B.win, 4))
+    const m = new THREE.Mesh(g, bmat)
+    m.castShadow = m.receiveShadow = true
+    parent.add(m)
+    delete ch[key]
+  }
 }
+balconies.visible = false
+scene.add(balconies)
 const roofUnits = (() => {
   const n = units.length / 7, m = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0), new THREE.MeshLambertMaterial(), n)
   const mm = new THREE.Matrix4()
@@ -709,7 +745,7 @@ function draw() {
   if (rt.width !== w || rt.height !== h) rt.setSize(w, h)
   ink.uniforms.px.value.set(pr / w, pr / h) // one CSS pixel
   ink.uniforms.range.value = cam.far - cam.near
-  ink.uniforms.thr.value = 0.35 / (K * cam.zoom) // metres per CSS pixel
+  ink.uniforms.thr.value = Math.max(0.35 / (K * cam.zoom), 0.9) // metres per CSS pixel; never below a balcony step
   ink.uniforms.ink.value = THREE.MathUtils.smoothstep(cam.zoom, 0.05, 0.16)
   ink.uniforms.sat.value = 0.96 + 0.24 * THREE.MathUtils.smoothstep(cam.zoom, 0.04, 0.2)
   const near = THREE.MathUtils.smoothstep(cam.zoom, 0.04, 0.12) // the grade is for the close views; zoomed out the colours already match
@@ -734,6 +770,8 @@ function loop() {
   if (treesOn !== treeGroup.visible) { treeGroup.visible = treesOn; renderer.shadowMap.needsUpdate = true }
   groundFor(treesOn)
   for (const m of boatDetail) m.visible = cam.zoom >= 0.12
+  const balOn = cam.zoom >= 0.3 // a floor is ~5 px tall from here; below it the painted slabs read the same
+  if (balOn !== balconies.visible) { balconies.visible = balOn; renderer.shadowMap.needsUpdate = true }
   masts.visible = cam.zoom >= 0.3 // thinner than a pixel below that
   const carsOn = cam.zoom >= 0.1 && !document.hidden
   if (carsOn !== cars.visible) { cars.visible = carsOn; traffic.postMessage({ run: carsOn }) }
