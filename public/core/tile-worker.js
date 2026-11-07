@@ -326,19 +326,33 @@ function graph(t, lines) {
 }
 
 // ---------------------------------------------------------------- buildings
-const PALETTES = [
+const PALETTES = [ // style ids from tools/tiles.py (HOUSE, APT, ...)
   // 0 house
   { wall: [0xf2efe6, 0xe8e0cc, 0xd9d2c3, 0xc9d6dc, 0xb8c8d4, 0xe6d6a8, 0xb8c8a8, 0xd8a890, 0xf0e8d8, 0xa8b8c4, 0xe0c8b0, 0x8fa4b4], roof: [0x4a4f55, 0x5f6366, 0x6e6a66, 0x7a5a48, 0x3e4349, 0x8c4a3a, 0x9a5038, 0x52606a, 0x6b4d3c] },
   // 1 apartments
   { wall: [0xf6f6f2, 0xf0f2f0, 0xe8eef0, 0xf2ece0, 0xeadcc0, 0xe4e6e6, 0xe8d0b0, 0xd8c8a8, 0xc8d0d4], roof: [0xc4c6c4, 0xb4b8b8, 0xd2d0ca, 0xa8acae, 0x5a6068, 0x6a7078] },
   // 2 office / glass
   { wall: [0xe6ecee, 0xd6e0e4, 0xc8d4dc, 0xf0f2f0, 0xb8c8d0], roof: [0xc4c6c4, 0xb4b8b8, 0x9ea4a8, 0x5a6068] },
-  // 3 brick / heritage
-  { wall: [0xa8604a, 0x9a5442, 0xb57058, 0x8e4e3e, 0xb86a50, 0xc8a080], roof: [0x6e5a50, 0x7c6a60, 0x4a4f55, 0x5a7a6a] },
-  // 4 commercial / industrial
+  // 3 brick / heritage (Gastown, Chinatown, Yaletown warehouses: red and brown brick, a few painted)
+  { wall: [0x8a4c3c, 0x7c4636, 0x925844, 0x744234, 0x9a6448, 0x845440, 0x7a5040, 0xb08a6a], roof: [0x6e5a50, 0x7c6a60, 0x4a4f55, 0x5a5e62] },
+  // 4 commercial
   { wall: [0xc9c2b2, 0xd6cfbf, 0xb8b4aa, 0xe0d8c6, 0xb8c4cc, 0xd8d8d4, 0xc4a888, 0xa8b0b4], roof: [0xc4c6c4, 0xb4b8b8, 0xd2d0ca, 0xa8acae, 0x9ea4a8, 0x7c8288] },
   // 5 civic / white
   { wall: [0xf2f0ea, 0xeeeeea, 0xe4e6e6, 0xe8e0d0, 0xd8d0c0], roof: [0xbcbcb8, 0xc8c8c4, 0x6a8a7a, 0x5a6068] },
+  // 6 glass condo tower: white and pale grey mullions and slab edges around blue-green glass
+  { wall: [0xf4f6f4, 0xeef2f2, 0xe2e8ea, 0xf6f4ee, 0xd8e0e4], roof: [0xc8cac8, 0xbcc0c0, 0xd4d4d0] },
+  // 7 concrete (West End towers, 1960s-70s offices, parkades)
+  { wall: [0xc8c0b0, 0xbab4a8, 0xd2cab8, 0xaca8a0, 0xc4beb4, 0xd8ceb8, 0xb0b4b4], roof: [0xb8b8b4, 0xa8aaa8, 0xc4c4c0] },
+  // 8 metal shed (warehouses, mills, port sheds)
+  { wall: [0xb8bcbe, 0xa8b0b4, 0xc8c8c0, 0x8a98a4, 0xd0ccbc, 0x7c8c84, 0xc4b8a0, 0x9aa4ac], roof: [0xb0b4b6, 0xc0c4c4, 0xa0a8ac, 0xd8dad8, 0x8c949a] },
+  // 9 big box / mall
+  { wall: [0xd8d2c4, 0xe4e0d6, 0xc8c4bc, 0xd4ccbc, 0xe8e4dc], roof: [0xd8d8d4, 0xe0e0dc, 0xc8cac8] },
+  // 10 stone
+  { wall: [0xc8bca4, 0xb8ae98, 0xd4c8b0, 0xa8a090, 0xbcb4a4], roof: [0x5a6a64, 0x6a5a50, 0x4a4f55, 0x5a8a78] },
+  // 11 character house: painted wood siding (deep greens, blues, greys, creams, a burgundy)
+  { wall: [0x5f7a68, 0x6a8098, 0x8a9a8c, 0xe8e0c8, 0x7e8c94, 0x9a5048, 0xd8c89c, 0x4e6a7a, 0xa8b4a0, 0xf0ece0, 0x8a7a68], roof: [0x3e4246, 0x4a4f55, 0x2f3236, 0x5a5048, 0x55595c] },
+  // 12 Vancouver Special: white or cream stucco
+  { wall: [0xf2efe6, 0xece6d6, 0xe8e4dc, 0xf4f0e8, 0xe0dccc], roof: [0x4a4642, 0x5a5048, 0x3e4349, 0x6a5a4c] },
 ]
 function mulberry(a) {
   return () => {
@@ -349,6 +363,9 @@ function mulberry(a) {
   }
 }
 const hex = (h) => [((h >> 16) & 255) / 255, ((h >> 8) & 255) / 255, (h & 255) / 255]
+// colours meant as seen (OSM building:colour / roof:colour, the material palettes): vertex colours are linear
+const lin = (h) => hex(h).map((c) => c ** 2.2)
+const TRUE = new Set([3, 8, 10, 11]) // palettes given as seen (brick, metal, stone, painted wood)
 const shade = (c, f) => [Math.min(1, c[0] * f), Math.min(1, c[1] * f), Math.min(1, c[2] * f)]
 const RAIL = [0xb8dce0, 0xc8e4e8, 0xa8ccd8, 0xd8e8ea, 0x98c0cc].map(hex)
 
@@ -367,9 +384,16 @@ function buildings(t, terr, level) {
     let mn = 0, roofShape = 0, ridge = 0, wallHex = 0, roofHex = 0, gid = 0, gH = h
     if (fl & 1) { mn = dv.getUint16(o, true) / 10; o += 2 }
     if (fl & 2) { roofShape = dv.getUint8(o); ridge = dv.getUint16(o + 1, true) / 10; o += 3 }
+    const roofBits = roofShape & 48; roofShape &= 15 // 16: ridge along the short axis, 32: a shed roof's high side flipped
     if (fl & 4) { wallHex = dv.getUint32(o, true) | 0x1000000; o += 4 }
     if (fl & 8) { roofHex = dv.getUint32(o, true) | 0x1000000; o += 4 }
     if (fl & 16) { gH = dv.getUint16(o, true) / 10; gid = dv.getUint32(o + 2, true); o += 6 }
+    let fh = 0, bits = 0, plant = null // storey height; bits 1 storefront, 2 residential; rooftop plant the LiDAR saw
+    if (fl & 32) { fh = dv.getUint8(o) / 20; bits = dv.getUint8(o + 1); o += 2 }
+    if (fl & 64) {
+      const nu = dv.getUint8(o); o += 1; plant = []
+      for (let k = 0; k < nu; k++, o += 8) plant.push([dv.getInt16(o, true) * t.k, dv.getInt16(o + 2, true) * t.k, dv.getUint8(o + 4) / 10, dv.getUint8(o + 5) / 10, dv.getUint8(o + 6) / 20, (dv.getUint8(o + 7) / 256) * Math.PI])
+    }
     const [flatPts, o2] = readRing(t, o); o = o2
     const np = flatPts.length / 2
     let pts = []
@@ -385,21 +409,34 @@ function buildings(t, terr, level) {
     if (area(pts) < 0) pts.reverse() // counter-clockwise (y north)
     const gr = mulberry(gid), pick = (a) => a[Math.floor(gr() * a.length)]
     const seed = gr(), r = gr(), tower = gH > 20
-    let style = style0 === 0 && h < 4 ? -1 : 1 // facade pattern: -1 none, 1 punched windows, 2 curtain wall, 3 balconies, 4 punched + storefront
-    if (style0 === 2) style = 2
-    else if (tower && (style0 === 1 || style0 === 5)) style = r < 0.15 ? 2 : r < 0.9 ? 3 : 1
-    else if (style0 === 4) style = h < 5 ? -1 : 4
-    else if (style0 === 1 && h > 9 && r < 0.4) style = 3
+    // facade pattern: -1 none, 1 punched windows, 2 curtain wall, 3 glass balconies, 5 wood siding, 6 ribbed metal,
+    // 7 big box, 8 Vancouver Special, 9 glass condo; the storefront and the storey height ride along (see materials.js)
+    let style = 1
+    if (style0 === 0) style = h < 4 ? -1 : r < 0.5 ? 5 : 1
+    else if (style0 === 2) style = 2
+    else if (style0 === 6) style = tower ? (r < 0.8 ? 9 : 2) : 2
+    else if (style0 === 1) style = tower ? (r < 0.15 ? 2 : r < 0.85 ? 3 : 1) : h > 9 && r < 0.4 ? 3 : 1
+    else if (style0 === 8) style = 6
+    else if (style0 === 9) style = 7
+    else if (style0 === 11) style = h < 3 ? -1 : 5
+    else if (style0 === 12) style = 8
+    const front = !!(bits & 1) || (style0 === 4 && !(fl & 32) && h >= 5) // old tiles: commercial = storefront
+    if (style0 === 4 && h < 5) style = -1
+    const fq = Math.max(1, Math.min(31, Math.round(((fh || 3.2) - 2.4) / 0.15)))
+    const styleW = style + (fq + (front && style !== 6 && style !== 7 ? 32 : 0)) / 64
+    const storey = 2.4 + fq * 0.15
+    const balc = detail && h - mn > 9 && np <= 120 && (fl & 32 ? bits & 2 && (style === 3 || style === 9 || style0 === 7 && tower) : style === 3)
     const pal = PALETTES[style0] || PALETTES[4]
-    const wall = shade(wallHex & 0x1000000 ? hex(wallHex & 0xffffff) : hex(pick(pal.wall)), 0.97 + gr() * 0.06)
-    const roofC = shade(roofHex & 0x1000000 ? hex(roofHex & 0xffffff) : hex(pick(roofShape ? PALETTES[0].roof : pal.roof)), 0.96 + gr() * 0.08)
+    const wall = shade(wallHex & 0x1000000 ? lin(wallHex & 0xffffff) : (TRUE.has(style0) ? lin : hex)(pick(pal.wall)), 0.97 + gr() * 0.06)
+    const ownRoof = !roofShape || style0 === 8 || style0 >= 11
+    const roofC = shade(roofHex & 0x1000000 ? lin(roofHex & 0xffffff) : (ownRoof && TRUE.has(style0) ? lin : hex)(pick(ownRoof ? pal.roof : PALETTES[0].roof)), 0.96 + gr() * 0.08)
     const y0 = base + mn, y1 = base + h
     // walls
     let u = 0
     for (let i = 0; i < np; i++) {
       const a = pts[i], p = pts[(i + 1) % np], len = Math.hypot(p[0] - a[0], p[1] - a[1]) || 1
       const nx = (p[1] - a[1]) / len, nz = (p[0] - a[0]) / len // outward in (x, z=-y)
-      const w = (uu, yy) => [style, uu, yy - base, seed]
+      const w = (uu, yy) => [styleW, uu, yy - base, seed]
       quad(W, [a[0], y0, -a[1]], [p[0], y0, -p[1]], [p[0], y1, -p[1]], [a[0], y1, -a[1]], wall, [nx, 0, nz], w(u, y0), w(u + len, y0), w(u + len, y1), w(u, y1))
       u += len
     }
@@ -420,7 +457,9 @@ function buildings(t, terr, level) {
           quad(W, [a[0], y1, -a[1]], [p[0], y1, -p[1]], [p[0], y1 + par, -p[1]], [a[0], y1 + par, -a[1]], inC, [-nx, 0, -nz], ROOFW(seed))
         }
         const bb = bbox(pts), ar = (bb[2] - bb[0]) * (bb[3] - bb[1])
-        if (ar > 120) {
+        if (plant) { // what the LiDAR saw up there
+          for (const [ux, uy, su, sv, uh, ang] of plant) box3(Bal, ux, uy, y1, su, sv, uh, ang, shade([0.86, 0.88, 0.9], 0.85 + gr() * 0.2))
+        } else if (ar > 120) {
           const want = Math.min(7, Math.round(ar / 260) + (gr() < 0.5 ? 1 : 0))
           for (let tries = 0, got = 0; tries < want * 4 && got < want; tries++) {
             const ux = bb[0] + gr() * (bb[2] - bb[0]), uy = bb[1] + gr() * (bb[3] - bb[1]), sx = 1.4 + gr() * 3, sy = 1.2 + gr() * 2.2
@@ -430,12 +469,13 @@ function buildings(t, terr, level) {
           }
         }
       }
-    } else roof(W, pts, y1, base + ridge, roofShape, roofC, wall, seed)
-    // balconies: a slab and a glass railing on every floor, all the way round
-    if (detail && style === 3 && h - mn > 9 && np <= 120) {
+    } else roof(W, pts, y1, base + ridge, roofShape, roofBits, roofC, wall, seed)
+    // balconies: a slab and a railing (glass, or concrete on the older towers) on every floor, all the way round
+    if (balc) {
       const D = 1.15, ring = offset(pts, D)
-      const slabC = shade(wall, 1.05), railC = RAIL[Math.floor(seed * RAIL.length)], pw = ROOFW(seed)
-      for (let fy = y0 + 3; fy < y1 - 2.4; fy += 3) {
+      const slabC = shade(wall, 1.05), railC = style0 === 7 ? shade(wall, 0.78) : RAIL[Math.floor(seed * RAIL.length)], pw = ROOFW(seed)
+      const fy0 = base + Math.max(mn, front ? 4.5 : 0) + storey
+      for (let fy = Math.max(fy0, y0 + 2.5); fy < y1 - 2.4; fy += storey) {
         for (let i = 0; i < np; i++) {
           const a = pts[i], p = pts[(i + 1) % np], A = ring[i], P = ring[(i + 1) % np]
           const len = Math.hypot(p[0] - a[0], p[1] - a[1])
@@ -469,12 +509,16 @@ function quad(B, a, b, c, d, col, want, wa, wb, wc, wd) {
   if (!wb) { wb = wc = wd = wa }
   tri(B, a, b, c, col, want, wa, wb, wc); tri(B, a, c, d, col, want, wa, wc, wd)
 }
-// pitched roofs over the footprint's rectangle: gable along the long side, hipped/pyramidal near square, domes
-function roof(W, pts, y1, yr, shape, rc, wall, seed) {
-  const { cx, cy, a, hl, hw } = obb(pts), O = 0.45
+// pitched roofs over the footprint's rectangle: gable (ridge along the long side, or across it with bit 16), hipped,
+// pyramidal, shed (high side flipped with bit 32), domes
+function roof(W, pts, y1, yr, shape, bits, rc, wall, seed) {
+  const o = obb(pts), O = 0.45
+  let { cx, cy, a, hl, hw } = o
+  a = ((a % Math.PI) + Math.PI) % Math.PI // the same frame as tools/tiles.py fit_roof, so "+v" means the same side
+  if (bits & 16) { a += Math.PI / 2; [hl, hw] = [hw, hl] }
   const ax = [Math.cos(a), Math.sin(a)], bx = [-Math.sin(a), Math.cos(a)]
   const at = (s, t, y) => [cx + ax[0] * s + bx[0] * t, y, -(cy + ax[1] * s + bx[1] * t)]
-  const L = hl + O, Wd = hw + O, pw = ROOFW(seed)
+  const L = hl + O, Wd = hw + O, pw = ROOFW(seed), endC = shade(wall, 0.92)
   if (shape === 4 || shape === 6) { // dome: a few rings
     const R = Math.min(hl, hw), steps = 6, seg = 16
     for (let k = 0; k < steps; k++) {
@@ -487,16 +531,34 @@ function roof(W, pts, y1, yr, shape, rc, wall, seed) {
     }
     return
   }
-  const gable = shape === 1 || shape === 5 || (shape !== 3 && hl / hw > 1.15)
+  if (shape === 5) { // shed: one plane from the low eaves (y1) to the high edge (yr), walls under the high side
+    const sg = (bits & 32 ? 1 : -1) * (bits & 16 ? -1 : 1), yw = yr - ((yr - y1) * O) / (2 * Wd) // the plane's height above the wall line
+    quad(W, at(-L, -sg * Wd, y1 - ((yr - y1) * O) / (2 * Wd)), at(L, -sg * Wd, y1 - ((yr - y1) * O) / (2 * Wd)), at(L, sg * Wd, yr), at(-L, sg * Wd, yr), rc, [-bx[0] * sg, 1, bx[1] * sg], pw)
+    quad(W, at(-hl, sg * hw, y1), at(hl, sg * hw, y1), at(hl, sg * hw, yw), at(-hl, sg * hw, yw), endC, [bx[0] * sg, 0, -bx[1] * sg], pw)
+    for (const s of [1, -1]) tri(W, at(s * hl, -sg * hw, y1), at(s * hl, sg * hw, y1), at(s * hl, sg * hw, yw), endC, [ax[0] * s, 0, -ax[1] * s], pw)
+    return
+  }
+  const gable = shape === 1
   const r = gable ? L : shape === 3 ? 0.01 : Math.max(0.01, L - Wd)
   for (const s of [1, -1]) {
     const side = [bx[0] * s, 1, -bx[1] * s]
     tri(W, at(-L, s * Wd, y1), at(L, s * Wd, y1), at(r, 0, yr), rc, side, pw)
     tri(W, at(-L, s * Wd, y1), at(r, 0, yr), at(-r, 0, yr), rc, side, pw)
     const end = [ax[0] * s, 0, -ax[1] * s]
-    if (gable) tri(W, at(s * hl, Wd, y1), at(s * hl, -Wd, y1), at(s * hl, 0, yr), shade(wall, 0.92), end, pw)
+    if (gable) tri(W, at(s * hl, Wd, y1), at(s * hl, -Wd, y1), at(s * hl, 0, yr), endC, end, pw)
     else tri(W, at(s * L, Wd, y1), at(s * L, -Wd, y1), at(s * r, 0, yr), rc, [end[0], 1, end[2]], pw)
   }
+}
+// a box standing on a roof at y, centred on (x, y north), su along angle a, sv across it, uh tall
+function box3(B, x, yN, y, su, sv, uh, a, col) {
+  const ca = Math.cos(a), sa = Math.sin(a), pw = ROOFW(0.5)
+  const c = (s, t, h) => [x + ca * s - sa * t, y + h, -(yN + sa * s + ca * t)]
+  const u = su / 2, v = sv / 2, top = shade(col, 1.08)
+  quad(B, c(-u, -v, uh), c(u, -v, uh), c(u, v, uh), c(-u, v, uh), top, [0, 1, 0], pw)
+  quad(B, c(-u, -v, 0), c(u, -v, 0), c(u, -v, uh), c(-u, -v, uh), col, [sa, 0, ca], pw)
+  quad(B, c(u, v, 0), c(-u, v, 0), c(-u, v, uh), c(u, v, uh), col, [-sa, 0, -ca], pw)
+  quad(B, c(u, -v, 0), c(u, v, 0), c(u, v, uh), c(u, -v, uh), shade(col, 0.92), [ca, 0, -sa], pw)
+  quad(B, c(-u, v, 0), c(-u, -v, 0), c(-u, -v, uh), c(-u, v, uh), shade(col, 0.92), [-ca, 0, sa], pw)
 }
 function obb(pts) {
   let best = null

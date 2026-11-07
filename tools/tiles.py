@@ -298,6 +298,10 @@ def build(ij):
         lvl = np.concatenate([[0], np.asarray(lvl)])
         dtm = np.where(lowwater, np.minimum(dtm, lvl[lab]), dtm)
 
+    # bridge decks and viaducts overhead: the LiDAR surface there is the deck, so no roofs or tree crowns from it
+    under = bridge_mask(feat.get('lines', []), areas, X0, Y0, N)
+    if dsm is not None: dsm = np.where(under, dtm, dsm)
+
     def height_at(x, y):  # bilinear on the 2 m DTM
         fx_, fy_ = (x - X0) / HR - 0.5, (Y0 + L1 - y) / HR - 0.5
         return float(ndimage.map_coordinates(dtm, [[fy_], [fx_]], order=1, mode='nearest')[0])
@@ -332,7 +336,13 @@ def build(ij):
         if not keep.is_empty: polys['forest'] = [f.difference(keep) for f in polys['forest']]
 
     # ---- buildings
-    builds = buildings(feat.get('buildings', []), dsm, dtm, X0, Y0, rnd)
+    from shapely.strtree import STRtree
+    sp = [p for _, p, t in feat.get('nodes', []) if 'shop' in t or 'office' in t or 'craft' in t or t.get('amenity') in SHOP_AMENITY]
+    shops = STRtree(shapely.points(np.array(sp))) if sp else None
+    ind = unary_union(polys['industrial']) if polys.get('industrial') else None
+    if ind is not None: shapely.prepare(ind)
+    sl = [LineString(c) for _, c, _, t in feat.get('lines', []) if line_kind(t) in ('residential', 'tertiary', 'secondary', 'primary', 'living') and len(c) > 1]
+    builds = buildings(feat.get('buildings', []), dsm, dtm, X0, Y0, rnd, under, shops, ind, STRtree(sl) if sl else None)
     fp = Image.new('L', (N, N), 0); dfp = ImageDraw.Draw(fp)
     for b in builds:
         dfp.polygon([pix(*c) for c in b['ring']], fill=1)
@@ -410,21 +420,56 @@ def terrain_grid(dtm, ox, oy, size, n):
 
 
 # ---------------------------------------------------------------- buildings
-STYLE = {  # 0 house, 1 apartments, 2 office/glass, 3 brick/heritage, 4 commercial/industrial, 5 civic/white
-    'house': 0, 'detached': 0, 'semidetached_house': 0, 'bungalow': 0, 'cabin': 0, 'garage': 0, 'shed': 0, 'terrace': 0,
-    'apartments': 1, 'residential': 1, 'dormitory': 1, 'hotel': 1,
-    'office': 2, 'commercial': 4, 'retail': 4, 'industrial': 4, 'warehouse': 4, 'supermarket': 4, 'hangar': 4, 'service': 4,
-    'school': 5, 'university': 5, 'college': 5, 'hospital': 5, 'church': 3, 'public': 5, 'civic': 5, 'government': 5, 'train_station': 5, 'stadium': 5,
+# Shapes come from the LiDAR surface inside each OSM footprint: up to four roof levels (podium, tower, penthouse,
+# terraces) extruded one on top of the other, pitched roofs fitted to the surface (gable, cross gable, hip, shed),
+# rooftop plant where the surface shows it. Looks come from OSM tags (material, colours, heritage, shops) and from
+# where in town the building stands.
+# style ids: the page's palettes and facade patterns (public/core/tile-worker.js PALETTES)
+HOUSE, APT, OFFICE, BRICK, COMM, CIVIC, GLASS, CONCRETE, SHED, BIGBOX, STONE, CHARACTER, SPECIAL = range(13)
+STYLE = {
+    'house': HOUSE, 'detached': HOUSE, 'semidetached_house': HOUSE, 'bungalow': HOUSE, 'cabin': HOUSE, 'garage': HOUSE, 'garages': HOUSE, 'shed': HOUSE, 'terrace': HOUSE,
+    'apartments': APT, 'residential': APT, 'dormitory': APT, 'hotel': APT,
+    'office': OFFICE, 'commercial': COMM, 'retail': COMM, 'kiosk': COMM, 'service': COMM, 'parking': CONCRETE,
+    'industrial': SHED, 'warehouse': SHED, 'manufacture': SHED, 'hangar': SHED, 'storage': SHED, 'factory': SHED, 'barn': SHED, 'farm_auxiliary': SHED,
+    'supermarket': BIGBOX, 'mall': BIGBOX,
+    'school': CIVIC, 'university': CIVIC, 'college': CIVIC, 'hospital': CIVIC, 'public': CIVIC, 'civic': CIVIC, 'government': CIVIC, 'train_station': CIVIC,
+    'stadium': CIVIC, 'transportation': CIVIC, 'temple': CIVIC, 'church': BRICK, 'chapel': BRICK, 'cathedral': STONE,
 }
+HOUSES = {'house', 'detached', 'semidetached_house', 'bungalow', 'cabin', 'terrace'}
+RESID = {'apartments', 'residential', 'dormitory', 'yes'}
+MATERIAL = {'brick': BRICK, 'masonry': BRICK, 'clay': BRICK, 'stone': STONE, 'granite': STONE, 'sandstone': STONE, 'limestone': STONE, 'marble': STONE,
+            'concrete': CONCRETE, 'cement_block': CONCRETE, 'plaster': CONCRETE, 'stucco': CONCRETE, 'glass': OFFICE, 'mirror': OFFICE, 'concrete/glass': OFFICE,
+            'concrete;glass': OFFICE, 'metal': SHED, 'steel': SHED, 'metal_plates': SHED, 'aluminium': SHED, 'wood': CHARACTER, 'timber_framing': CHARACTER,
+            'vinyl_siding': CHARACTER}
+ROOF_MAT = {'metal': 0xa8b0b4, 'tin': 0xa8b0b4, 'steel': 0xa8b0b4, 'copper': 0x5f9a84, 'roof_tiles': 0xa8583c, 'tile': 0xa8583c, 'tiles': 0xa8583c, 'slate': 0x4a5058,
+            'asphalt': 0x50545a, 'asphalt_shingle': 0x585450, 'shingle': 0x585450, 'concrete': 0xc0c0bc, 'glass': 0x8ab4c8, 'grass': 0x6a9a50, 'plants': 0x6a9a50,
+            'gravel': 0xa8a49c, 'tar_paper': 0x4a4c50, 'eternit': 0x8a8c8c, 'wood': 0x7a6048, 'thatch': 0xa08850}
+SHOP_AMENITY = {'restaurant', 'cafe', 'fast_food', 'bar', 'pub', 'bank', 'pharmacy', 'ice_cream', 'clinic', 'dentist', 'doctors', 'post_office',
+                'library', 'cinema', 'theatre', 'nightclub', 'food_court', 'bureau_de_change', 'veterinary', 'marketplace', 'community_centre'}
 ROOF = {'flat': 0, 'gabled': 1, 'hipped': 2, 'pyramidal': 3, 'dome': 4, 'skillion': 5, 'round': 6, 'half-hipped': 2, 'gambrel': 1, 'mansard': 2, 'onion': 4}
+CROSS, FLIP = 16, 32  # roof byte bits: ridge along the footprint's short axis; a shed roof's high side on the other edge
 COLOURS = {'white': 0xf2f0ea, 'black': 0x303236, 'grey': 0x9a9c9e, 'gray': 0x9a9c9e, 'red': 0xb04a3a, 'brown': 0x7a5a48, 'beige': 0xd8c8a8, 'yellow': 0xe0c060,
            'blue': 0x5a80b0, 'green': 0x5a8a5a, 'silver': 0xc0c4c8, 'tan': 0xc8b090, 'cream': 0xeee4cc, 'orange': 0xd08040, 'darkgrey': 0x5a5c60,
            'lightgrey': 0xc8cacc, 'maroon': 0x7a2a2a, 'pink': 0xe0a8a8, 'teal': 0x4a9a9a}
+# rough outlines in world metres (world.py) of places whose building stock has a look of its own; first match wins
+ZONES = [
+    ('historic', Polygon([(-230, -60), (350, -60), (1300, -250), (1300, -560), (720, -560), (700, -1000), (250, -800), (-120, -480), (-300, -260)])),  # Gastown, Victory Sq, Chinatown, Railtown: 1890s-1920s brick
+    ('historic', Polygon([(-629, -872), (-491, -988), (-871, -1448), (-1009, -1332)])),  # Yaletown's warehouse district
+    ('granville', Polygon([(-2200, -1880), (-1450, -1880), (-1450, -1430), (-2200, -1430)])),  # Granville Island: tin sheds
+    ('westend', Polygon([(-880, -182), (-1703, -1006), (-1803, -1115), (-2306, -408), (-2700, 200), (-2100, 950), (-1784, 825)])),  # 1960s-70s concrete towers
+    ('core', Polygon([(-2900, 1300), (400, 300), (400, -500), (-200, -1400), (-1200, -1750), (-2700, -300)])),  # downtown, Coal Harbour, Yaletown: glass condos
+]
+
+
+def zone(c):
+    for k, p in ZONES:
+        if shapely.contains_xy(p, c[0], c[1]): return k
+    return None
 
 
 def colour(v):
     if not v: return 0
-    v = v.strip().lower().replace(' ', '')
+    v = v.strip().lower().replace(' ', '').replace('_', '')
     if v.startswith('#') and len(v) in (4, 7):
         h = v[1:]
         if len(h) == 3: h = ''.join(c * 2 for c in h)
@@ -469,7 +514,256 @@ def inset(r, d):
     return out
 
 
-def buildings(items, dsm, dtm, X0, Y0, rnd):
+def bridge_mask(lines, areas, X0, Y0, N):
+    """where a bridge deck or viaduct is overhead (roads, rail, SkyTrain guideways, widened by a few metres): there the
+    LiDAR surface is the deck, not a roof or a tree crown"""
+    img = Image.new('L', (N, N), 0); d = ImageDraw.Draw(img)
+    pix = lambda x, y: ((x - X0) / HR, (Y0 + L1 - y) / HR)
+    for _, coords, _, t in lines:
+        if t.get('bridge') in (None, 'no') or (hnum(t.get('layer')) or 0) < 0: continue
+        k = line_kind(t)
+        w = road_shape(k, t)[1] if k else 4.0
+        d.line([pix(*c) for c in coords], fill=1, width=max(1, int(round((w + 8) / HR))), joint='curve')
+    for _, prs, t in areas:
+        if t.get('man_made') == 'bridge':
+            for outer, _ in prs:
+                if len(outer) >= 3: d.polygon([pix(*c) for c in outer], fill=1)
+    return np.array(img, bool)
+
+
+def height_levels(v):
+    """1-4 roof heights inside a footprint (1D k-means of the LiDAR surface heights), lowest first"""
+    best = np.array([float(np.percentile(v, 60))])
+    top = float(np.percentile(v, 97))
+    if len(v) < 30 or top - float(np.percentile(v, 5)) < 3: return best
+    prev = float(((v - np.median(v)) ** 2).sum())
+    for k in (2, 3, 4):
+        c = np.percentile(v, np.linspace(12, 94, k))
+        for _ in range(10):
+            lab = np.abs(v[:, None] - c[None]).argmin(1)
+            c = np.array([np.median(v[lab == j]) if (lab == j).any() else c[j] for j in range(k)])
+        c = np.sort(c)
+        lab = np.abs(v[:, None] - c[None]).argmin(1)
+        sse = float(((v - c[lab]) ** 2).sum())
+        if np.bincount(lab, minlength=k).min() < 6 or np.diff(c).min() < max(2.5, 0.06 * top) or sse > 0.4 * prev: break
+        best, prev = c, sse
+    return best
+
+
+def squared(g, ang):
+    """a raster outline squared up: the building-aligned rectangle when it nearly fills it, else simplified"""
+    g = g.buffer(0)
+    if g.is_empty: return g
+    from shapely import affinity
+    rot = affinity.rotate(g, -ang, origin=(0, 0), use_radians=True)
+    x0, y0, x1, y1 = rot.bounds
+    if g.area > 0.78 * (x1 - x0) * (y1 - y0): return affinity.rotate(box(x0, y0, x1, y1), ang, origin=(0, 0), use_radians=True)
+    mrr = g.minimum_rotated_rectangle
+    if g.area > 0.82 * mrr.area: return mrr
+    return g.simplify(1.2)
+
+
+def polys_of(g, min_area):
+    return [p for p in (g.geoms if hasattr(g, 'geoms') else [g]) if p.geom_type == 'Polygon' and p.area >= min_area]
+
+
+def fit_roof(r, z, ok, fx, shape=''):
+    """a pitched roof fitted to the LiDAR surface in the footprint's own frame: (roof byte, eaves, ridge, pitch) or None"""
+    rr, cc = np.nonzero(ok)
+    if len(rr) < 10: return None
+    zz = z[rr, cc]
+    cx, cy, ang, hl, hw, _ = obb(r)
+    ang %= math.pi  # the page's frame (tile-worker.js roof): "+v" is the same side there
+    if hw < 2: return None
+    x = fx[0] + (cc + 0.5) * HR - cx; y = fx[1] - (rr + 0.5) * HR - cy
+    ca, sa = math.cos(ang), math.sin(ang)
+    u, v = x * ca + y * sa, -x * sa + y * ca
+    sse0 = float(((zz - zz.mean()) ** 2).sum()) + 1e-6
+    cand = {'gable': (np.abs(v), hw, 1, 0), 'cross': (np.abs(u), hl, 1, CROSS), 'hip': (np.maximum(np.abs(v), np.abs(u) - (hl - hw)), hw, 2, 0),
+            'shed': (v, hw, 5, 0), 'shedx': (u, hl, 5, CROSS)}
+    allow = {'gabled': ('gable', 'cross'), 'gambrel': ('gable', 'cross'), 'hipped': ('hip',), 'half-hipped': ('hip',), 'pyramidal': ('hip',),
+             'skillion': ('shed', 'shedx')}.get(shape, tuple(cand))
+    best = None
+    for name in allow:
+        f, run, code, bits = cand[name]
+        (c0, k), *_ = np.linalg.lstsq(np.stack([np.ones_like(f), -f], 1), zz, rcond=None)
+        if code != 5 and k <= 0: continue
+        sse = float(((zz - (c0 - k * f)) ** 2).sum()) * (1.15 if bits else 1.0)  # across the short side: only when clearly better
+        if best is None or sse < best[0]: best = (sse, c0, k, run, code, bits)
+    if not best: return None
+    sse, c0, k, run, code, bits = best
+    rise = abs(k) * run * (2 if code == 5 else 1)
+    spread = float(np.percentile(zz, 95) - np.percentile(zz, 10))
+    # a clean fit, or a busy house roof (dormers, cross gables) that is still much more pitched than flat
+    if not shape and (rise < 1.0 or sse > (0.85 if spread > 2.0 and hl * hw < 120 else 0.5) * sse0): return None
+    if rise > 10: return None
+    if code == 5:
+        eaves, ridge = c0 - abs(k) * run, c0 + abs(k) * run
+        if k < 0: bits |= FLIP  # higher towards +v (or +u)
+    else: eaves, ridge = c0 - k * run, c0
+    if eaves < 2.2: return None
+    if code == 2 and hl / hw < 1.15: code = 3
+    return code | bits, float(eaves), float(ridge), float(abs(k))
+
+
+def roof_units(z, part, h, fx, ang, hidden):
+    """rooftop plant, lift overruns and stair towers: small blobs standing 1-6 m proud of a flat roof, away from its
+    edge (an overhanging tree crown touches the edge). -> [(x, y, along, across, height, angle)]"""
+    m = part & ~hidden
+    inner = ndimage.binary_erosion(m, iterations=1)
+    res = np.where(inner, z - h, 0)
+    blob = inner & (res > 1.0) & (res < 6)
+    lab, n = ndimage.label(blob)
+    if not n: return []
+    edge = part & ~ndimage.binary_erosion(part, iterations=2)
+    ca, sa = math.cos(ang), math.sin(ang)
+    out = []
+    for k, sl in enumerate(ndimage.find_objects(lab)):
+        sel = lab[sl] == k + 1
+        nb = int(sel.sum())
+        if nb < 2 or nb > 40 or edge[sl][sel].any(): continue
+        rr, cc = np.nonzero(sel)
+        rr = rr + sl[0].start; cc = cc + sl[1].start
+        x = fx[0] + (cc + 0.5) * HR; y = fx[1] - (rr + 0.5) * HR
+        u, v = x * ca + y * sa, -x * sa + y * ca
+        uc, vc = (u.max() + u.min()) / 2, (v.max() + v.min()) / 2
+        out.append((nb, uc * ca - vc * sa, uc * sa + vc * ca, float(u.max() - u.min() + HR * 0.8), float(v.max() - v.min() + HR * 0.8),
+                    float(np.clip(np.percentile(res[rr, cc], 75), 0.8, 5.0)), ang))
+    out.sort(key=lambda o: -o[0])
+    return [o[1:] for o in out[:16]]
+
+
+def from_lidar(r, a, z, ok, fx, shape, rnd, roofm):
+    """parts of one building from the LiDAR surface (heights above its base): [dict(ring, h, mn, roof, ridge, pitch, units)]"""
+    v = z[ok]
+    p97 = float(np.percentile(v, 97))
+    # houses, sheds, halls: one pitched roof if the surface fits one (big ones only if the outline is near a rectangle)
+    if p97 < 20 and (a < 700 or a < 5000 and a > 0.85 * obb(r)[5]) and shape in ('', 'gabled', 'hipped', 'skillion', 'pyramidal', 'half-hipped', 'gambrel'):
+        f = fit_roof(r, z, roofm, fx, shape)
+        if f: return [dict(ring=r, h=f[1], mn=0, roof=f[0], ridge=f[2], pitch=f[3], units=[])]
+    if shape and shape != 'flat': return None  # the mapper's roof, on the old path
+    c = height_levels(v)
+    ang = obb(r)[2]
+    foot = Polygon(r).buffer(0)
+    import rasterio.features as rf
+    from rasterio.transform import Affine
+    tr = Affine(HR, 0, fx[0], 0, -HR, fx[1])
+    th = [(c[i - 1] + c[i]) / 2 for i in range(1, len(c))]
+    lvl_h = lambda sel, d: float(np.percentile(z[sel], 70)) if sel.sum() >= 3 else float(d)
+    open_ = False
+    if c[0] < 2.5 and len(c) > 1:  # the lowest "roof" is the ground: a courtyard or a plaza inside the outline
+        if (v < th[0]).mean() < 0.3: c, th = c[1:], th[1:]
+        else: open_ = True
+    elif c[0] < 2.2: return None
+    sel0 = ok & (z < th[0]) if th else ok
+    parts, parents = [], []
+    if not open_:
+        h0 = lvl_h(sel0, c[0])
+        parts.append(dict(ring=r, h=h0, mn=0, roof=0, ridge=0, mask=ok))
+        parents.append((foot, h0, ok))
+    else: parents.append((foot, 0.0, ok))
+    for i in range(1, len(c)):
+        R = ok & (z > th[i - 1])
+        if R.sum() > 40: R = ndimage.binary_opening(R)
+        lab, n = ndimage.label(R)
+        new = []
+        for k, sl in enumerate(ndimage.find_objects(lab)):
+            comp = lab == k + 1
+            if comp[sl].sum() < 6: continue
+            g = unary_union([shapely.geometry.shape(gg) for gg, _ in rf.shapes(comp.astype(np.uint8), mask=comp, transform=tr)])
+            g = squared(g, ang)
+            if g.is_empty: continue
+            pt = g.representative_point()
+            par = next((p for p in parents if p[0].contains(pt)), None) or max(parents, key=lambda p: p[0].intersection(g).area)
+            pg, ph, _ = par
+            # reach out to the outline below where the raster stopped short of it
+            band = pg.difference(pg.buffer(-2.5, join_style=2))
+            g = g.union(g.buffer(2.5, join_style=2).intersection(band)).intersection(pg)
+            hi = th[i] if i < len(th) else np.inf
+            h = lvl_h(comp & (z <= hi), c[i])
+            if h - ph < 1.5: continue
+            for p in polys_of(g, 20):
+                p = p.simplify(0.3)
+                parts.append(dict(ring=list(p.exterior.coords)[:-1], h=h, mn=ph if not open_ or i > 1 else 0.0, roof=0, ridge=0, mask=comp))
+                new.append((p, h, comp))
+        parents = new + parents
+    if not parts: return None
+    # rooftop plant on each flat roof, minus what the next level up covers
+    for p in parts:
+        hidden = np.zeros_like(ok)
+        for q in parts:
+            if q is not p and q['mn'] >= p['h'] - 0.5: hidden |= q['mask']
+        p['units'] = roof_units(z, p['mask'], p['h'], fx, ang, hidden) if a >= 120 else []
+        p['pitch'] = 0
+        del p['mask']
+    return parts
+
+
+def house_kind(info, main):
+    """Vancouver's two classic houses, told apart by their roofs: the character house (1900s-1930s, steep gables, wood
+    siding, a porch) and the Vancouver Special (1965-85, two storeys, a shallow gable, stucco over a brick base)"""
+    t, btype, a = info['t'], info['btype'], info['a']
+    if not (btype in HOUSES or btype == 'yes' and 60 < a < 400) or main['h'] > 11: return None
+    year = start_year(t)
+    if year and year < 1940: return CHARACTER
+    if not main['roof']: return None
+    pitch, rise = main['pitch'], (main['ridge'] or 0) - main['h']
+    if pitch >= 0.45 and rise >= 1.8: return CHARACTER
+    if pitch < 0.36 and main['h'] >= 4.6 and 110 < a < 330 and (main['roof'] & 15) in (1, 2): return SPECIAL
+    return None
+
+
+def start_year(t):
+    s = str(t.get('start_date', ''))
+    for k in range(len(s) - 3):
+        if s[k:k + 4].isdigit(): return int(s[k:k + 4])
+    return None
+
+
+def style_of(info, h, rnd, kind):
+    t, btype, a = info['t'], info['btype'], info['a']
+    mat = (t.get('building:material') or '').strip().lower()
+    year = start_year(t)
+    tower = h > 30 and btype in RESID | {'hotel'}
+    zn = info['zone']
+    if mat in MATERIAL:
+        s = MATERIAL[mat]
+        if s == OFFICE and tower and btype != 'hotel': return GLASS
+        if s == CHARACTER and h > 12: return COMM
+        return s
+    if kind is not None: return kind
+    heritage = t.get('heritage') or t.get('historic') in ('building', 'yes', 'church', 'monument', 'manor', 'house') or year and year < 1930
+    if heritage and btype not in HOUSES and h < 45:
+        return STONE if btype in ('civic', 'public', 'government', 'cathedral') or t.get('amenity') in ('bank', 'townhall', 'courthouse', 'place_of_worship') else BRICK
+    if zn == 'historic' and h < 32 and btype not in HOUSES and rnd.random() < 0.8: return BRICK
+    s = STYLE.get(btype)
+    if zn == 'granville' and h < 16 and s in (None, COMM, SHED, BIGBOX): return SHED
+    if s == SHED or info['ind'] and a > 300 and h < 20 and s in (None, COMM): return SHED
+    if (btype in ('retail', 'commercial', 'supermarket') or t.get('shop') in ('mall', 'supermarket', 'department_store', 'doityourself', 'wholesale')) and a > 2500 and h < 16:
+        return BIGBOX
+    if s is None: s = HOUSE if h < 9 else APT if h > 14 else COMM
+    if s == APT and h > 24 and btype != 'hotel':
+        p = {'core': 0.9, 'westend': 0.2}.get(zn, 0.55)
+        if year: p = 0.0 if year < 1985 else 1.0 if year >= 1995 else p
+        return GLASS if rnd.random() < p else CONCRETE
+    if s == OFFICE and year and year < 1975: return CONCRETE
+    return s
+
+
+FLOOR = {OFFICE: 3.9, BRICK: 3.8, COMM: 4.2, CIVIC: 4.2, STONE: 4.6, BIGBOX: 5.0, SHED: 5.0, CONCRETE: 2.9}
+
+
+def floor_h(style, top, lv, shop):
+    """storey height, so window rows line up with the real floors (OSM building:levels when mapped)"""
+    if lv and lv >= 1 and top > 4:
+        if shop and lv > 1: return float(np.clip((top - 4.5) / (lv - 1), 2.6, 6.0))
+        return float(np.clip(top / lv, 2.6, 6.0))
+    return FLOOR.get(style, 2.9)
+
+
+def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, streets=None):
+    """under: bridge decks overhead (bridge_mask); shops: STRtree of shop/office points; ind: industrial land;
+    streets: STRtree of street lines (which way a house faces)"""
     N = dtm.shape[0]
     pix = lambda x, y: ((x - X0) / HR, (Y0 + L1 - y) / HR)
     own = lambda c: X0 <= c[0] < X0 + L1 and Y0 <= c[1] < Y0 + L1
@@ -497,56 +791,102 @@ def buildings(items, dsm, dtm, X0, Y0, rnd):
             if key in seen: continue
             seen.add(key)
             rows.append((r, t, a, c, is_part))
-    out = []
-    for r, t, a, c, is_part in rows:
-        # what the LiDAR saw inside the footprint
-        img = Image.new('L', (N, N), 0)
+
+    def measure(r):
+        """the LiDAR inside a ring: (heights above base on the 2 m grid, usable cells, NW corner, base) or None"""
         xs = [pix(*p) for p in r]
         bx0, by0 = max(0, int(min(p[0] for p in xs)) - 1), max(0, int(min(p[1] for p in xs)) - 1)
         bx1, by1 = min(N, int(max(p[0] for p in xs)) + 2), min(N, int(max(p[1] for p in xs)) + 2)
-        if bx1 <= bx0 or by1 <= by0: continue
+        if bx1 <= bx0 or by1 <= by0: return None
         m = Image.new('L', (bx1 - bx0, by1 - by0), 0)
         ImageDraw.Draw(m).polygon([(x - bx0, y - by0) for x, y in xs], fill=1)
-        m = np.array(m, bool)
+        m = full = np.array(m, bool)
         if m.sum() > 12: m2 = ndimage.binary_erosion(m); m = m2 if m2.sum() > 4 else m
         ground = dtm[by0:by1, bx0:bx1][m] if m.any() else np.array([height_fallback(dtm, xs)])
         base = float(np.percentile(ground, 10)) if len(ground) else 0.0
-        chm = (dsm[by0:by1, bx0:bx1][m] - base) if (dsm is not None and m.any()) else None
+        fx = (X0 + bx0 * HR, Y0 + L1 - by0 * HR)
+        if dsm is None or not m.any(): return None, None, fx, base, None
+        free = ~under[by0:by1, bx0:bx1] if under is not None else np.ones_like(m)
+        ok = m & free
+        if ok.sum() < max(3, 0.4 * m.sum()): return None, None, fx, base, None  # mostly under a bridge deck: the surface there is the deck
+        z = dsm[by0:by1, bx0:bx1] - base
+        return z, ok, fx, base, full & free & (z > 1.5)  # last: every roof cell, eaves included (for roof pitch fits)
+
+    out = []
+    for r, t, a, c, is_part in rows:
+        mz = measure(r)
+        if mz is None: continue
+        z, ok, fx, base, roofm = mz
+        chm = z[ok] if z is not None else None
         tag_h = hnum(t.get('height')); lv = hnum(t.get('building:levels'))
         mn = hnum(t.get('min_height')) or (hnum(t.get('building:min_level')) or 0) * 3.1
         shape = t.get('roof:shape', '')
         btype = t.get('building', t.get('building:part', 'yes'))
-        h, ridge = None, None
-        if tag_h: h = tag_h
-        elif chm is not None and len(chm) >= 3 and np.percentile(chm, 90) > 2.2:
-            p90 = float(np.percentile(chm, 90)); p97 = float(np.percentile(chm, 97)); p25 = float(np.percentile(chm, 25)); p10 = float(np.percentile(chm, 10))
-            h = p90
-            if not shape and a < 450 and p97 < 16 and 1.4 < p97 - p25 < 6 and p25 > 2.2:  # a house's pitched roof, not a small tower
-                shape = 'gabled' if rnd.random() < 0.6 else 'hipped'
-                h, ridge = max(2.4, p25 + 0.3), p97
-            elif not shape and a >= 450 and p90 - p10 > 8 and not is_part and len(chm) > 120:
-                # tower on a podium: split by height and keep both parts
-                secs = split_sections(r, dsm, base, bx0, by0, m, X0, Y0)
-                if secs:
-                    gid = rnd.randrange(1, 1 << 30)
-                    for sr, sh in secs:
-                        out.append(dict(ring=sr, base=base, h=sh + rnd.random() * 0.15, mn=0, roof=0, ridge=0, style=style_of(btype, sh, t, rnd), wall=colour(t.get('building:colour')),
-                                        roofc=colour(t.get('roof:colour')), gid=gid, gh=p97, a=ring_area(sr)))
-                    continue
-        elif lv: h = lv * 3.1 + 1.0
-        if h is None: h = 3.0 if btype in ('garage', 'shed', 'carport', 'roof') else (rnd.uniform(5, 8) if btype in ('house', 'detached') else 7.0)
-        if lv and not tag_h and (chm is None or len(chm) < 3): h = lv * 3.1 + 1
-        rf = ROOF.get(shape, 0) if shape else 0
-        if rf and not ridge:
-            rh = hnum(t.get('roof:height')) or (hnum(t.get('roof:levels')) or 0) * 2.8 or min(4.0, math.sqrt(a) * 0.25)
-            ridge, h = h, max(2.4, h - rh)
-        out.append(dict(ring=r, base=base, h=h + rnd.random() * 0.15, mn=mn, roof=rf, ridge=ridge or 0, style=style_of(btype, h, t, rnd),
-                        wall=colour(t.get('building:colour')), roofc=colour(t.get('roof:colour')), gid=rnd.randrange(1, 1 << 30), gh=ridge or h, a=a))
+        shop = bool(t.get('shop') or t.get('office') or t.get('amenity') in SHOP_AMENITY) or (shops is not None and len(shops.query(Polygon(r).buffer(3), predicate='intersects')) > 0)
+        info = dict(t=t, btype=btype, a=a, shop=shop, lv=lv, ind=ind is not None and shapely.contains_xy(ind, c[0], c[1]), zone=zone(c))
+        gid = rnd.randrange(1, 1 << 30)
+        parts = None
+        if chm is not None and not is_part and not mn and np.percentile(chm, 90) > 2.2:
+            p97 = float(np.percentile(chm, 97))
+            if not (tag_h and abs(tag_h - p97) > max(6, 0.3 * tag_h)):  # else rebuilt since the LiDAR flew: the tags win
+                parts = from_lidar(r, a, z, ok, fx, shape, rnd, roofm)
+        if parts is None:
+            h, ridge = None, None
+            if tag_h: h = tag_h
+            elif chm is not None and len(chm) >= 3 and np.percentile(chm, 90) > 2.2: h = float(np.percentile(chm, 90))
+            elif lv: h = lv * 3.1 + 1.0
+            if h is None: h = 3.0 if btype in ('garage', 'shed', 'carport', 'roof') else (rnd.uniform(5, 8) if btype in ('house', 'detached') else 7.0)
+            if lv and not tag_h and (chm is None or len(chm) < 3): h = lv * 3.1 + 1
+            rf_ = ROOF.get(shape, 0) if shape else 0
+            if rf_:
+                rh = hnum(t.get('roof:height')) or (hnum(t.get('roof:levels')) or 0) * 2.8 or min(4.0, math.sqrt(a) * 0.25)
+                ridge, h = h, max(2.4, h - rh)
+                if z is not None and rf_ in (1, 2, 5):  # the mapper's roof shape, the LiDAR's ridge direction
+                    f = fit_roof(r, z, roofm, fx, shape)
+                    if f: rf_ = f[0]
+            parts = [dict(ring=r, h=h, mn=mn, roof=rf_, ridge=ridge or 0, pitch=0, units=None)]
+        for p in parts:
+            p.update(base=base, gid=gid, info=info, a=ring_area(p['ring']))
+            if p['units'] is None and z is not None and not p['roof']: p['units'] = []  # LiDAR here: no made-up plant
+            out.append(p)
     # City of Vancouver 2009 LiDAR sections are vector-exact: where they agree with today's heights, they win
     if SECTIONS:
-        apply_sections(out, X0, Y0, rnd)
-    for b in out: b['ring'] = inset(b['ring'], rnd.uniform(0.03, 0.3))
+        apply_sections(out, X0, Y0, rnd, measure, under)
+    groups = {}
+    for p in out: groups.setdefault(p['gid'], []).append(p)
+    for gid, ps in groups.items():
+        main = max(ps, key=lambda p: p['a'])
+        info, t = main['info'], main['info']['t']
+        top = max(p['h'] for p in ps)
+        kind = house_kind(info, main)
+        style = style_of(info, top, rnd, kind)
+        shop = info['shop'] and style not in (HOUSE, CHARACTER, SPECIAL, SHED) and top >= 5
+        roofc = colour(t.get('roof:colour')) or (ROOF_MAT.get((t.get('roof:material') or '').lower(), 0) and ROOF_MAT[t['roof:material'].lower()] | 0x1000000)
+        fh = floor_h(style, top, info['lv'], shop)
+        gh = max(p['ridge'] or p['h'] for p in ps)
+        wall = colour(t.get('building:colour'))
+        if not wall and info['zone'] == 'granville' and style == SHED:  # Granville Island's painted tin
+            wall = rnd.choice((0xb84a3a, 0xd8a838, 0x3a6a9a, 0x4a7a5a, 0x8a8c8e, 0xc86a3a, 0x5a8aa0)) | 0x1000000
+        res = info['btype'] != 'hotel' and (style in (APT, GLASS) or style == CONCRETE and info['btype'] in RESID and top > 24)
+        d = rnd.uniform(0.03, 0.3)
+        if style == CHARACTER and streets is not None and main['roof'] and main['a'] < 300:
+            ps.append(porch(main, streets))
+        for p in ps:
+            p.update(style=style, wall=wall, roofc=roofc, fh=fh, shop=shop, res=res, gh=gh, ring=inset(p['ring'], d), h=p['h'] + rnd.random() * 0.1)
+            del p['info']
     return out
+
+
+def porch(main, streets):
+    """a character house's front porch: its roof on posts across the end that faces the street"""
+    cx, cy, ang, hl, hw, _ = obb(main['ring'])
+    st = streets.geometries[streets.nearest(shapely.geometry.Point(cx, cy))]
+    q = st.interpolate(st.project(shapely.geometry.Point(cx, cy)))
+    ca, sa = math.cos(ang), math.sin(ang)
+    s = 1 if (q.x - cx) * ca + (q.y - cy) * sa > 0 else -1
+    u0, u1, w = s * hl, s * (hl + 2.2), hw * 0.75
+    ring = [(cx + u * ca - v * sa, cy + u * sa + v * ca) for u, v in ((u0, -w), (u1, -w), (u1, w), (u0, w))]
+    return dict(main, ring=ring, h=min(3.2, main['h']), mn=min(3.2, main['h']) - 0.45, roof=0, ridge=0, pitch=0, units=[], a=ring_area(ring))
 
 
 def height_fallback(dtm, xs):
@@ -554,43 +894,12 @@ def height_fallback(dtm, xs):
     return float(dtm[int(min(dtm.shape[0] - 1, max(0, y))), int(min(dtm.shape[1] - 1, max(0, x)))])
 
 
-def style_of(btype, h, t, rnd):
-    s = STYLE.get(btype)
-    if s is None: s = 0 if h < 9 else 1 if h > 14 else 4
-    if s == 1 and h > 40 and rnd.random() < 0.3: s = 2
-    if t.get('building:material') in ('brick',) : s = 3
-    if t.get('building:material') in ('glass',) : s = 2
-    return s
-
-
-def split_sections(r, dsm, base, bx0, by0, m, X0, Y0):
-    import rasterio.features as rf
-    from rasterio.transform import Affine
-    z = dsm[by0:by0 + m.shape[0], bx0:bx0 + m.shape[1]] - base
-    v = z[m]
-    lo, hi = np.percentile(v, 25), np.percentile(v, 95)
-    cut = (lo + hi) / 2
-    top = m & (z > cut)
-    top = ndimage.binary_opening(top, iterations=1)
-    if top.sum() < 25 or (m & ~top).sum() < 25: return None
-    tr = Affine(HR, 0, X0 + bx0 * HR, 0, -HR, Y0 + L1 - by0 * HR)
-    secs = [(r, float(np.percentile(z[m & ~top], 75)))]
-    for g, val in rf.shapes(top.astype(np.uint8), mask=top, transform=tr):
-        p = shapely.geometry.shape(g).simplify(1.2)
-        if p.area < 60: continue
-        _, _, _, _, _, ar = obb(list(p.exterior.coords)[:-1])
-        if p.area / ar > 0.82: p = p.minimum_rotated_rectangle
-        if p.geom_type != 'Polygon': continue
-        ring = list(p.exterior.coords)[:-1]
-        inside = np.zeros_like(m)
-        secs.append((ring, float(np.percentile(z[top], 85))))
-    return secs if len(secs) > 1 else None
-
-
 SEC_INDEX = None
 
 
-def apply_sections(out, X0, Y0, rnd):
+def apply_sections(out, X0, Y0, rnd, measure, under):
+    """swap a building's parts for the city's 2009 LiDAR roof sections when they still match it; today's LiDAR gives
+    each section its height, roof pitch and plant"""
     global SEC_INDEX
     if SEC_INDEX is None:
         SEC_INDEX = {}
@@ -600,27 +909,47 @@ def apply_sections(out, X0, Y0, rnd):
     secs = SEC_INDEX.get((int(X0 // L1), int(Y0 // L1)), [])
     if not secs: return
     from shapely.strtree import STRtree
-    polys = [Polygon(b['ring']).buffer(0) for b in out]
-    tree = STRtree(polys)
-    by_b = {}
+    groups = {}
+    for p in out: groups.setdefault(p['gid'], []).append(p)
+    gids = list(groups)
+    bases = [max(groups[g], key=lambda p: p['a']) for g in gids]
+    tree = STRtree([Polygon(b['ring']).buffer(0) for b in bases])
+    N = L1 / HR
+    by_g = {}
     for r, hg, rt, cx, cy in secs:
+        if under is not None:
+            i_, j_ = int((cx - X0) / HR), int((Y0 + L1 - cy) / HR)
+            if 0 <= i_ < N and 0 <= j_ < N and under[j_, i_]: continue  # measured off a bridge deck
         hits = tree.query(shapely.geometry.Point(cx, cy), predicate='within')
-        if len(hits): by_b.setdefault(int(hits[0]), []).append((r, hg, rt))
-    new = []
-    drop = set()
-    for k, segs in by_b.items():
-        b = out[k]
+        if len(hits): by_g.setdefault(int(hits[0]), []).append((r, hg, rt))
+    drop, add = set(), []
+    for k, segs in by_g.items():
+        b = bases[k]
+        ps = groups[gids[k]]
+        gh = max(p['ridge'] or p['h'] for p in ps)
         cov = sum(ring_area(s[0]) for s in segs) / max(1.0, b['a'])
         top = max(s[1] for s in segs)
-        if cov < 0.6 or b['mn'] > 0 or abs(top - b['gh']) > max(6, 0.3 * b['gh']): continue  # rebuilt since 2009, or a mismatch
-        drop.add(k)
+        if cov < 0.6 or b['mn'] > 0 or abs(top - gh) > max(6, 0.3 * gh): continue  # rebuilt since 2009, or a mismatch
+        new = []
         for r, hg, rt in segs:
-            rf_, ridge, hh = 0, 0, hg
-            if rt == 'pitched' and hg < 16:
+            p = dict(b, ring=r, h=hg, roof=0, ridge=0, mn=0, pitch=0, units=b['units'] if b['units'] is None else [], a=ring_area(r))
+            mz = measure(r)
+            z, ok = (mz[0], mz[1]) if mz else (None, None)
+            if z is not None and ok.sum() >= 3:
+                v = z[ok]
+                if rt == 'pitched' and hg < 18:
+                    f = fit_roof(r, z, mz[4], mz[2])
+                    if f: p.update(roof=f[0], h=f[1], ridge=f[2], pitch=f[3])
+                if not p['roof']:
+                    p['h'] = float(np.percentile(v, 70)) if abs(np.percentile(v, 70) - hg) < max(4, 0.25 * hg) else hg
+                    if p['a'] >= 60: p['units'] = roof_units(z, ok, p['h'], mz[2], obb(r)[2], np.zeros_like(ok))
+            elif rt == 'pitched' and hg < 16:
                 cx, cy, ang, hl, hw, ar = obb(r)
-                if ring_area(r) / ar > 0.75 and hw > 2: rf_, ridge, hh = (1 if hl / hw > 1.15 else 2), hg, max(2.6, hg - min(hw * 0.9, 3.5))
-            new.append(dict(b, ring=r, h=hh + rnd.random() * 0.15, roof=rf_, ridge=ridge, a=ring_area(r)))
-    out[:] = [b for k, b in enumerate(out) if k not in drop] + new
+                if ring_area(r) / ar > 0.75 and hw > 2: p.update(roof=1 if hl / hw > 1.15 else 2, ridge=hg, h=max(2.6, hg - min(hw * 0.9, 3.5)))
+            new.append(p)
+        drop |= {id(p) for p in ps}
+        add += new
+    out[:] = [p for p in out if id(p) not in drop] + add
 
 
 # ---------------------------------------------------------------- trees
@@ -888,7 +1217,7 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
         c = (sum(p[0] for p in r) / len(r), sum(p[1] for p in r) / len(r))
         if not (tx <= c[0] < tx + size and ty <= c[1] < ty + size): continue
         if not detail:
-            if b['a'] < 60 and b['gh'] < 12: continue
+            if b['a'] < 60 and b['gh'] < 12 or b['mn'] > 0 and b['a'] < 150: continue  # overview: no sheds, no penthouses
             p = Polygon(r)
             if len(r) > 4:
                 _, _, _, _, _, ar = obb(r)
@@ -897,13 +1226,21 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
                     sp = p.simplify(1.5)
                     if sp.geom_type == 'Polygon' and len(sp.exterior.coords) > 3: r = list(sp.exterior.coords)[:-1]
         b['mn'] = max(0.0, b['mn'] or 0.0); b['h'] = max(0.5, b['h'])
-        fl = (1 if b['mn'] else 0) | (2 if b['roof'] else 0) | (4 if b['wall'] else 0) | (8 if b['roofc'] else 0) | (16 if abs(b['gh'] - b['h']) > 0.5 else 0)
+        units = b.get('units') if detail else None
+        fl = (1 if b['mn'] else 0) | (2 if b['roof'] else 0) | (4 if b['wall'] else 0) | (8 if b['roofc'] else 0) | (16 if abs(b['gh'] - b['h']) > 0.5 else 0) \
+            | 32 | (64 if units is not None else 0)
         bb += struct.pack('<BBhH', fl, b['style'], int(round(b['base'] * 10)), int(min(6000, b['h'] * 10)))
         if fl & 1: bb += struct.pack('<H', int(max(0, min(6000, b['mn'] * 10))))
         if fl & 2: bb += struct.pack('<BH', b['roof'], int(min(6000, b['ridge'] * 10)))
         if fl & 4: bb += struct.pack('<I', b['wall'] & 0xffffff)
         if fl & 8: bb += struct.pack('<I', b['roofc'] & 0xffffff)
         if fl & 16: bb += struct.pack('<HI', int(min(6000, b['gh'] * 10)), b['gid'])
+        # facade: storey height (1/20 m) and bits (1 storefront ground floor, 2 homes: balconies allowed)
+        bb += struct.pack('<BB', int(min(255, round(b['fh'] * 20))), (1 if b['shop'] else 0) | (2 if b['res'] else 0))
+        if fl & 64:  # rooftop plant the LiDAR saw (none = a clean roof): centre, size along/across, height, angle
+            bb += struct.pack('<B', len(units))
+            for x, y, su, sv, uh, ang in units:
+                bb += struct.pack('<hhBBBB', *out.q(x, y), int(min(255, su * 10)), int(min(255, sv * 10)), int(min(255, uh * 20)), int((ang % math.pi) / math.pi * 256) & 255)
         bb += pack_ring(out, r)
         nb += 1
     out.section('BLDG', struct.pack('<I', nb) + bytes(bb))
@@ -936,7 +1273,24 @@ def write_index():
     json.dump({'version': VERSION, 'origin': [LAT_O, LON_O], 'k': [KX, KY], 'extent': EX, 'sizes': [L0, L1], 'ground': GROUND, 'kinds': KINDS,
                'l0': ls(0), 'l1': ls(1), 'built': int(time.time())}, open(f'{OUT}/index.json', 'w'))
 
+def selftest():
+    """synthetic LiDAR: a gable whose ridge runs across the footprint, a hip, a shed, and a tower on a podium"""
+    ring = [(0, 0), (16, 0), (16, 10), (0, 10)]  # long axis along x; cells of the 2 m grid, NW corner at (0, 10)
+    xs, ys = np.meshgrid((np.arange(8) + 0.5) * HR, 10 - (np.arange(5) + 0.5) * HR)
+    ok = np.ones(xs.shape, bool)
+    f = fit_roof(ring, 8 - 0.5 * np.abs(xs - 8), ok, (0, 10))  # ridge along y (the short side)
+    assert f and f[0] & 15 == 1 and f[0] & CROSS and abs(f[2] - 8) < 0.3, f
+    f = fit_roof(ring, 8 - 0.5 * np.maximum(np.abs(ys - 5), np.abs(xs - 8) - 3), ok, (0, 10))
+    assert f and f[0] & 15 == 2, f
+    f = fit_roof(ring, 4 + 0.4 * ys, ok, (0, 10))  # high side north: +v when the long axis points east
+    assert f and f[0] & 15 == 5 and f[0] & FLIP, f
+    z = np.full((20, 20), 12.0); z[5:12, 6:13] = 60.0; z[8:10, 8:10] = 64.0
+    assert len(height_levels(z.ravel())) == 2, height_levels(z.ravel())
+    print('selftest ok')
+
+
 if __name__ == '__main__':
+    if sys.argv[1:] == ['selftest']: selftest(); sys.exit()
     procs = int(sys.argv[1]) if len(sys.argv) > 1 else 10
     want = [tuple(map(int, a.split('_'))) for a in sys.argv[2:]] or all_tiles()
     t0 = time.time()

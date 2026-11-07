@@ -10,7 +10,11 @@ from world import xy, L1, extent
 SRC = 'data/lm.osm.pbf'
 KEEP_BUILDING = ('building', 'building:part', 'height', 'min_height', 'building:levels', 'building:min_level', 'roof:shape', 'roof:height',
                  'roof:levels', 'roof:colour', 'building:colour', 'building:material', 'roof:material', 'roof:direction', 'roof:orientation',
-                 'name', 'amenity', 'shop', 'tourism', 'layer')
+                 'name', 'amenity', 'shop', 'tourism', 'layer', 'heritage', 'historic', 'start_date', 'building:architecture', 'office')
+# shops and the like as points: a building with one inside (or at its door) gets a storefront ground floor
+SHOPFRONT = ('shop', 'office', 'craft')
+SHOP_AMENITY = {'restaurant', 'cafe', 'fast_food', 'bar', 'pub', 'bank', 'pharmacy', 'ice_cream', 'clinic', 'dentist', 'doctors', 'post_office',
+                'library', 'cinema', 'theatre', 'nightclub', 'food_court', 'bureau_de_change', 'veterinary', 'marketplace', 'community_centre'}
 GROUND_KEYS = ('landuse', 'natural', 'leisure', 'amenity', 'aeroway', 'man_made', 'waterway', 'water', 'place', 'surface', 'golf', 'sport', 'highway', 'area:highway', 'railway', 'tourism', 'parking', 'bridge')
 LINE_KEYS = ('highway', 'railway', 'aeroway', 'waterway', 'natural', 'man_made', 'barrier', 'route', 'power')
 KEEP_LINE = ('turn:lanes', 'turn:lanes:forward', 'turn:lanes:backward', 'highway', 'railway', 'aeroway', 'waterway', 'natural', 'man_made', 'barrier', 'name', 'ref', 'lanes', 'lanes:forward', 'lanes:backward', 'oneway',
@@ -80,6 +84,9 @@ for o in fp:
                 or t.get('public_transport') or t.get('amenity') in ('bench', 'fountain', 'bicycle_rental') or t.get('man_made') in ('lighthouse', 'tower', 'mast') or t.get('power') == 'tower':
             p = xy(o.location.lat, o.location.lon)
             put('nodes', (p[0], p[1], p[0], p[1]), (o.id, p, {k: v for k, v in t})); n['nodes'] += 1
+        elif any(k in t for k in SHOPFRONT) or t.get('amenity') in SHOP_AMENITY:
+            p = xy(o.location.lat, o.location.lon)
+            put('nodes', (p[0], p[1], p[0], p[1]), (o.id, p, keep(t, ('shop', 'office', 'craft', 'amenity')))); n['shops'] += 1
 print({k: v for k, v in n.items()}, round(time.time() - t0), 's', flush=True)
 
 os.makedirs('data/feat', exist_ok=True)
