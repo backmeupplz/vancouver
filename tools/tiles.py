@@ -342,7 +342,9 @@ def build(ij):
     lines = road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0)
     # streets as ground: carriageways, sidewalks and boulevards, paths and rail beds, unioned per class so junctions
     # are clean (bridges are raised decks, drawn from the lines)
-    for L in lines:
+    # every piece that touches this tile, not only those it owns: a street crossing the tile edge is paved on
+    # both sides of it
+    for L in road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0, own=False):
         if L['z'] or len(L['pts']) < 2: continue
         k = L['kind']; ls = LineString(L['pts'])
         cls = {'motorway': 'arterial', 'trunk': 'arterial', 'primary': 'arterial', 'secondary': 'arterial', 'tertiary': 'road', 'residential': 'road',
@@ -702,7 +704,7 @@ def turn_lanes(v):
     return out if any(out) else []
 
 
-def road_pieces(items, dsm, dtm, X0, Y0):
+def road_pieces(items, dsm, dtm, X0, Y0, own=True):
     """pieces split at junctions: dict(kind, pts [(x,y)], z [..] or None, lanes, width, oneway, band, layer, a, b (node ids), name)"""
     use = {}
     ways = []
@@ -726,9 +728,11 @@ def road_pieces(items, dsm, dtm, X0, Y0):
         for a, b in zip(cut, cut[1:]):
             pts = coords[a:b + 1]
             mid = pts[len(pts) // 2]
-            if not (X0 <= mid[0] < X0 + L1 and Y0 <= mid[1] < Y0 + L1): continue
+            if own and not (X0 <= mid[0] < X0 + L1 and Y0 <= mid[1] < Y0 + L1): continue
             z = None
-            if bridge or k == 'lightrail' and t.get('bridge'):
+            if not own:  # surfaces only: every piece touching the tile, bridges just flagged
+                z = [0.0] if bridge else None
+            elif bridge or k == 'lightrail' and t.get('bridge'):
                 pts = densify(pts, 25)  # a long straight span needs points along it to carry its arch
                 z = deck_heights(pts, dsm, dtm, X0, Y0)
             out.append(dict(turns=turns, own=mid, kind=k, pts=pts, z=z, lanes=lanes, w=w, ow=ow, band=band, layer=int(hnum(t.get('layer')) or 0), a=refs[a], b=refs[b],
