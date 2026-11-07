@@ -1,1 +1,7 @@
-["plugins/lofi/lofi.js"]
+[
+"plugins/lofi/lofi.js",
+"plugins/weather/index.js",
+"plugins/transit/index.js",
+"plugins/ships/index.js",
+"plugins/planes/index.js"
+]
