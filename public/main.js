@@ -10,14 +10,34 @@ import { groundMaterial, roadMaterial, buildingMaterial, treeAtlas, treeMaterial
 const $ = (s) => document.querySelector(s)
 const loadingEl = $('#loading')
 const status = (t, frac) => { loadingEl.querySelector('.step').textContent = t; if (frac !== undefined) loadingEl.querySelector('.fill').style.width = `${Math.round(frac * 100)}%` }
-addEventListener('error', (e) => { loadingEl?.classList.add('error'); if (loadingEl?.isConnected) status(`Something went wrong: ${e.message}`) })
+addEventListener('error', (e) => { if (/WebGL unavailable/.test(e.message)) return; loadingEl?.classList.add('error'); if (loadingEl?.isConnected) status(`Something went wrong: ${e.message}`) })
 
 let city = null // the plugin host (city.js)
 let dirty = true // render on demand: only when something changed
 let shadowStale = false, lastShadow = 0 // new tiles refresh the shadow map, at most twice a second
 const mobile = matchMedia('(pointer: coarse)').matches || innerWidth < 700
 
-const renderer = new THREE.WebGLRenderer({ antialias: false, canvas: $('canvas'), powerPreference: 'high-performance' })
+// No WebGL (hardware acceleration off, an old or locked-down browser): say so plainly and stop
+function noWebGL(detail) {
+  loadingEl.classList.add('error')
+  loadingEl.querySelector('.card').innerHTML = `
+    <div class="title">Vancouver in code needs WebGL</div>
+    <p class="step" style="text-align:left;line-height:1.5">This browser couldn't start 3D graphics (WebGL 2), which the map needs. Usually one of these fixes it:</p>
+    <ul class="step" style="text-align:left;line-height:1.5;padding-left:18px;margin:0 0 12px">
+      <li>Turn on hardware acceleration (Chrome/Edge/Brave: Settings → System; Firefox: Settings → Performance), then restart the browser.</li>
+      <li>Update the browser or your graphics drivers, or try a current Chrome, Firefox or Safari.</li>
+      <li>Check <a href="https://get.webgl.org/webgl2/" target="_blank" rel="noopener">get.webgl.org/webgl2</a>: if the cube doesn't spin there, WebGL is blocked on this device.</li>
+    </ul>
+    <p class="step" style="font-size:11px;opacity:.7">${detail ? String(detail).replace(/[<&>]/g, '') : ''}</p>`
+  throw new Error('WebGL unavailable')
+}
+{
+  const probe = document.createElement('canvas').getContext('webgl2')
+  if (!probe) noWebGL('WebGL 2 is not available in this browser.')
+  probe.getExtension('WEBGL_lose_context')?.loseContext()
+}
+let renderer
+try { renderer = new THREE.WebGLRenderer({ antialias: false, canvas: $('canvas'), powerPreference: 'high-performance' }) } catch (e) { noWebGL(e.message) }
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
 renderer.setSize(innerWidth, innerHeight)
 renderer.shadowMap.enabled = true
