@@ -688,6 +688,20 @@ def canopy_trees(dsm, dtm, fp, water, X0, Y0, rnd, polys, nogo):
 
 
 # ---------------------------------------------------------------- roads, paths, rail
+TURN_BITS = {'left': 1, 'slight_left': 2, 'through': 4, 'slight_right': 8, 'right': 16, 'reverse': 32, 'merge_to_left': 64, 'merge_to_right': 64, 'sharp_left': 1, 'sharp_right': 16}
+
+
+def turn_lanes(v):
+    """OSM turn:lanes 'left|through;right|' -> one bitmask per lane (0 = unmarked), at most 8 lanes"""
+    if not v: return []
+    out = []
+    for lane in v.split('|')[:8]:
+        m = 0
+        for d in lane.split(';'): m |= TURN_BITS.get(d.strip(), 0)
+        out.append(m)
+    return out if any(out) else []
+
+
 def road_pieces(items, dsm, dtm, X0, Y0):
     """pieces split at junctions: dict(kind, pts [(x,y)], z [..] or None, lanes, width, oneway, band, layer, a, b (node ids), name)"""
     use = {}
@@ -706,6 +720,8 @@ def road_pieces(items, dsm, dtm, X0, Y0):
         lanes, w, ow, band = road_shape(k, t)
         if t.get('oneway') == '-1': coords, refs = coords[::-1], refs[::-1]
         bridge = t.get('bridge') not in (None, 'no')
+        turns = (turn_lanes(t.get('turn:lanes:forward') or (t.get('turn:lanes') if ow else None)), turn_lanes(t.get('turn:lanes:backward')))
+        if t.get('oneway') == '-1': turns = (turn_lanes(t.get('turn:lanes')), [])
         cut = [0] + [n for n in range(1, len(refs) - 1) if use.get(refs[n], 0) >= 2] + [len(refs) - 1]
         for a, b in zip(cut, cut[1:]):
             pts = coords[a:b + 1]
@@ -715,7 +731,7 @@ def road_pieces(items, dsm, dtm, X0, Y0):
             if bridge or k == 'lightrail' and t.get('bridge'):
                 pts = densify(pts, 25)  # a long straight span needs points along it to carry its arch
                 z = deck_heights(pts, dsm, dtm, X0, Y0)
-            out.append(dict(own=mid, kind=k, pts=pts, z=z, lanes=lanes, w=w, ow=ow, band=band, layer=int(hnum(t.get('layer')) or 0), a=refs[a], b=refs[b],
+            out.append(dict(turns=turns, own=mid, kind=k, pts=pts, z=z, lanes=lanes, w=w, ow=ow, band=band, layer=int(hnum(t.get('layer')) or 0), a=refs[a], b=refs[b],
                             name=t.get('name', ''), drive=k in DRIVE and t.get('access') not in ('private', 'no'),
                             crossing=k in ('footway', 'cycleway', 'path') and (t.get('footway') == 'crossing' or t.get('cycleway') == 'crossing') and t.get('crossing') not in ('unmarked', 'no')))
     return out
@@ -852,12 +868,14 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     for nid in nodes: lb += struct.pack('<Q', nid)
     lb += struct.pack('<I', len(sel))
     for L in sel:
-        pts = L['pts'] if detail or len(L['pts']) <= 2 else list(LineString(L['pts']).simplify(1.5).coords)
-        z = L['z'] if detail and L['z'] and len(pts) == len(L['pts']) else None
-        flags = (1 if L['ow'] else 0) | (2 if L['band'] else 0) | (4 if z else 0) | (8 if L['drive'] else 0) | (16 if L.get('crossing') else 0)
+        pts = L['pts'] if detail or L['z'] or len(L['pts']) <= 2 else list(LineString(L['pts']).simplify(1.5).coords)
+        z = L['z'] if L['z'] and len(pts) == len(L['pts']) else None  # bridge decks in overview tiles too
+        tf, tb_ = L.get('turns', ([], []))
+        flags = (1 if L['ow'] else 0) | (2 if L['band'] else 0) | (4 if z else 0) | (8 if L['drive'] else 0) | (16 if L.get('crossing') else 0) | (32 if tf or tb_ else 0)
         lb += struct.pack('<BBBbHII', KI[L['kind']], min(255, L['lanes']), flags, max(-8, min(7, L['layer'])), int(min(655, L['w']) * 100), nodes[L['a']], nodes[L['b']])
         lb += pack_ring(out, pts)
         if z: lb += np.round(np.array(z) * 10).astype('<i2').tobytes()
+        if tf or tb_: lb += bytes([len(tf)] + tf + [len(tb_)] + tb_)  # turn lanes, left to right in each direction of travel
     out.section('LINE', bytes(lb))
     # buildings: compact header, optional fields behind flags
     bb = bytearray(); nb = 0
