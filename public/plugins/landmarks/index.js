@@ -480,17 +480,77 @@ export default function landmarks(city) {
   }
 
   // ---------- bridges ----------
-  const roadAt = roadHeights()
-  for (const [name, b] of Object.entries(data.bridges)) bridge(name, b)
-  function bridge(name, b) {
-    const pts = pairs(b.line).map(([la, lo]) => P(la, lo)), n = pts.length
-    at(...pts[Math.floor(n / 2)])
-    const off = pts.map(([x, z], i) => city.world.heightAt(x, z) - b.ground[i]).sort((p, q) => p - q)
-    const Wl = off[Math.floor(n / 2)] // the core's water level here (its ground minus the DEM ground)
+  // Each bridge is a mesh of its own, sat on the deck heights of the loaded map tiles' bridge pieces (the core draws
+  // the road decks there, from LiDAR) and rebuilt when finer tiles bring better ones; where no tile with the deck is
+  // loaded, the MRDEM profile carries the shape on from the nearest deck the tiles have
+  const bridges = Object.entries(data.bridges).map(([name, b]) => {
+    const pts = pairs(b.line).map(([la, lo]) => P(la, lo)), xs = pts.map((p) => p[0]), zs = pts.map((p) => p[1])
     const minHalf = b.type === 'stayed' && name === 'skybridge' ? 6 : 10.6 // the core draws road decks about 21 m wide
-    let deck = b.deck.map((h) => Wl + h)
-    const snap = roadAt && pts.map(([x, z], i) => roadAt(x, z, Math.max(b.half[i], minHalf) + 2))
-    if (snap && snap.filter((h) => h !== null).length > 0.6 * n) deck = fill(snap)
+    return { name, b, pts, minHalf, box: [Math.min(...xs) - 60, Math.max(...xs) + 60, Math.min(...zs) - 60, Math.max(...zs) + 60], samples: new Map(), cur: null, mesh: null, dirty: false }
+  })
+  let bT = 0
+  // deck points of a tile's bridge road pieces near each bridge: world x, z and the deck top (the core lifts its
+  // decks 0.35 m over their z)
+  function tileDecks(t) {
+    const sz = t.level ? 4096 : 1024
+    for (const br of bridges) {
+      const [x0, x1, z0, z1] = br.box
+      if (t.ox > x1 || t.ox + sz < x0 || -(t.oy + sz) > z1 || -t.oy < z0) continue
+      const a = []
+      for (const p of t.graph?.pieces || []) {
+        if (!p.z || p.kind > 7) continue
+        for (let i = 0; i < p.pts.length / 2 - 1; i++) {
+          const ax = p.pts[i * 2], az = -p.pts[i * 2 + 1], bx = p.pts[i * 2 + 2], bz = -p.pts[i * 2 + 3], k = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / 4))
+          for (let j = 0; j <= k; j++) {
+            const x = ax + ((bx - ax) * j) / k, z = az + ((bz - az) * j) / k
+            if (x > x0 && x < x1 && z > z0 && z < z1) a.push(x, z, p.z[i] + ((p.z[i + 1] - p.z[i]) * j) / k + 0.35)
+          }
+        }
+      }
+      if (!a.length) continue
+      br.samples.set(`${t.level}/${t.i}_${t.j}`, { level: t.level, a }); br.dirty = true
+      if (!bT) bT = setTimeout(replace, 400)
+    }
+  }
+  const offTiles = city.world.eachTile(tileDecks)
+  // water level (the core's ground minus the DEM ground under the bridge) and deck top at each station
+  function deckOf(br) {
+    const { b, pts } = br, n = pts.length
+    const off = pts.map(([x, z], i) => city.world.heightAt(x, z) - b.ground[i]).sort((p, q) => p - q)
+    const Wl = off[n >> 1], prof = b.deck.map((h) => Wl + h)
+    const snap = pts.map(([x, z], i) => {
+      const r = Math.max(b.half[i], br.minHalf) + 2, hs = [[], []]
+      for (const { level, a } of br.samples.values()) for (let k = 0; k < a.length; k += 3) {
+        if (Math.abs(a[k] - x) < r && Math.abs(a[k + 1] - z) < r && Math.hypot(a[k] - x, a[k + 1] - z) < r) hs[level].push(a[k + 2])
+      }
+      const h = hs[0].length ? hs[0] : hs[1] // the detail tiles' decks, else the overview's: their median
+      return h.length ? h.sort((p, q) => p - q)[h.length >> 1] : null
+    })
+    // decks far (25 m) off the profile are LiDAR gone wrong (stay cables, a bridge newer than the survey): left out,
+    // and a bridge with many of them keeps its profile
+    const known = snap.filter((h) => h !== null).length, wild = snap.filter((h, i) => h !== null && Math.abs(h - prof[i]) > 25).length
+    if (!known || wild > 0.3 * known) return { Wl, deck: prof }
+    const diff = fill(snap.map((h, i) => (h === null || Math.abs(h - prof[i]) > 25 ? null : h - prof[i])))
+    return { Wl, deck: prof.map((h, i) => h + diff[i]) }
+  }
+  // better decks came in: rebuild the bridges that moved
+  function replace() {
+    bT = 0
+    let changed = false
+    for (const br of bridges) {
+      if (!br.dirty || !br.mesh) continue
+      br.dirty = false
+      const d = deckOf(br), c = br.cur
+      if (Math.abs(d.Wl - c.Wl) < 0.3 && d.deck.every((h, i) => Math.abs(h - c.deck[i]) < 0.3)) continue
+      const g = geometry(bridge(br, d))
+      br.mesh.geometry.dispose(); br.mesh.geometry = g; changed = true
+    }
+    if (changed) city.requestRender()
+  }
+  for (const br of bridges) br.batch = bridge(br, deckOf(br))
+  function bridge(br, d) { // its triangles, on deck heights d
+    const { name, b, pts, minHalf } = br, n = pts.length, { Wl, deck } = (br.cur = d)
+    B = { p: [], c: [] }
     const S = (s) => { // position, direction, normal, half width and deck top at station s (metres)
       const f = Math.max(0, Math.min(n - 1.001, s / b.step)), i = Math.floor(f), t = f - i
       const a = pts[i], c = pts[i + 1], dx = c[0] - a[0], dz = c[1] - a[1], l = Math.hypot(dx, dz) || 1
@@ -660,9 +720,10 @@ export default function landmarks(city) {
       for (const sd of [-1, 1]) { const p = Q(s, sd * w * 0.62, 0); box(p.x, gy, p.z, 3.4, y - gy, 3.4, rot, hex) }
       box(o.x, y - 2, o.z, 3.6, 2.4, 2 * w + 2, rot, hex)
     }
-    pierWater = water
+    pierWater = br.mesh ? null : water // piers are listed on the first build only (rebuilds move decks, not piers)
     T[b.type]?.()
     pierWater = null
+    return B
   }
   function fill(a) { // fill gaps (null) in an array by linear interpolation, ends by the nearest value
     const idx = a.map((v, i) => (v === null ? -1 : i)).filter((i) => i >= 0)
@@ -674,33 +735,6 @@ export default function landmarks(city) {
       return a[lo] + ((a[hi] - a[lo]) * (i - lo)) / (hi - lo)
     })
   }
-  // the core's road graph carries its bridge deck heights: where it covers a bridge, sit on that deck
-  function roadHeights() {
-    const r = city.data?.roads
-    if (!r) return null
-    const boxes = Object.values(data.bridges).map((b) => { const p = pairs(b.line).map(([la, lo]) => P(la, lo)); return [Math.min(...p.map((q) => q[0])) - 40, Math.max(...p.map((q) => q[0])) + 40, Math.min(...p.map((q) => q[1])) - 40, Math.max(...p.map((q) => q[1])) + 40] })
-    const grid = new Map(), G = 12
-    const add = (x, z, h) => { const k = `${Math.floor(x / G)},${Math.floor(z / G)}`; if (!grid.has(k)) grid.set(k, []); grid.get(k).push(x, z, h) }
-    for (let i = 0; i < r.meta.length / 7; i++) {
-      const f = r.meta[i * 7 + 5], np = r.meta[i * 7 + 6]
-      for (let j = f; j < f + np - 1; j++) {
-        const x0 = r.pts[j * 3], z0 = -r.pts[j * 3 + 1], x1 = r.pts[j * 3 + 3], z1 = -r.pts[j * 3 + 4]
-        if (!boxes.some((bb) => (x0 > bb[0] && x0 < bb[1] && z0 > bb[2] && z0 < bb[3]) || (x1 > bb[0] && x1 < bb[1] && z1 > bb[2] && z1 < bb[3]))) continue
-        const L = Math.hypot(x1 - x0, z1 - z0), k = Math.max(1, Math.ceil(L / 4))
-        for (let t = 0; t <= k; t++) add(x0 + ((x1 - x0) * t) / k, z0 + ((z1 - z0) * t) / k, r.pts[j * 3 + 2] + ((r.pts[j * 3 + 5] - r.pts[j * 3 + 2]) * t) / k)
-      }
-    }
-    return (x, z, rad) => {
-      let best = null
-      const n = Math.ceil(rad / G)
-      for (let i = -n; i <= n; i++) for (let j = -n; j <= n; j++) {
-        const c = grid.get(`${Math.floor(x / G) + i},${Math.floor(z / G) + j}`)
-        if (c) for (let k = 0; k < c.length; k += 3) if (Math.hypot(c[k] - x, c[k + 1] - z) < rad && (best === null || c[k + 2] > best)) best = c[k + 2]
-      }
-      return best === null ? null : best + 0.3
-    }
-  }
-
   // ---------- North Shore: ski runs on Cypress, Grouse and Seymour, the Grouse Mountain Skyride ----------
   for (const p of data.pistes) {
     const r = pairs(p.r).map(([la, lo]) => P(la, lo))
@@ -742,15 +776,20 @@ export default function landmarks(city) {
   // ---------- meshes ----------
   const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })
   const objs = []
-  for (const { p, c } of cells.values()) {
-    if (!p.length) continue
+  function geometry({ p, c }) {
     const g = new THREE.BufferGeometry()
     g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3))
     g.setAttribute('color', new THREE.Float32BufferAttribute(c, 3))
     g.computeVertexNormals(); g.computeBoundingSphere()
-    const m = new THREE.Mesh(g, mat)
+    return g
+  }
+  for (const batch of [...cells.values(), ...bridges.map((br) => br.batch)]) {
+    if (!batch.p.length) continue
+    const m = new THREE.Mesh(geometry(batch), mat)
     m.castShadow = m.receiveShadow = true
     objs.push(m)
+    const br = bridges.find((q) => q.batch === batch)
+    if (br) { br.mesh = m; br.batch = null }
   }
   // containers: one instance per stack (12.2 x 2.44 m, 2.6 m a tier), no bottom face
   const cbox = new THREE.BoxGeometry(12.2, 1, 2.44).translate(0, 0.5, 0)
@@ -779,7 +818,7 @@ export default function landmarks(city) {
   city.requestRender()
   return {
     dispose() {
-      offView()
+      offView(); offTiles(); clearTimeout(bT)
       delete city.landmarks
       for (const o of objs) { city.scene.remove(o); o.geometry !== cbox && o.geometry.dispose() }
       cbox.dispose(); mat.dispose(); cmat.dispose()

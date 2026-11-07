@@ -20,7 +20,7 @@ const MARGIN = 1.5
 const V0 = [24, 19, 14, 13.5, 12.5, 10, 5, 4.2] // free speed, m/s
 const DENS = [22, 20, 40, 34, 24, 4, 0.8, 0.8] // cars per lane-km at the evening rush
 // car kinds: sedan, suv, van, truck, taxi, police (the page has a model for each)
-const CAR_LEN = [4.5, 4.8, 5.4, 8.6, 4.6, 4.9]
+const CAR_LEN = [4.55, 4.85, 5.45, 8.7, 4.55, 4.55] // bumper to bumper, as the page models them
 const BODY = [0xd63b3b, 0x2f6fd6, 0xf2f2ee, 0x2b2d31, 0x9aa3ab, 0xc8ccd0, 0x1f7a5a, 0xe68a2e, 0x3d4f8f, 0x8a2433, 0x5cb8d8, 0xf0c419, 0x6b4f9e, 0x40464e, 0xd8d0c0, 0x7fb069]
 const VAN = [0xf2f2ee, 0xf2f2ee, 0xd8dadc, 0x2b2d31, 0x2f6fd6, 0xe9e2d0]
 const CAB = [0xd63b3b, 0xf2f2ee, 0x2f6fd6, 0x1f7a5a, 0xf0a020, 0x40464e]
@@ -183,7 +183,7 @@ function buildCars() {
   const nodes = new Map()
   const node = (id, x, y) => {
     let n = nodes.get(id)
-    if (!n) nodes.set(id, (n = { id, x, y, deg: 0, best: 9, half: 0, ins: [], outs: [], conns: [], ctl: null, pedX: 0 }))
+    if (!n) nodes.set(id, (n = { id, x, y, deg: 0, best: 9, half: 0, ins: [], outs: [], conns: [], ctl: null }))
     return n
   }
   for (const p of pieces) {
@@ -196,19 +196,22 @@ function buildCars() {
   const cutAt = (n) => n.deg >= 3 ? Math.max(8.4, n.half + 1.2) : n.deg === 2 ? 2.5 : 0
   const lanes = []
   for (const p of pieces) {
-    const c = centre(p), total = Math.max(1, p.lanes || 1)
-    const per = p.oneway ? total : Math.max(1, total >> 1), lw = p.w / total
+    // lanes each way: OSM turn lanes (turns.f a→b, turns.b b→a, left to right) say how many, else half the total
+    const c = centre(p), tl = [p.turns?.f?.length ? p.turns.f : null, p.turns?.b?.length ? p.turns.b : null]
+    const lanes0 = Math.max(1, p.lanes || 1), half = Math.max(1, lanes0 >> 1)
+    const pers = p.oneway ? [tl[0]?.length || lanes0] : [tl[0]?.length || half, tl[1]?.length || half]
+    const total = tl[0] || tl[1] ? pers.reduce((a, b) => a + b) : p.oneway ? lanes0 : Math.max(2, lanes0), lw = p.w / total
     const lift = 0.18 + (18 - p.kind) * 0.004 + (c.deck ? 0.35 : 0)
     for (const dir of p.oneway ? [0] : [0, 1]) {
-      const from = dir ? p.nb : p.na, to = dir ? p.na : p.nb
+      const from = dir ? p.nb : p.na, to = dir ? p.na : p.nb, per = pers[dir]
       let s0 = cutAt(from), s1 = cutAt(to)
       if (s0 + s1 > c.len * 0.8) { const f = (c.len * 0.8) / (s0 + s1); s0 *= f; s1 *= f }
       for (let li = 0; li < per; li++) {
-        const off = p.oneway ? (li - (per - 1) / 2) * lw : total === 1 ? p.w / 4 : (li + 0.5) * lw
+        const off = p.oneway ? (li - (per - 1) / 2) * lw : (li + 0.5) * lw
         let line = offsetLine(c, off, dir === 1, lift)
         if (s0 + s1 > 0) line = cut(line, s0, s1)
-        const L = Object.assign(line, { conn: false, p, dir, li, n: per, off, lw: total === 1 ? p.w / 2 : lw, cls: p.kind, v0: V0[p.kind], from, to, cars: [], outs: [],
-          key: `${p.key}:${dir}:${li}`, cwStart: cw(from, p), cwEnd: cw(to, p), stop: false, giveWay: false, internal: false })
+        const L = Object.assign(line, { conn: false, p, dir, li, n: per, off, lw, turn: tl[dir] ? tl[dir][li] || 4 : 0, cls: p.kind, v0: V0[p.kind], from, to, cars: [], outs: [],
+          key: `${p.key}:${dir}:${li}`, cwStart: cw(from, p), cwEnd: cw(to, p), stop: false, giveWay: false, internal: false, inc: [] })
         lanes.push(L); from.outs.push(L); to.ins.push(L)
       }
     }
@@ -249,25 +252,55 @@ function buildCars() {
         if (Math.abs(ang) > 2.7) continue
         opts.push({ M, ang, type: nd.deg === 2 || Math.abs(ang) < 0.6 ? 'S' : ang > 0 ? 'L' : 'R' })
       }
-      const ok = ({ M, type }) => type === 'S' ? M.li === Math.min(L.li, M.n - 1) || (L.li === L.n - 1 && M.li > L.li)
-        : type === 'R' ? L.li === L.n - 1 && M.li === M.n - 1 : L.li === 0 && M.li === 0
+      // which lanes turn where: OSM turn lanes at junctions (a movement no lane is marked for, and junctions without
+      // them: left from the left lane, right from the right lane, straight on keeping the lane)
+      const marked = nd.deg >= 3 && L.turn ? L.sib : null
+      const ok = (o) => {
+        const { M, type } = o, idx = marked ? marked.filter((S) => S.turn & MOVE[type]).map((S) => S.li) : []
+        if (!idx.length) {
+          o.ends = type === 'S' && L.li > M.li
+          return type === 'S' ? M.li === Math.min(L.li, M.n - 1) || (L.li === L.n - 1 && M.li > L.li)
+            : type === 'R' ? L.li === L.n - 1 && M.li === M.n - 1 : L.li === 0 && M.li === 0
+        }
+        const k = idx.indexOf(L.li)
+        o.ends = type === 'S' && k > M.li
+        return k >= 0 && (type === 'S' ? M.li === Math.min(k, M.n - 1) || (k === idx.length - 1 && M.li > k)
+          : type === 'R' ? M.li === Math.max(0, M.n - (idx.length - k)) : M.li === Math.min(k, M.n - 1))
+      }
       let use = opts.filter(ok)
       if (!use.length && opts.length) { // nowhere this lane may go: the straightest way on
         const o = opts.sort((a, b) => Math.abs(a.ang) - Math.abs(b.ang))[0]
         use = opts.filter((a) => a.M.p === o.M.p && a.M.dir === o.M.dir && a.M.li === Math.min(L.li, a.M.n - 1))
+        for (const a of use) a.ends = a.type === 'S' && L.li > a.M.li
       }
-      for (const { M, type } of use) { const c = connector(L, M, type, nd); L.outs.push(c); nd.conns.push(c) }
+      for (const { M, type, ends } of use) { const c = connector(L, M, type, nd, ends); L.outs.push(c); nd.conns.push(c) }
     }
   }
-  // who crosses whose path inside each junction, and who gives way
+  // who crosses whose path, and who gives way: inside each junction, and across the junctions of one crossing (both
+  // halves of a divided road meet the cross street at two to four nodes a few metres apart, their paths overlap);
+  // where lanes merge (also where a lane ends between junctions) the ending lane gives way
+  const jpar = new Map(), jfind = (n) => { while (jpar.get(n) !== n) n = jpar.get(n); return n }
+  // (and the nodes a few metres from them: crossings mapped just before the junction)
+  for (const n of nodes.values()) jpar.set(n, n)
+  for (const p of pieces) {
+    const l = centre(p).len, a = p.na, b = p.nb
+    if (a !== b && a.deg >= 2 && b.deg >= 2 && (a.deg >= 3 || b.deg >= 3) && (l < 15 || (a.deg >= 3 && b.deg >= 3 && l < 40))) jpar.set(jfind(a), jfind(b))
+  }
+  const boxes = new Map()
   for (const nd of nodes.values()) {
-    if (nd.deg < 3) continue
-    const C = nd.conns
+    if (!nd.conns.length) continue
+    const r = jfind(nd)
+    let b = boxes.get(r)
+    if (!b) boxes.set(r, (b = { conns: [], best: 9 }))
+    b.conns.push(...nd.conns); b.best = Math.min(b.best, nd.best); b.big = b.big || nd.deg >= 3
+  }
+  for (const { conns: C, best, big } of boxes.values()) {
     for (let i = 0; i < C.length; i++) for (let j = i + 1; j < C.length; j++) {
       const a = C[i], b = C[j]
-      if (a.from === b.from || !(a.to === b.to || crosses(a, b))) continue
+      if (a.from === b.from || a.to === b.from || b.to === a.from) continue
+      if (!(a.to === b.to || (big && crossAt(a, b) >= 0))) continue
       a.conflicts.push(b); b.conflicts.push(a)
-      const pa = prio(a, nd), pb = prio(b, nd)
+      const pa = prio(a, best), pb = prio(b, best)
       if (pa > pb || b.from.stop || b.from.giveWay) b.yields.push(a)
       if (pb > pa || a.from.stop || a.from.giveWay) a.yields.push(b)
     }
@@ -276,9 +309,10 @@ function buildCars() {
   const entries = lanes.filter((L) => L.from.deg === 1 && L.len > 12)
   return { nodes, lanes, entries, ctls, cws, cum: cumWeights(lanes, (L) => L.len * DENS[L.cls]), ecum: cumWeights(entries, (L) => DENS[L.cls] ** 2) }
 }
-const prio = (c, nd) => (c.type === 'S' ? 2 : c.type === 'R' ? 1 : 0) + (c.from.cls === nd.best ? 3 : 0)
+const prio = (c, best) => (c.type === 'S' ? 2 : c.type === 'R' ? 1 : 0) + (c.from.cls === best ? 3 : 0) - (c.ends ? 4 : 0)
 
-function connector(L, M, type, nd) {
+const MOVE = { L: 1 | 2 | 32, S: 2 | 4 | 8 | 64, R: 8 | 16 } // turn lane bits: left, slight left, through, slight right, right, u-turn, merge
+function connector(L, M, type, nd, ends) {
   const e = L.x.length - 1, x0 = L.x[e], y0 = L.y[e], h0 = L.h[e], x3 = M.x[0], y3 = M.y[0], h3 = M.h[0]
   const a0 = endHeading(L), a3 = startHeading(M), d = Math.hypot(x3 - x0, y3 - y0), k = d * 0.42
   const n = Math.max(2, Math.min(12, Math.ceil(d / 2))), X = new Float32Array(n + 1), Y = new Float32Array(n + 1), H = new Float32Array(n + 1)
@@ -289,20 +323,25 @@ function connector(L, M, type, nd) {
     H[i] = h0 + (h3 - h0) * s
   }
   // mv: the way on (which road, which way); ends: this lane ends here and merges into the next lane over
-  return Object.assign(poly(X, Y, H), { conn: true, node: nd, from: L, to: M, type, cars: [], conflicts: [], yields: [], reserved: 0, group: 0,
-    mv: M.p.key + ':' + M.dir, ends: type === 'S' && L.li > M.li,
+  const c = Object.assign(poly(X, Y, H), { conn: true, node: nd, from: L, to: M, type, cars: [], conflicts: [], yields: [], reserved: 0, group: 0,
+    mv: M.p.key + ':' + M.dir, ends,
     v0: type === 'S' ? Math.min(L.v0, M.v0) : type === 'R' ? 5.5 : 7, w: (type === 'S' ? 4 : 1) * (8 - M.cls) })
+  M.inc.push(c)
+  return c
 }
-function crosses(a, b) {
+// where path a first crosses path b (metres along a), or -1
+function crossAt(a, b) {
   for (let i = 0; i < a.x.length - 1; i++) for (let j = 0; j < b.x.length - 1; j++) {
     const ax = a.x[i], ay = a.y[i], bx = a.x[i + 1], by = a.y[i + 1], cx = b.x[j], cy = b.y[j], dx = b.x[j + 1], dy = b.y[j + 1]
     const d = (bx - ax) * (dy - cy) - (by - ay) * (dx - cx)
     if (Math.abs(d) < 1e-9) continue
     const t = ((cx - ax) * (dy - cy) - (cy - ay) * (dx - cx)) / d, u = ((cx - ax) * (by - ay) - (cy - ay) * (bx - ax)) / d
-    if (t > 0.02 && t < 0.98 && u > 0.02 && u < 0.98) return true
+    if (t > 0.02 && t < 0.98 && u > 0.02 && u < 0.98) return a.cum[i] + t * (a.cum[i + 1] - a.cum[i])
   }
-  return false
+  return -1
 }
+// o comes the other way through the same green (the oncoming traffic of a left turn)
+const opposing = (c, o) => o.group === c.group && (o.from.p !== c.from.p || o.from.dir !== c.from.dir)
 function cumWeights(list, w) {
   const c = new Float64Array(list.length)
   let s = 0
@@ -352,6 +391,15 @@ function signals(nodes, pieces) {
     ctls.push(ctl)
   }
   for (const n of nodes.values()) for (const L of n.ins) L.internal = !!(L.from.ctl && L.from.ctl === L.to.ctl)
+  // turning left on a green: pull into the junction and wait there (hold) for a gap in the oncoming traffic, or
+  // for the oncoming lights to change, rather than blocking everyone behind at the stop line
+  // (hold: it stops short of the first oncoming path it crosses; IDM keeps s0 to a stop)
+  for (const ctl of ctls) for (const n of ctl.nodes) for (const c of n.conns) {
+    if (c.type !== 'L' || c.from.internal) continue
+    let first = c.len * 0.6
+    for (const o of c.conflicts) if (opposing(c, o)) { const s = o.to === c.to ? c.len : crossAt(c, o); if (s >= 0) first = Math.min(first, s) }
+    c.lt = true; c.hold = Math.max(0.5, first - 1.2) + IDM.s0
+  }
   return ctls
 }
 // 2 green, 1 amber, 0 red
@@ -638,8 +686,8 @@ function inObstacle(x, y, h, m) {
   return null
 }
 
-// may this car enter junction connector c, `dist` metres ahead?
-function permit(car, c, dist) {
+// may this car enter junction connector c, `dist` metres ahead? (ahead: a junction after the next one, only asked)
+function permit(car, c, dist, ahead) {
   if (car.committed === c) return true
   car.why = ''
   const L = c.from, nd = c.node, ctl = nd.ctl
@@ -649,26 +697,55 @@ function permit(car, c, dist) {
     if (st === 1 && dist > (car.v * car.v) / (2 * IDM.b) + 1.5) return (car.why = 'amber', false)
   }
   if (L.stop && car.stopT < 0.8) return (car.why = 'stop', false)
-  if (nd.pedX > 0 || L.cwEnd.n > 0 || c.to.cwStart.n > 0) return (car.why = 'ped', false)
-  const M = c.to
-  if (nd.deg >= 3 && M.cars.length && M.cars[0].s - M.cars[0].L < car.L + 1 && M.cars[0].v < 2) return (car.why = 'box', false) // don't block the box
-  if (car.wait < 25) {
-    for (const o of c.conflicts) if (o.cars.length || o.reserved) return (car.why = 'conflict', false)
-    for (const o of c.yields) { // someone with right of way about to arrive?
-      const F = o.from, a = F.cars
-      if (!a.length) continue
-      const lead = a[a.length - 1]
-      if (lead.route[0] === o && lead.v > 0.8 && F.len - lead.s < 6 + lead.v * 3) return (car.why = 'yield', false)
-    }
+  if (L.cwEnd.n > 0 || c.to.cwStart.n > 0) return (car.why = 'ped', false)
+  if (nd.deg >= 3 && !room(car, c)) return (car.why = 'box', false) // don't block the box
+  if (car.wait < 25 || ctl) { // (a deadlock breaker where no signal sorts it out)
+    if (busy(c, c.lt)) return (car.why = 'conflict', false)
+    for (const o of c.yields) if ((!c.lt || !opposing(c, o)) && arriving(o)) return (car.why = 'yield', false)
   }
-  if (dist < 2.5 + car.v * 0.4) { car.committed = c; c.reserved++ }
+  if (!ahead && !car.committed && dist < 2.5 + car.v * 0.4) { car.committed = c; c.reserved++ } // (one at a time: the nearest)
+  return true
+}
+// is a path crossing c taken? (left turners waiting in the junction don't hold up the oncoming traffic; with
+// opp, the oncoming traffic is no reason not to pull in either)
+function busy(c, opp) {
+  for (const o of c.conflicts) {
+    const op = opposing(c, o)
+    if (opp && op) continue
+    if (o.reserved) return true
+    for (const q of o.cars) if (!(q.lhold && op)) return true
+  }
+  return false
+}
+// someone with right of way about to arrive on path o?
+function arriving(o) {
+  const F = o.from, a = F.cars
+  if (!a.length) return false
+  const lead = a[a.length - 1]
+  return lead.route[0] === o && lead.v > 0.8 && F.len - lead.s < 6 + lead.v * 3
+}
+// is there room past junction path c? A car standing (or crawling) on the way out within the car's length, after
+// the cars already in the junction heading that way, means it would stop in the box and block the cross traffic
+function room(car, c) {
+  const R = car.route, need = car.L + 1.5
+  let inb = 0, free = 0
+  for (const o of c.to.inc) { for (const q of o.cars) if (q !== car) inb += q.L + 2; inb += o.reserved * 6.5 }
+  for (let j = R.indexOf(c) + 1; j > 0 && j < R.length; j++) {
+    const s = R[j]
+    if (!s) return true
+    if (s.cars.length) { const o = s.cars[0]; return o.v > 3 || free + o.s - o.L - inb >= need }
+    free += s.len
+    if (free - inb >= need + 20 || (s.conn && s.node.deg >= 3)) return true // plenty, or the next junction (its own rules)
+  }
   return true
 }
 // distance to what is ahead and its speed; stop: a stop line
 function gap(car) {
   const seg = car.seg, a = seg.cars
   let g = 1e9, gv = 0, hard = false
-  if (car.k < a.length - 1) { const o = a[car.k + 1]; g = o.s - o.L - car.s; gv = o.v }
+  car.lhold = !!(seg.lt && car.s < seg.hold && (busy(seg, false) || seg.yields.some(arriving))) // waiting to turn left
+  if (car.lhold) { g = seg.hold - car.s; hard = true }
+  if (car.k < a.length - 1) { const o = a[car.k + 1]; if (o.s - o.L - car.s < g) { g = o.s - o.L - car.s; gv = o.v; hard = false } }
   if (seg.ghosts?.length || seg.block || car.lc?.ghost) {
     const r = leadOn(seg, car.s, car)
     if (r[0] < g) [g, gv, hard] = r
@@ -692,8 +769,10 @@ function gap(car) {
       if (nx.block || (nx.to.block && blockAhead(nx.to, 0)[0] < car.L + 2)) return [d - 0.6, 0, true]
       // a lane too short to wait on between two junctions: the second must be clear before entering the first
       const nx2 = R[i + 2]
-      if (car.committed !== nx && nx.to.len < car.L + 4 && nx2?.conn && !permit(car, nx2, d + nx.len + nx.to.len)) return [d - 0.6, 0, true]
+      if (car.committed !== nx && nx.to.len < car.L + 4 && nx2?.conn && !permit(car, nx2, d + nx.len + nx.to.len, true)) return [d - 0.6, 0, true]
       if (!permit(car, nx, d)) return [d - 0.6, 0, true]
+      // someone who just turned off this lane another way is still in front (the paths part a few metres on)
+      for (const c of prev.outs) if (c !== nx && c.cars.length) { const o = c.cars[0]; if (o.s - o.L < 3) return [d + o.s - o.L, o.v, false] }
     }
     if (nx.cars.length || nx.ghosts?.length || nx.block) { const r = leadOn(nx, -1, null); if (r[0] < 1e9) return [d + r[0] - 1, r[1], r[2]] }
     d += nx.len; prev = nx
@@ -754,58 +833,74 @@ function stepCars(dt) {
 }
 
 // ---------------------------------------------------------------- people
-// sidewalk centre offset of a road with sidewalks (the tile worker's band: kerb, boulevard on tertiary and
-// residential streets, then the walk)
+// sidewalk centre offset of a street whose sidewalks the core paves (piece.band; tools/tiles.py: a boulevard on
+// tertiary and residential streets, then a 3 m walk on primary and secondary, 2 m elsewhere; 2 m on bridge decks)
 function sidewalk(p) {
-  if (p.band === false || p._band === false || p.kind < 2 || p.kind > 7 || p.kind === 6) return 0
-  const blvd = p.kind === 4 || p.kind === 5 ? 2.2 : 0, w = p.kind <= 3 ? 3.2 : 2.0
-  return p.w / 2 + blvd + w / 2
+  if (!p.band || p.kind < 2 || p.kind > 7 || p.kind === 6) return 0
+  if (p.z) return p.w / 2 + 1
+  return p.w / 2 + (p.kind === 4 || p.kind === 5 ? 2.2 : 0) + (p.kind <= 3 ? 1.5 : 1)
 }
 const FOOT = new Set([8, 9, 11, 12, 13])
+const okSide = (w, s) => (s > 0 ? w.okL : w.okR) // may people walk on this side of w (+1 left of a→b)?
 function buildWalk() {
   const r = area.vr + 250
   let pieces = gather(area.vx, area.vy, r, (p) => p.pts.length >= 4 && (FOOT.has(p.kind) || p.kind === 10 || sidewalk(p) > 0))
-  // Streets whose sidewalks are mapped as separate footways (sidewalk=separate) have no sidewalk band drawn, but
-  // the tile graph doesn't say which (a `band` flag on the pieces wins if the core ever adds one). Where footways
-  // run alongside, people walk those instead: that catches ~85% of the band-less streets downtown (checked against
-  // the tiles' own flags) and costs little elsewhere, since the footways right there carry the people
-  const fg = grid(12)
-  for (const p of pieces) {
-    if (p.kind !== 9 && p.kind !== 8) continue
+  // which sides of a street people walk: not the side facing the other half of a divided road (the median), nor
+  // where the sidewalk is mapped as a footway of its own alongside (people walk that instead)
+  const fg = grid(32)
+  const lineOf = (p, kind) => {
     const c = centre(p)
     for (let i = 0; i < c.x.length - 1; i++) {
       const dx = c.x[i + 1] - c.x[i], dy = c.y[i + 1] - c.y[i], l = Math.hypot(dx, dy) || 1, n = Math.ceil(l / 4)
-      for (let k = 0; k < n; k++) fg.add(c.x[i] + (dx * k) / n, c.y[i] + (dy * k) / n, [dx / l, dy / l, c.x[i] + (dx * k) / n, c.y[i] + (dy * k) / n])
+      for (let k = 0; k < n; k++) fg.add(c.x[i] + (dx * k) / n, c.y[i] + (dy * k) / n, [dx / l, dy / l, c.x[i] + (dx * k) / n, c.y[i] + (dy * k) / n, kind, p])
     }
   }
+  const streets = gather(area.vx, area.vy, r, (p) => p.drive && p.kind <= 7 && p.pts.length >= 4)
+  for (const p of pieces) if (p.kind === 9 || p.kind === 8) lineOf(p, 1)
+  for (const p of streets) if (p.oneway) lineOf(p, 0)
   for (const p of pieces) {
-    if (p.band !== undefined || p._band !== undefined || !sidewalk(p)) continue
-    const c = centre(p), lo = p.w / 2 - 0.5, hi = p.w / 2 + 9
-    let tried = 0, hit = 0
-    for (let u = Math.min(6, c.len / 2); u < c.len; u += 12) {
+    if (p._sides || !sidewalk(p)) continue
+    const c = centre(p), hw = p.w / 2, hit = [0, 0]
+    let tried = 0
+    for (let u = Math.min(6, c.len / 2); u < c.len; u += 10) {
       at(c, u, tmp); tried++
-      let l = false, r = false
+      const side = [false, false]
       fg.near(tmp.x, tmp.y, (q) => {
-        if (Math.abs(q[0] * tmp.tx + q[1] * tmp.ty) < 0.9) return
-        const ox = q[2] - tmp.x, oy = q[3] - tmp.y, along = ox * tmp.tx + oy * tmp.ty, side = -ox * tmp.ty + oy * tmp.tx
-        if (Math.abs(along) < 8 && Math.abs(side) > lo && Math.abs(side) < hi) { if (side > 0) l = true; else r = true }
+        if (q[5] === p) return
+        const dot = q[0] * tmp.tx + q[1] * tmp.ty
+        if (Math.abs(dot) < 0.9) return
+        const ox = q[2] - tmp.x, oy = q[3] - tmp.y, a = -ox * tmp.ty + oy * tmp.tx, d = Math.abs(a)
+        if (Math.abs(ox * tmp.tx + oy * tmp.ty) > 8) return
+        if (q[4] ? d > hw - 0.5 && d < hw + 9 : p.oneway && dot < 0 && d > 2 && d < 30) side[a > 0 ? 0 : 1] = true
       })
-      if (l || r) hit++
+      if (side[0]) hit[0]++
+      if (side[1]) hit[1]++
     }
-    p._band = !(tried && hit / tried >= 0.4)
+    p._sides = hit.map((h) => !(tried && h / tried >= 0.4)) // [left, right]
   }
-  pieces = pieces.filter((p) => FOOT.has(p.kind) || p.kind === 10 || sidewalk(p) > 0)
+  pieces = pieces.filter((p) => FOOT.has(p.kind) || p.kind === 10 || (sidewalk(p) > 0 && (p._sides[0] || p._sides[1])))
   const nodes = new Map(), wps = []
   const node = (id, x, y) => { let n = nodes.get(id); if (!n) nodes.set(id, (n = { id, x, y, legs: [], bikes: [] })); return n }
   const dt = (x, y) => { const d = Math.hypot(x - DOWNTOWN[0], y - DOWNTOWN[1]); return 1 + 2.5 * Math.exp(-d / 1500) }
   const h = opts.hour, day = smooth(6, 9, h) * (1 - smooth(19, 22.5, h))
+  // the carriageways, every 3 m: footways that run into them (OSM draws many sidewalks inside the paved width) move
+  // out to the kerb, and where a path crosses one that stretch is walked only while crossing
+  const rg = grid(32)
+  for (const p of streets) {
+    const c = centre(p)
+    for (let i = 0; i < c.x.length - 1; i++) {
+      const dx = c.x[i + 1] - c.x[i], dy = c.y[i + 1] - c.y[i], l = Math.hypot(dx, dy) || 1, n = Math.ceil(l / 3)
+      for (let k = 0; k <= n; k++) rg.add(c.x[i] + (dx * k) / n, c.y[i] + (dy * k) / n, [dx / l, dy / l, c.x[i] + (dx * k) / n, c.y[i] + (dy * k) / n, p])
+    }
+  }
   for (const p of pieces) {
-    const c = centre(p), off = sidewalk(p), bike = p.kind === 10
+    const off = sidewalk(p), bike = p.kind === 10, c = off || bike ? centre(p) : kerbed(p, rg)
     const lift = off ? 0.12 + (c.deck ? 0.3 : 0) : 0.18 + (18 - p.kind) * 0.004 - 0.03 + (c.deck ? 0.35 : 0)
     const m = c.x.length >> 1, mx = c.x[m], my = c.y[m]
     const per = off ? (p.kind <= 3 ? 0.03 : 0.012) * 2 : p.kind === 8 ? 0.07 : p.kind === 9 ? 0.03 : p.kind === 12 ? 0.008 : 0.016 * (0.3 + day)
-    const wp = { p, c, off, bike, lift, w: p.w, na: node(p.a, c.x[0], c.y[0]), nb: node(p.b, c.x[c.x.length - 1], c.y[c.y.length - 1]), legs: [null, null],
+    const wp = { p, c, off, bike, lift, w: p.w, okL: !off || p._sides[0], okR: !off || p._sides[1], na: node(p.a, c.x[0], c.y[0]), nb: node(p.b, c.x[c.x.length - 1], c.y[c.y.length - 1]), legs: [null, null],
       weight: bike ? 0 : c.len * per * dt(mx, my), bikeWeight: bike ? c.len * 0.004 * dt(mx, my) : 0 }
+    if (!off && !bike) wp.xs = crossings(c, rg, p)
     wps.push(wp)
     for (const e of [0, 1]) {
       const n = e ? wp.nb : wp.na
@@ -822,9 +917,21 @@ function buildWalk() {
     n.dX = cn && cn.deg >= 3 ? 5.6 : 0
     const bands = n.legs.filter((l) => l.band).sort((a, b) => a.ang - b.ang)
     n.bands = bands
-    const reach = Math.max(0, ...bands.map((l) => l.wp.off))
+    // the streets meeting here (their carriageways): corners sit where the sidewalks clear them, footways stop at
+    // the kerb (a crossing's footway, which lies on the street, is walked to the end while crossing)
+    const roads = []
+    if (cn) for (const L of [...cn.ins, ...cn.outs]) if (!roads.some((q) => q.p === L.p)) roads.push({ p: L.p, ang: L.from === cn ? startHeading(L) : endHeading(L) + Math.PI })
+    n.roads = roads
+    let reach = Math.max(0, ...bands.map((l) => l.wp.off))
+    for (const q of roads) reach = Math.max(reach, q.p.w / 2 + 0.8)
     for (const l of n.legs) {
-      l.cut = Math.min(l.band ? n.dX : reach, l.wp.c.len * 0.45)
+      let cut = l.band ? n.dX : l.wp.p.crossing ? 0 : reach
+      if (l.band) for (const q of roads) {
+        if (q.p === l.wp.p) continue
+        const th = l.ang - q.ang, sn = Math.abs(Math.sin(th))
+        if (sn > 0.34) cut = Math.max(cut, (q.p.w / 2 + 0.8 + l.wp.off * Math.abs(Math.cos(th))) / sn)
+      }
+      l.cut = Math.min(cut, l.wp.c.len * 0.45)
       l.k = bands.indexOf(l)
     }
     n.corners = bands.length ? bands.map(() => []) : [[]]
@@ -852,7 +959,75 @@ function buildWalk() {
   const benches = poisOf([4], area.vx, area.vy, r).map((q) => ({ x: q.x, y: q.y, h: groundH(q.x, q.y) + 0.1, ang: face(q.x, q.y), id: q.id }))
   const stops = poisOf([5], area.vx, area.vy, r).map((q) => ({ x: q.x, y: q.y, h: groundH(q.x, q.y) + 0.13, ang: face(q.x, q.y), id: q.id }))
   return { nodes, foot, cycl, cum: cumWeights(foot, (w) => w.weight), bcum: cumWeights(cycl, (w) => w.bikeWeight),
-    weight: foot.reduce((s, w) => s + w.weight, 0), bikeWeight: cycl.reduce((s, w) => s + w.bikeWeight, 0), benches, stops }
+    weight: foot.reduce((s, w) => s + w.weight, 0), bikeWeight: cycl.reduce((s, w) => s + w.bikeWeight, 0), benches, stops, rg }
+}
+const KERB = 0.8 // people keep this far from a carriageway's edge unless crossing
+// a path's line moved out of the carriageways it runs alongside (to a metre past the kerb)
+function kerbed(p, rg) {
+  const c = centre(p), n = c.x.length, X = Float32Array.from(c.x), Y = Float32Array.from(c.y)
+  if (c.deck) return c
+  let moved = false
+  for (let i = 0; i < n; i++) {
+    const a = Math.max(0, i - 1), b = Math.min(n - 1, i + 1), l = Math.hypot(c.x[b] - c.x[a], c.y[b] - c.y[a]) || 1, tx = (c.x[b] - c.x[a]) / l, ty = (c.y[b] - c.y[a]) / l
+    rg.near(X[i], Y[i], (q) => {
+      if (q[4].z || Math.abs(q[0] * tx + q[1] * ty) < 0.8) return
+      const ox = X[i] - q[2], oy = Y[i] - q[3]
+      if (Math.abs(ox * q[0] + oy * q[1]) > 2) return
+      const s = -ox * q[1] + oy * q[0], need = q[4].w / 2 + KERB + 0.3
+      if (Math.abs(s) < need) { const k = (s >= 0 ? need : -need) - s; X[i] -= q[1] * k; Y[i] += q[0] * k; moved = true }
+    })
+  }
+  if (!moved) return c
+  const H = new Float32Array(n)
+  for (let i = 0; i < n; i++) H[i] = groundH(X[i], Y[i])
+  return Object.assign(poly(X, Y, H), { deck: false })
+}
+// the stretches [u0, u1] of a path's line inside a carriageway, with the street, its direction and the junction
+// node the cars stop at for people there (the path's own end on the street, else the street's nearer end)
+function crossings(c, rg, fp) {
+  const xs = []
+  let cur = null
+  for (let u = 0; u <= c.len + 0.5; u += 1) {
+    at(c, Math.min(u, c.len), tmp)
+    let hit = null
+    rg.near(tmp.x, tmp.y, (q) => {
+      if (hit || !!q[4].z !== c.deck) return
+      const ox = tmp.x - q[2], oy = tmp.y - q[3]
+      if (Math.abs(ox * q[0] + oy * q[1]) <= 1.6 && Math.abs(-ox * q[1] + oy * q[0]) < q[4].w / 2 + KERB) hit = q
+    })
+    if (!hit) continue
+    if (cur && u - cur.u1 <= 2.5) cur.u1 = u
+    else xs.push((cur = { u0: u, u1: u, p: hit[4], ang: Math.atan2(hit[1], hit[0]), x: tmp.x, y: tmp.y }))
+  }
+  for (const I of xs) {
+    I.u0 = Math.max(0, I.u0 - 0.5); I.u1 = Math.min(c.len, I.u1 + 0.5)
+    I.node = stopNode(I.p, I.x, I.y, net && (net.nodes.get(fp.a) || net.nodes.get(fp.b)))
+    I.leg = { ang: I.ang, wp: { p: I.p } } // (as mayCross reads a leg)
+  }
+  return xs.length ? xs : null
+}
+// the junction where cars stop for people crossing street P at (x, y): `own` if P runs through it, else P's
+// nearer end within 30 m
+function stopNode(P, x, y, own) {
+  if (own && own.deg >= 2 && [...own.ins, ...own.outs].some((L) => L.p === P)) return own
+  const e = [P.na, P.nb].filter(Boolean).sort((a, b) => Math.hypot(a.x - x, a.y - y) - Math.hypot(b.x - x, b.y - y))[0]
+  return e && Math.hypot(e.x - x, e.y - y) < 30 ? e : null
+}
+// someone about to wait for a street who stands on its paving (OSM's crossings start where the kerb really is, the
+// streets are drawn a little wider): a step or two back the way they came
+function kerbside(p) {
+  const bx = -Math.cos(p.ang) * 0.5, by = -Math.sin(p.ang) * 0.5
+  for (let k = 0; k < 6 && inRoad(p.x, p.y); k++) { p.x += bx; p.y += by }
+}
+// the carriageway (a road sample of walk.rg) at a point, if any
+function inRoad(x, y) {
+  let hit = null
+  walk.rg.near(x, y, (q) => {
+    if (hit || q[4].z) return
+    const ox = x - q[2], oy = y - q[3]
+    if (Math.abs(ox * q[0] + oy * q[1]) <= 1.6 && Math.abs(-ox * q[1] + oy * q[0]) < q[4].w / 2 + KERB) hit = q
+  })
+  return hit
 }
 function makeStatics() {
   statics = []
@@ -909,7 +1084,7 @@ function mayCross(n, leg) {
   for (const L of cn.ins) {
     if (leg && L.p !== leg.wp.p) continue
     const a = L.cars
-    if (a.length) { const o = a[a.length - 1]; if (o.v > 0.5 && L.len - o.s < 5 + o.v * 2.5) return false }
+    if (a.length) { const o = a[a.length - 1]; if ((o.v > 0.5 && L.len - o.s < 5 + o.v * 2.5) || (o.wait > 3 && L.len - o.s < 8)) return false } // (or has waited for people a while: its turn)
   }
   for (const c of cn.conns) if ((c.cars.length || c.reserved) && (!leg || c.from.p === leg.wp.p || c.to.p === leg.wp.p)) return false
   return true
@@ -917,40 +1092,55 @@ function mayCross(n, leg) {
 function crosswalk(n, leg) { return n.car ? net.cws.get(n.car.id + ':' + leg.wp.p.key) : null }
 function arrive(p, leg, side) {
   const n = leg.n
+  if (p.xin && !inRoad(p.x, p.y)) leaveX(p) // across: off the street (cars may go)
   if (n.legs.length === 1 && Math.hypot(n.x - area.vx, n.y - area.vy) > area.vr) { p.dead = true; return }
   const ci = side === 0 ? leg.corner : side > 0 ? leg.k : (leg.k - 1 + n.bands.length) % n.bands.length
   const corner = n.corners[ci] || n.corners[0]
   const nb = n.bands.length
   if (n.crossOK && nb >= 2 && Math.random() < 0.45) {
-    const opts = [n.bands[ci], n.bands[(ci + 1) % nb]].filter((l) => l !== p.crossed)
+    const opts = [n.bands[ci], n.bands[(ci + 1) % nb]].filter((l) => l !== p.crossed && portOK(l, 1) && portOK(l, -1))
     const X = opts[(Math.random() * opts.length) | 0]
     if (X) {
+      leaveX(p)
       const sX = X === n.bands[ci] ? 1 : -1
       portPos(X, sX, 0, tmp2)
-      hop(p, tmp2, () => { p.mode = 'wait'; p.waitT = 0; p.cross = X; p.crossSide = sX; p.ang = X.ang + (sX > 0 ? -Math.PI / 2 : Math.PI / 2) })
+      hopAt(p, n, tmp2, () => { p.mode = 'wait'; p.waitT = 0; p.cross = X; p.crossSide = sX; p.ang = X.ang + (sX > 0 ? -Math.PI / 2 : Math.PI / 2) })
       return
     }
   }
   p.crossed = null
-  let ports = corner.filter((q) => q.leg !== leg || q.side !== side)
-  if (!ports.length) ports = corner
+  let ports = corner.filter((q) => (q.leg !== leg || q.side !== side) && portOK(q.leg, q.side))
+  if (!ports.length) ports = [{ leg, side }] // nowhere to go on from this corner: back the way they came
   const q = ports[(Math.random() * ports.length) | 0]
   startWalkFrom(p, q.leg, q.side)
 }
+// may people stand at this end of a leg on that side (looking out from the node)?
+const portOK = (leg, side) => !side || okSide(leg.wp, side * (leg.end ? -1 : 1))
 function startWalkFrom(p, leg, side) {
   const x = p.x, y = p.y, h = p.h
   startWalk(p, leg, side)
   pedPos(p)
   const o = { x: p.x, y: p.y, h: p.h }
-  // a footway that crosses a street through its middle node: wait for the street to clear first
-  const far = leg.wp.legs[1 - leg.end].n
-  const xing = !leg.band && far.car && !far.bands.length && leg.wp.c.len < 30 ? far : null
   p.x = x; p.y = y; p.h = h
-  const go = () => {
-    if (xing) { p.mode = 'wait'; p.waitT = 0; p.xnode = xing } else p.mode = 'walk'
+  if (Math.hypot(o.x - x, o.y - y) > 0.3) hopAt(p, leg.n, o, () => { p.mode = 'walk' })
+  else p.mode = 'walk'
+}
+// a step round a corner of node n; across a street that has no sidewalk legs here (a side street, a service road),
+// as a crossing: wait for it, then cross with the cars at the junction waiting
+// (also onto a path that starts out on the street: OSM's crossings often begin inside the paved width)
+function hopAt(p, n, o, then) {
+  if (p.xin || p.xing) return hop(p, o, then)
+  let leg = null, cn = n.car
+  if (cn) for (const r of n.roads) {
+    const dx = Math.cos(r.ang) * 40, dy = Math.sin(r.ang) * 40, ex = o.x - p.x, ey = o.y - p.y, d = ex * dy - ey * dx
+    if (Math.abs(d) < 1e-9) continue
+    const t = ((n.x - p.x) * dy - (n.y - p.y) * dx) / d, u = ((n.x - p.x) * ey - (n.y - p.y) * ex) / d
+    if (t > 0 && t < 1 && u >= 0 && u < 1) { leg = { ang: r.ang, wp: { p: r.p } }; break }
   }
-  if (Math.hypot(o.x - x, o.y - y) > 0.3) hop(p, o, go)
-  else go()
+  if (!leg) { const q = inRoad(o.x, o.y); if (q) { leg = { ang: Math.atan2(q[1], q[0]), wp: { p: q[4] } }; cn = stopNode(q[4], o.x, o.y, n.car) } }
+  if (!leg) return hop(p, o, then)
+  p.mode = 'wait'; p.waitT = 0; p.xhop = { o: { x: o.x, y: o.y, h: o.h }, leg, cn, then }
+  kerbside(p)
 }
 function pedPos(p) {
   const w = p.wp
@@ -961,15 +1151,31 @@ function pedPos(p) {
 }
 function release(p) {
   if (p.cw) { p.cw.n--; p.cw = null }
-  if (p.xheld) { p.xheld.pedX--; p.xheld = null }
+  hold(p, null)
+  p.xin = p.xok = p.xiv = p.xhop = null; p.xing = false
 }
+// on a path's stretch across a street (cars at its junction wait for them), and off it again
+function enterX(p, I) {
+  hold(p, I.node && net?.cws.get(I.node.id + ':' + I.p.key))
+  p.xin = I; p.xok = null
+}
+function leaveX(p) { hold(p, null); p.xin = null }
+// the crosswalk (a street at a junction) someone is out on: cars about to cross it there wait
+function hold(p, cw) { if (p.xcw === cw) return; if (p.xcw) p.xcw.n--; p.xcw = cw || null; p.xT = simT; if (cw) cw.n++ }
 function stepPeople(dt) {
   for (const p of peds) {
     p.life -= dt
-    if (p.xheld && simT > p.xuntil) { p.xheld.pedX--; p.xheld = null }
+    if (p.xcw && simT - p.xT > 30) hold(p, null) // (never hold the cars up for long)
     if (p.mode === 'walk') {
       const u0 = p.u
       p.u += p.dir * p.v * dt; p.phase += p.v * dt * 4.2
+      const xs = p.wp.xs
+      let I = null
+      if (xs) for (const q of xs) if (p.u > q.u0 && p.u < q.u1) { I = q; break }
+      if (I && p.xin !== I) {
+        if (p.xin || p.xok === I) enterX(p, I) // allowed, or already out on the street (at a path's middle node)
+        else { p.u = p.dir > 0 ? I.u0 : I.u1; pedPos(p); p.mode = 'wait'; p.waitT = 0; p.xiv = I; kerbside(p); continue } // wait at the kerb
+      } else if (!I && p.xin) leaveX(p)
       if ((p.dir > 0 && p.u >= p.uEnd) || (p.dir < 0 && p.u <= p.uEnd)) {
         p.u = p.uEnd; pedPos(p)
         const leg = p.wp.legs[p.dir > 0 ? 1 : 0]
@@ -1004,13 +1210,23 @@ function stepPeople(dt) {
           const X = p.cross, sX = p.crossSide
           p.cw = crosswalk(n, X); if (p.cw) p.cw.n++
           portPos(X, -sX, 0, tmp2)
-          p.cross = null
-          hop(p, tmp2, () => { if (p.cw) { p.cw.n--; p.cw = null } p.crossed = X; arrive(p, X, -sX) })
+          p.cross = null; p.xing = true // (on the street, on the crosswalk)
+          hop(p, tmp2, () => { if (p.cw) { p.cw.n--; p.cw = null } p.xing = false; p.crossed = X; arrive(p, X, -sX) })
         }
-      } else if (p.xnode) {
-        if (mayCross(p.xnode, null) || p.waitT > 60) {
-          p.xheld = p.xnode.car; p.xheld.pedX++; p.xuntil = simT + (p.wp.c.len + 10) / p.v; p.xnode = null; p.mode = 'walk'
+      } else if (p.xhop) {
+        const X = p.xhop
+        if (!X.cn || mayCross({ car: X.cn }, X.leg) || p.waitT > 60) {
+          p.xhop = null; p.xing = true
+          hold(p, X.cn && net?.cws.get(X.cn.id + ':' + X.leg.wp.p.key))
+          hop(p, X.o, () => {
+            p.xing = false; hold(p, null)
+            X.then()
+            p.xok = (p.wp.xs || []).find((I) => p.u >= I.u0 - 0.01 && p.u <= I.u1 + 0.01) || null // on across the street
+          })
         }
+      } else if (p.xiv) {
+        const I = p.xiv
+        if (!I.node || mayCross({ car: I.node }, I.leg) || p.waitT > 60) { p.xok = I; p.xiv = null; p.mode = 'walk' }
       } else p.mode = 'walk'
     }
     if ((p.x - area.vx) ** 2 + (p.y - area.vy) ** 2 > (area.vr + 300) ** 2) p.dead = true
@@ -1024,11 +1240,13 @@ function spawnPed() {
   const w = sample(walk.foot, walk.cum)
   if (!w) return
   const c = w.c, u = Math.random() * c.len
+  if (w.xs && w.xs.some((I) => u > I.u0 - 1 && u < I.u1 + 1)) return // not out on a street
   at(c, u, tmp)
   if ((tmp.x - area.vx) ** 2 + (tmp.y - area.vy) ** 2 > (area.vr + 150) ** 2) return
   const p = person(0, 0, 0, 0, 0)
   const dir = Math.random() < 0.5 ? 1 : -1, leg = w.legs[dir > 0 ? 0 : 1]
-  startWalk(p, leg, w.off ? (Math.random() < 0.5 ? 1 : -1) : 0)
+  const ws = !w.okL ? -1 : !w.okR ? 1 : Math.random() < 0.5 ? 1 : -1 // the side of the street (of a→b)
+  startWalk(p, leg, w.off ? ws * (leg.end ? -1 : 1) : 0)
   p.u = Math.min(Math.max(u, Math.min(p.u, p.uEnd)), Math.max(p.u, p.uEnd))
   pedPos(p)
   peds.push(p)
@@ -1102,9 +1320,10 @@ function rebuild() {
       const w = p.wp && byKey.get(p.wp.p.key)
       if (!w) return false
       const leg = w.legs[p.dir > 0 ? 0 : 1], u = Math.min(w.c.len, Math.max(0, p.u))
+      if (p.pose !== 3 && w.off && !okSide(w, p.side)) return false
       if (p.pose !== 3) { const lat = p.lat, side = p.side; startWalk(p, leg, side * (leg.end ? -1 : 1)); p.lat = lat; p.u = p.dir > 0 ? Math.min(u, p.uEnd) : Math.max(u, p.uEnd) }
       else { p.wp = w; p.u = u }
-      p.cross = p.xnode = p.crossed = null
+      p.cross = p.crossed = null
       return true
     }
     peds = peds.filter(move); bikes = bikes.filter(move)

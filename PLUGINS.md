@@ -73,11 +73,15 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 The map streams in as you look around: 4096 m tiles (`level 1`) for the overview and 1024 m tiles (`level 0`) up
 close. Each tile carries its road graph so traffic, people and games can move on real streets:
 
-- `tile.graph.pieces`: `{ kind, lanes, oneway, drive, band, w, a, b, pts, z }` (`band`: the road has sidewalks drawn) per road piece between junctions. `kind`
+- `tile.graph.pieces`: `{ kind, lanes, oneway, drive, band, crossing, turns, w, a, b, pts, z }` (`band`: the road has sidewalks drawn) per road piece between junctions. `kind`
   indexes `motorway, trunk, primary, secondary, tertiary, residential, service, living, pedestrian, footway,
   cycleway, path, steps, track, rail, lightrail, runway, taxiway`; `a`/`b` are OpenStreetMap node ids (they match
-  across tiles); `pts` is a flat `Float32Array` of world x, north pairs; `z` is the deck height on bridges, else
-  `null` (use `heightAt`). `oneway` pieces run from `a` to `b`. `w` is the carriageway width in metres.
+  across tiles); `pts` is a flat `Float32Array` of world x, north pairs; `z` is the deck height on bridges (detail
+  and overview tiles), else `null` (use `heightAt`). `oneway` pieces run from `a` to `b`. `w` is the carriageway
+  width in metres. `crossing`: a footway or cycleway that crosses a street (it lies on the street). `turns`: OSM turn
+  lanes or `null`, `{ f, b }` with a bitmask per lane, left to right, for the way `a` → `b` (`f`) and back (`b`;
+  empty arrays where not mapped): 1 left, 2 slight left, 4 through, 8 slight right, 16 right, 32 u-turn, 64 merge
+  (0: not given).
 - `tile.graph.pois`: `{ kind, id, x, y }` points (detail tiles): `kind` 0 traffic signals, 1 crossing, 2 stop sign,
   3 street lamp, 4 bench, 5 bus stop, 6 give way; `id` is the OSM node id (signals on a junction share the id of
   the graph pieces' end there).

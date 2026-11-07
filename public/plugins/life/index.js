@@ -30,7 +30,8 @@ export default function life(city) {
       const xm = (x0 + x1) / 2, tx = ((x1 - x0) / 2) * taper, tz = hw * taper
       const v = [[x0, y0, zc - hw], [x1, y0, zc - hw], [x1, y0, zc + hw], [x0, y0, zc + hw], [xm - tx, y1, zc - tz], [xm + tx, y1, zc - tz], [xm + tx, y1, zc + tz], [xm - tx, y1, zc + tz]]
       for (const f of [[0, 1, 2, 3], [7, 6, 5, 4], [0, 4, 5, 1], [1, 5, 6, 2], [2, 6, 7, 3], [3, 7, 4, 0]]) {
-        for (const i of [f[0], f[2], f[1], f[0], f[3], f[2]]) { P.push(...v[i]); C.push(col.r, col.g, col.b); A.push(part); S.push(swing) }
+        // counter-clockwise seen from outside (else the near faces are culled and a car shows its insides)
+        for (const i of [f[0], f[1], f[2], f[0], f[2], f[3]]) { P.push(...v[i]); C.push(col.r, col.g, col.b); A.push(part); S.push(swing) }
       }
     }
     const g = new THREE.BufferGeometry()
