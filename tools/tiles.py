@@ -1063,61 +1063,236 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
                 z = [0.0] if bridge else None
             elif bridge or k == 'lightrail' and t.get('bridge'):
                 pts = densify(pts, 25)  # a long straight span needs points along it to carry its arch
-                z = deck_heights(pts, dsm, dtm, X0, Y0)
+                z = deck_heights(wid, pts)
             out.append(dict(turns=turns, own=mid, kind=k, pts=pts, z=z, lanes=lanes, w=w, ow=ow, band=band, layer=int(hnum(t.get('layer')) or 0), a=refs[a], b=refs[b],
                             name=t.get('name', ''), drive=k in DRIVE and t.get('access') not in ('private', 'no'),
                             crossing=k in ('footway', 'cycleway', 'path') and (t.get('footway') == 'crossing' or t.get('cycleway') == 'crossing') and t.get('crossing') not in ('unmarked', 'no')))
     return out
 
 
+# ---------------------------------------------------------------- bridge decks
+# Every bridge's deck profile is worked out once for the whole map (so a bridge reads the same from every tile it
+# crosses), from the LiDAR surface across the deck: a low percentile across its width (cars, railings, cables and
+# trusses sit above the deck), samples far above the along-bridge profile dropped, the grade clamped, then smoothed.
+# Sidewalks and cycle decks mapped beside a road deck take that deck's height; a long bridge the LiDAR does not have
+# yet (stal̕əw̓asəm, 2024) spans between its abutments with a gentle crest. Cached in data/decks.pkl.
+DECK_VERSION = 2
+GRADE = 0.07  # steepest deck grade kept, rise per metre
+FOOT = {'footway', 'cycleway', 'path', 'pedestrian', 'steps', 'track'}
 HR_CACHE = {}
+DECKS = None
+MISSING = set()  # ways whose deck the LiDAR does not have (filled by deck_profiles, for checking)
 
 
-def dsm_at(x, y):
-    """the LiDAR surface at a world point, from whichever 4 km HRDEM tile has it (a bridge can span several)"""
-    i, j = int(x // L1), int(y // L1)
+def hr_tile(i, j):
+    """(dsm, dtm) of a 4 km HRDEM tile, or None"""
     if (i, j) not in HR_CACHE:
         p = f'data/hr/{i}_{j}.npz'
         d = np.load(p) if os.path.exists(p) else None
-        HR_CACHE[(i, j)] = d['dsm'] if d is not None and 'dsm' in d else None
+        HR_CACHE[(i, j)] = (d['dsm'], d['dtm']) if d is not None and 'dsm' in d and 'dtm' in d else None
         if len(HR_CACHE) > 12: HR_CACHE.pop(next(iter(HR_CACHE)))
-    a = HR_CACHE.get((i, j))
-    if a is None: return None
-    r, c = int((( j + 1) * L1 - y) / HR), int((x - i * L1) / HR)
-    win = a[max(0, r - 1):r + 2, max(0, c - 1):c + 2]
-    win = win[np.isfinite(win)]
-    return float(np.percentile(win, 30)) if win.size else None
+    return HR_CACHE[(i, j)]
 
 
-def deck_heights(pts, dsm, dtm, X0, Y0):
-    """a bridge deck's height along its centre line from the LiDAR surface (low percentile: cables, cars and towers
-    sit above it), median-filtered; None if there is no LiDAR"""
-    dpts = densify(pts, 4)
-    zs = [dsm_at(x, y) for x, y in dpts]
-    if all(z is None for z in zs): return None
-    good = [z for z in zs if z is not None]
-    zs = np.array([z if z is not None else float(np.median(good)) for z in zs])
-    zs = ndimage.median_filter(zs, size=9, mode='nearest')
-    s = np.cumsum([0] + [math.dist(dpts[k], dpts[k - 1]) for k in range(1, len(dpts))])
-    vs = np.cumsum([0] + [math.dist(pts[k], pts[k - 1]) for k in range(1, len(pts))])
-    return [float(np.interp(v, s, zs)) for v in vs]
+def hr_lookup(xs, ys, k):
+    """LiDAR surface (k=0) or ground (k=1) at world points, NaN where there is none"""
+    xs, ys = np.asarray(xs, float).ravel(), np.asarray(ys, float).ravel()
+    out = np.full(xs.shape, np.nan, np.float32)
+    ti, tj = np.floor(xs / L1).astype(int), np.floor(ys / L1).astype(int)
+    for i, j in set(zip(ti.tolist(), tj.tolist())):
+        a = hr_tile(i, j)
+        if a is None: continue
+        sel = (ti == i) & (tj == j)
+        r = ((((j + 1) * L1) - ys[sel]) / HR).astype(int).clip(0, a[k].shape[0] - 1)
+        c = ((xs[sel] - i * L1) / HR).astype(int).clip(0, a[k].shape[1] - 1)
+        out[sel] = a[k][r, c]
+    return out
 
 
-def deck_heights_old(pts, dsm, dtm, X0, Y0):
-    """a bridge deck's height along its centre line from the LiDAR surface (lower values: cables, cars and towers sit above)"""
-    if dsm is None: return None
-    N = dsm.shape[0]
-    zs = []
-    for x, y in densify(pts, 4):
-        px_, py = (x - X0) / HR, (Y0 + L1 - y) / HR
-        r, c = int(py), int(px_)
-        win = dsm[max(0, r - 1):min(N, r + 2), max(0, c - 1):min(N, c + 2)]
-        zs.append(float(np.percentile(win, 30)) if win.size else 0.0)
-    zs = ndimage.median_filter(np.array(zs), size=5, mode='nearest')
-    # back onto the original vertices
-    dpts = densify(pts, 4); s = np.cumsum([0] + [math.dist(dpts[k], dpts[k - 1]) for k in range(1, len(dpts))])
-    vs = np.cumsum([0] + [math.dist(pts[k], pts[k - 1]) for k in range(1, len(pts))])
-    return [float(np.interp(v, s, zs)) for v in vs]
+def deck_samples(coords, w):
+    """samples every 4 m along a way: (points, distance along, low surface across the deck, the lower of the ground
+    25 m out to either side)"""
+    P = np.array(densify(coords, 4), float)
+    s = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
+    t = np.gradient(P, axis=0); t /= np.maximum(np.hypot(t[:, 0], t[:, 1]), 1e-6)[:, None]
+    n = np.stack([-t[:, 1], t[:, 0]], 1)
+    half = max(1.5, w * 0.4)
+    across = np.linspace(-half, half, max(3, int(half) + 1)); along = np.array([-2.0, 0.0, 2.0])
+    q = P[:, None, None, :] + n[:, None, None, :] * across[None, :, None, None] + t[:, None, None, :] * along[None, None, :, None]
+    v = hr_lookup(q[..., 0], q[..., 1], 0).reshape(len(P), -1)
+    with np.errstate(all='ignore'):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            low = np.nanpercentile(v, 20, axis=1)
+    off = w / 2 + 25
+    side = np.fmin(hr_lookup(*(P + n * off).T, 1), hr_lookup(*(P - n * off).T, 1))
+    return P, s, low, side
+
+
+def robust_deck(s, z):
+    """drop what stands above the deck (trusses, stay cables, pylons), clamp the grade, smooth; None if no samples"""
+    ok = np.isfinite(z)
+    if not ok.any(): return None
+    z = np.interp(s, s[ok], z[ok])
+    if len(z) > 4:
+        z = ndimage.median_filter(z, 5, mode='nearest')  # lone glitches (expansion joints, a gap) either way
+        # a running fit along the deck (straight over ~200 m, then a curve over ~400 m, so crests and sags are kept);
+        # what stands well above it (trusses, stay cables, pylons) is dropped, then again with a tighter margin
+        keep = np.ones(len(z), bool)
+        u = (s - s.mean()) / 1000.0
+        for margin, win, deg in ((6.0, 51, 1), (3.0, 51, 1), (1.5, 51, 1), (1.5, 101, 2), (1.5, 101, 2)):
+            f = lambda a: ndimage.uniform_filter1d(a, min(len(z), win), mode='nearest')
+            w = keep.astype(float)
+            M = np.stack([np.stack([f(w * u ** (i + j)) for j in range(deg + 1)], -1) for i in range(deg + 1)], -2)
+            r = np.stack([f(w * z * u ** i) for i in range(deg + 1)], -1)
+            ok_ = np.abs(np.linalg.det(M)) > 1e-12
+            fit = z.copy()
+            if ok_.any():
+                c = np.linalg.solve(M[ok_], r[ok_][..., None])[..., 0]
+                fit[ok_] = sum(c[:, i] * u[ok_] ** i for i in range(deg + 1))
+            keep = (z < fit + margin) & (z > fit - 4)
+            if keep.sum() < 2: break
+        if keep.sum() >= 2: z = np.interp(s, s[keep], z[keep])
+    ds = np.diff(s)
+    for _ in range(2):  # lower envelope of slope GRADE (cuts spikes), then the upper one (fills dips)
+        for k in range(1, len(z)): z[k] = min(z[k], z[k - 1] + GRADE * ds[k - 1])
+        for k in range(len(z) - 2, -1, -1): z[k] = min(z[k], z[k + 1] + GRADE * ds[k])
+    for k in range(1, len(z)): z[k] = max(z[k], z[k - 1] - GRADE * ds[k - 1])
+    for k in range(len(z) - 2, -1, -1): z[k] = max(z[k], z[k + 1] - GRADE * ds[k])
+    return ndimage.uniform_filter1d(z, 5, mode='nearest') if len(z) >= 5 else z
+
+
+def deck_profiles():
+    """{way id: (way coords, distance along of each sample, deck height)} for every bridge on the map"""
+    global DECKS
+    if DECKS is not None: return DECKS
+    import glob
+    files = sorted(glob.glob('data/feat/*.pkl'))
+    key = (DECK_VERSION, max((os.path.getmtime(f) for f in files), default=0))
+    if os.path.exists('data/decks.pkl'):
+        d = pickle.load(open('data/decks.pkl', 'rb'))
+        if d.get('key') == key: DECKS = d['decks']; return DECKS
+    t0 = time.time()
+    ways = {}
+    for f in files:
+        for wid, coords, refs, t in pickle.load(open(f, 'rb')).get('lines', []):
+            if t.get('bridge') in (None, 'no') or len(coords) < 2: continue
+            k = line_kind(t)
+            if k and t.get('tunnel') not in ('yes', 'building_passage', 'culvert'): ways[wid] = (coords, refs, t, k)
+    raw = {}
+    for wid, (coords, refs, t, k) in sorted(ways.items(), key=lambda kv: (int(kv[1][0][0][0] // L1), int(kv[1][0][0][1] // L1))):
+        P, s, low, gnd = deck_samples(coords, road_shape(k, t)[1])
+        raw[wid] = (P, s, low, gnd)
+    layer = {wid: int(hnum(t.get('layer')) or 0) for wid, (c, r, t, k) in ways.items()}
+    prof = {}
+    missing = set()
+    for wid, (P, s, low, gnd) in raw.items():
+        L = s[-1]
+        mid = (s > 0.15 * L) & (s < 0.85 * L)
+        g = np.nan_to_num(gnd, nan=0.0)
+        if layer[wid] >= 1 and L > 80 and mid.any() and np.mean(~np.isfinite(low[mid]) | (low[mid] - g[mid] < 2)) > 0.6:
+            missing.add(wid)  # the surface is no higher than the land and water beside it: the deck is newer than the survey
+        else:
+            z = robust_deck(s, low)
+            if z is not None: prof[wid] = z
+    # ends: a node shared by bridge ways gets one height
+    ends = {}
+    for wid, (coords, refs, t, k) in ways.items():
+        for e, r in ((0, refs[0]), (-1, refs[-1])): ends.setdefault((r, layer[wid]), []).append((wid, e))
+    # missing decks: from abutment to abutment (where they meet a deck we have, or the ground) with a gentle crest
+    for wid in missing:
+        coords, refs, t, k = ways[wid]
+        P, s, low, gnd = raw[wid]
+        hs = []
+        for e, r in ((0, refs[0]), (-1, refs[-1])):
+            nb = [prof[w][e2] for w, e2 in ends[(r, layer[wid])] if prof.get(w) is not None]
+            hs.append(float(np.mean(nb)) if nb else float(np.nan_to_num(hr_lookup(P[e, :1], P[e, 1:], 1)[0], nan=0.0)))
+        prof[wid] = None  # filled below, once neighbours along the same missing bridge are known
+        ways[wid] = (coords, refs, t, k, hs)
+    # chain the missing ways of one bridge (shared nodes) so the crest spans the whole river, not each way
+    comp = {wid: wid for wid in missing}
+    def root(a):
+        while comp[a] != a: comp[a] = comp[comp[a]]; a = comp[a]
+        return a
+    for (r, lay), lst in ends.items():
+        ms = [w for w, _ in lst if w in missing]
+        for a, b in zip(ms, ms[1:]): comp[root(a)] = root(b)
+    groups = {}
+    for wid in missing: groups.setdefault(root(wid), []).append(wid)
+    for g in list(groups.values()):
+        pts = np.concatenate([raw[w][0] for w in g])
+        wet = sum(4 * np.sum(~np.isfinite(raw[w][2]) | (raw[w][2] < 2.5)) for w in g)  # metres of it at water level
+        if np.ptp(pts[:, 0]) ** 2 + np.ptp(pts[:, 1]) ** 2 < 300 ** 2 or wet < 100:  # a new river crossing, not odd LiDAR
+            for w in g:
+                missing.discard(w); ways[w] = ways[w][:4]
+                z = robust_deck(raw[w][1], raw[w][2].copy())
+                if z is not None: prof[w] = z
+                else: prof.pop(w, None)
+            groups = {k: v for k, v in groups.items() if v is not g}
+    for g in groups.values():
+        pts = np.concatenate([raw[w][0] for w in g])
+        # the bridge's axis: its two farthest-apart points; each end's height from the ways' outer ends nearest it
+        a = pts[np.argmax(np.hypot(*(pts - pts.mean(0)).T))]; b = pts[np.argmax(np.hypot(*(pts - a).T))]
+        ax = (b - a) / max(1e-6, np.hypot(*(b - a))); Lb = float(np.hypot(*(b - a)))
+        ha, hb = [], []
+        for w in g:
+            coords, refs, t, k, hs = ways[w]
+            for e, h in zip((0, -1), hs):
+                if sum(1 for w2, _ in ends[(refs[e], layer[w])] if w2 in missing) > 1: continue  # inner joint, not an abutment
+                (ha if np.dot(raw[w][0][e] - a, ax) < Lb / 2 else hb).append(h)
+        h0 = float(np.mean(ha)) if ha else 0.0; h1 = float(np.mean(hb)) if hb else h0
+        crest = 0.016 * Lb  # end grades about 6%
+        for w in g:
+            u = np.clip((raw[w][0] - a) @ ax / max(Lb, 1e-6), 0, 1)
+            prof[w] = h0 + (h1 - h0) * u + crest * 4 * u * (1 - u)
+    for wid in missing: ways[wid] = ways[wid][:4]
+    MISSING.clear(); MISSING.update(missing)
+    # sidewalks and cycle decks beside a road deck (within 25 m, same layer) ride on it
+    from shapely.strtree import STRtree
+    roads = {}
+    for wid, (coords, refs, t, k) in ways.items():
+        if k in DRIVE and prof.get(wid) is not None: roads.setdefault(layer[wid], []).append(wid)
+    trees = {lay: (STRtree([LineString(ways[w][0]) for w in ws]), ws) for lay, ws in roads.items()}
+    for wid, (coords, refs, t, k) in ways.items():
+        if k not in FOOT or layer[wid] not in trees or prof.get(wid) is None: continue
+        tree, ws = trees[layer[wid]]
+        P = raw[wid][0]
+        pts = shapely.points(P)
+        idx, dist = tree.query_nearest(pts, max_distance=25, return_distance=True, all_matches=False)
+        if not len(idx[0]): continue
+        z = prof[wid].copy()
+        for i_, j_ in zip(*idx):
+            rw = ws[j_]; line = LineString(ways[rw][0])
+            z[i_] = np.interp(line.project(pts[i_]), raw[rw][1], prof[rw])
+        z = robust_deck(raw[wid][1], z) if len(idx[0]) < len(P) else z
+        prof[wid] = ndimage.uniform_filter1d(z, 9, mode='nearest') if len(z) >= 9 else z  # beside two decks: no hopping
+    # one height where bridge ways meet: the mean of their ends, eased in along each way
+    fix = {}
+    for (r, lay), lst in ends.items():
+        lst = [(w, e) for w, e in lst if prof.get(w) is not None]
+        if len(lst) < 2: continue
+        m = float(np.mean([prof[w][e] for w, e in lst]))
+        for w, e in lst: fix.setdefault(w, [0.0, 0.0])[0 if e == 0 else 1] = m - prof[w][e]
+    for w, (d0, d1) in fix.items():
+        s = raw[w][1]; u = s / max(s[-1], 1e-6)
+        prof[w] = prof[w] + d0 * (1 - u) + d1 * u
+    DECKS = {w: (np.asarray(ways[w][0], np.float64), raw[w][1].astype(np.float32), np.asarray(prof[w], np.float32)) for w in prof if prof[w] is not None}
+    HR_CACHE.clear()
+    try: pickle.dump({'key': key, 'decks': DECKS}, open('data/decks.pkl', 'wb'), protocol=5)
+    except OSError: pass
+    print('bridge decks', len(DECKS), 'of', len(ways), 'ways,', len(missing), 'not in the LiDAR', round(time.time() - t0), 's', flush=True)
+    return DECKS
+
+
+def deck_heights(wid, pts):
+    """a bridge piece's deck height at each of its points (from deck_profiles), or None"""
+    d = deck_profiles().get(wid)
+    if d is None: return None
+    coords, s, z = d
+    line = LineString(coords)
+    # samples were taken every 4 m along the densified way: map a point to distance along, then to height
+    return [float(np.interp(line.project(shapely.geometry.Point(p)), s, z)) for p in pts]
 
 
 def densify(pts, step):
@@ -1286,6 +1461,10 @@ def selftest():
     assert f and f[0] & 15 == 5 and f[0] & FLIP, f
     z = np.full((20, 20), 12.0); z[5:12, 6:13] = 60.0; z[8:10, 8:10] = 64.0
     assert len(height_levels(z.ravel())) == 2, height_levels(z.ravel())
+    # a deck cresting 30 m up (6% at the ends), stay cables 30-60 m above it near a pylon, an expansion-joint gap
+    sd = np.arange(0, 2000, 4.0); deck = 10 + 30 * (1 - ((sd - 1000) / 1000) ** 2)
+    seen = deck.copy(); seen[(sd > 900) & (sd < 1050)] += 30 + 30 * np.sin((sd[(sd > 900) & (sd < 1050)] - 900) / 50); seen[300] -= 8
+    assert np.abs(robust_deck(sd, seen) - deck).max() < 1.5, np.abs(robust_deck(sd, seen) - deck).max()
     print('selftest ok')
 
 
@@ -1294,6 +1473,7 @@ if __name__ == '__main__':
     procs = int(sys.argv[1]) if len(sys.argv) > 1 else 10
     want = [tuple(map(int, a.split('_'))) for a in sys.argv[2:]] or all_tiles()
     t0 = time.time()
+    deck_profiles()  # once, before the workers fork
     if procs == 1:
         for ij in want: print(safe_build(ij), flush=True)
     else:
