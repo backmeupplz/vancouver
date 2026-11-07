@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { MapControls } from './vendor/MapControls.js'
 import { createCity, loadPlugins } from './city.js'
 import { Tiles } from './core/tiles.js'
-import { groundMaterial, roadMaterial, buildingMaterial, treeAtlas, treeMaterial, night } from './core/materials.js'
+import { groundMaterial, roadMaterial, buildingMaterial, treeAtlas, treeMaterial, night, surface } from './core/materials.js'
 
 // World: metres east (x) and north of an origin downtown (tools/world.py); three.js x = east, y = up, z = south.
 // Heights are real elevations. The camera is orthographic, looking north, 30° down; the view lives in the URL
@@ -305,6 +305,7 @@ city = createCity({
   data: {},
   tiles,
   night,
+  surface,
   suppressBuildings: (ring) => tiles.addMask(ring.map(([lat, lon]) => ll(lat, lon))),
   ownCamera,
 })

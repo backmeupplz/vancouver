@@ -2,7 +2,7 @@
 // A plugin is an ES module whose default export is `(city) => ({ dispose() })` (dispose optional).
 import * as THREE from 'three'
 
-export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll, toLatLon, sun, hemi, setSun, post, requestRender, data, tiles, night, suppressBuildings, ownCamera }) {
+export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll, toLatLon, sun, hemi, setSun, post, requestRender, data, tiles, night, surface, suppressBuildings, ownCamera }) {
   const handlers = new Map()
   const own = () => ownCamera?.active
   let animators = 0
@@ -48,6 +48,15 @@ export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll
       sun, hemi, setSunDirection: setSun,
       get night() { return night?.value ?? 0 }, // 0 day .. 1 night: lights windows
       set night(v) { if (night) { night.value = Math.max(0, Math.min(1, v)); requestRender() } },
+    },
+    // weather on the ground: wet (0..1) darkens it and mirrors `sky` (a THREE.Color) in the wet paving, snow (0..1)
+    // whitens flat ground, roofs and, less, the roads
+    surface: {
+      get wet() { return surface?.wet.value ?? 0 },
+      set wet(v) { if (surface) { surface.wet.value = Math.max(0, Math.min(1, v)); requestRender() } },
+      get snow() { return surface?.snow.value ?? 0 },
+      set snow(v) { if (surface) { surface.snow.value = Math.max(0, Math.min(1, v)); requestRender() } },
+      get sky() { return surface?.sky.value },
     },
     post, // { uniforms: { gain (vec3), sat (float) } } colour grade of the final image
     data, // static data the core has loaded

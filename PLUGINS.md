@@ -56,6 +56,7 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.light.sun`, `city.light.hemi` | the `DirectionalLight` (casts the shadows) and `HemisphereLight` |
 | `city.light.setSunDirection(v)` | move the sun (a `Vector3` pointing towards it); shadows follow |
 | `city.light.night` | 0 (day) to 1 (night): lights a share of the windows |
+| `city.surface.wet`, `.snow`, `.sky` | weather on the map's ground, roads and roofs: `wet` (0–1) darkens them and makes paving mirror `sky` (a `THREE.Color`) at grazing angles; `snow` (0–1) whitens flat ground and roofs, the roads less (set by the weather plugin) |
 | `city.post.uniforms.tint` / `.desat` | grade of the final image: multiply (`Vector3`, 1 = none) and desaturate (0–1) |
 | `city.tiles` | the tile streamer (advanced) |
 | `city.on(event, fn)` | `'frame'` `(dt, t)`, `'view'` `(view)`, `'tile:load'` / `'tile:unload'` `(tile)`, `'weather'` `(weather)`, `'player'` `(player)`; returns an unsubscribe function |
@@ -114,8 +115,13 @@ camera. The drive plugin is the example: it dives from the map into a chase came
 - **Weather** (`plugins/weather`): `city.weather = { kind, intensity, isNight, hour, live, wind, atmosphere }`, re-emitted
   as `'weather'` on change. `wind` is `[x, z]` m/s (towards); `atmosphere = { horizon, zenith, fogNear, fogFar }` (hex
   colours, metres) is the street-level look a plugin with a perspective camera applies as its sky gradient and
-  `THREE.Fog`. Under such a camera the weather plugin draws rain and snow as a world-space volume around the camera
-  (with splashes) and lights the scene in lightning; the map view keeps its screen-space layer.
+  `THREE.Fog` (`fogNear` can be below zero: three.js fades fog in with a smoothstep, so that veils the middle
+  distance in fog and rain). Under such a camera the weather plugin draws, by itself: a sky dome in `city.scene`
+  (inside the camera's far plane, only where nothing else is; its horizon follows `scene.fog.color`; it fades in as
+  the camera's `fov` passes 14°–40°, so a dive from the map looks like the map first) with the sun or moon and
+  stars, drifting clouds or a low deck, and lightning bolts; rain and snow as a world-space volume around the camera
+  with splashes around `city.player`; the scene lit up in lightning. The map view keeps its screen-space layer.
+  Both views get wet or snowy ground through `city.surface`.
 - **Traffic** (`plugins/life`): `city.traffic.nearby(x, z, r)` → `[{ id, x, y, z, heading, length, width, speed }]`
   (forward = `(sin heading, 0, cos heading)`), `city.traffic.setObstacle(id, obj | null)` (a player's vehicle or walker
   `{ x, z, heading, length, width, speed, y }` that cars brake for; see Traffic below), `city.traffic.bump(id, impulse)` (a car was hit).

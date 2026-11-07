@@ -12,6 +12,14 @@ const COMMON = `
   float band(float x, float lo, float hi, float fw) { return smoothstep(lo - fw, lo + fw, x) * (1.0 - smoothstep(hi - fw, hi + fw, x)); }
 `
 
+// Weather on the ground (city.surface): wet darkens paved and planted ground and gives it a sheen of the sky at
+// grazing angles (puddles shine most); snow whitens flat ground, roofs and, less, the roads.
+export const surface = { wet: { value: 0 }, snow: { value: 0 }, sky: { value: new THREE.Color(0x8090a0) } }
+const SURF = `uniform float wet, snow; uniform vec3 skyCol;
+  // the sky seen in a wet surface at p (up-facing): Schlick fresnel towards the camera
+  float sheenAt(vec3 p) { float c = max(dot(normalize(cameraPosition - p), vec3(0.0, 1.0, 0.0)), 0.0); return pow(1.0 - c, 5.0); }`
+const surfUniforms = (s) => { s.uniforms.wet = surface.wet; s.uniforms.snow = surface.snow; s.uniforms.skyCol = surface.sky }
+
 // ---------------------------------------------------------------- ground
 // class order matches tools/tiles.py GROUND
 const GROUND_COLOURS = [
@@ -24,11 +32,12 @@ const GROUND_COLOURS = [
 export function groundMaterial() {
   const m = new THREE.MeshLambertMaterial()
   m.onBeforeCompile = (s) => {
+    surfUniforms(s)
     s.vertexShader = s.vertexShader
       .replace('#include <common>', '#include <common>\nattribute float cls;\nflat varying float vCls;\nvarying vec3 vW;\nvarying float vSlope;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCls = cls;\nvW = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvSlope = 1.0 - objectNormal.y;')
     s.fragmentShader = s.fragmentShader
-      .replace('#include <common>', `#include <common>\nflat varying float vCls;\nvarying vec3 vW;\nvarying float vSlope;\n${COMMON}
+      .replace('#include <common>', `#include <common>\nflat varying float vCls;\nvarying vec3 vW;\nvarying float vSlope;\n${COMMON}\n${SURF}
         const vec3 CL[${GROUND_COLOURS.length}] = vec3[](${GROUND_COLOURS.map((c) => `vec3(${c.map((v) => (v / 255).toFixed(4)).join(',')})`).join(',')});`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         int c = int(vCls + 0.5);
@@ -68,9 +77,20 @@ export function groundMaterial() {
         // slopes: darker and rockier the steeper they are, so hills, cliffs and plateaus (UBC, Burnaby Mountain) read
         float sl = smoothstep(0.03, 0.45, vSlope);
         if (c != 19) col = mix(col, srgb(vec3(0.46, 0.42, 0.36)) * (0.85 + 0.2 * n), sl * 0.45) * (1.0 - 0.28 * sl);
+        bool paved = c == 14 || c == 29 || c == 30 || c == 25 || c == 27 || c == 24 || c == 15 || c == 2 || c == 3 || c == 13;
+        float sheen = 0.0;
+        if (wet > 0.0 && c != 19) { // rain: darker, and paved ground mirrors the sky, most in the puddles
+          col *= 1.0 - wet * (paved ? 0.42 : 0.22);
+          if (paved) sheen = wet * sheenAt(vW) * (0.35 + 0.65 * smoothstep(0.5, 0.7, fbm(p * 0.21 + 3.0)));
+        }
+        if (snow > 0.0 && c != 19) { // snow: lying on the flat, thinner on steep ground and where traffic runs
+          float cover = smoothstep(0.25, 0.7, snow - 0.9 * sl + 0.35 * (n - 0.5)) * (c == 29 || c == 30 ? 0.45 : 1.0);
+          col = mix(col, vec3(0.86, 0.89, 0.93) * (0.94 + 0.08 * fine), cover);
+        }
         diffuseColor.rgb = col;`)
+      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += skyCol * sheen;')
   }
-  m.customProgramCacheKey = () => 'ground4'
+  m.customProgramCacheKey = () => 'ground5'
   return m
 }
 
@@ -80,11 +100,12 @@ export function roadMaterial(decal = false) {
   const m = new THREE.MeshLambertMaterial(decal ? { transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 } : {})
   if (decal) m.defines = { DECAL: '' }
   m.onBeforeCompile = (s) => {
+    surfUniforms(s)
     s.vertexShader = s.vertexShader
       .replace('#include <common>', '#include <common>\nattribute vec4 aRoad;\nattribute vec4 aRoad2;\nvarying vec4 vR;\nvarying vec4 vR2;\nvarying vec3 vW;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvR = aRoad; vR2 = aRoad2;\nvW = (modelMatrix * vec4(transformed, 1.0)).xyz;')
     s.fragmentShader = s.fragmentShader
-      .replace('#include <common>', `#include <common>\nvarying vec4 vR;\nvarying vec4 vR2;\nvarying vec3 vW;\n${COMMON}`)
+      .replace('#include <common>', `#include <common>\nvarying vec4 vR;\nvarying vec4 vR2;\nvarying vec3 vW;\n${COMMON}\n${SURF}`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         float s = vR.x, t = vR.y, w = vR.z; int kind = int(vR.w + 0.5);
         float at = abs(t), fs = max(fwidth(s), 1e-3), ft = max(fwidth(t), 1e-3);
@@ -157,13 +178,26 @@ export function roadMaterial(decal = false) {
           col = mix(col, pc, paint * detail);
           dPaint = paint * detail; dCol = pc;
         }
+        float sheen = 0.0;
+        if (wet > 0.0) {
+          col *= 1.0 - 0.4 * wet; dCol *= 1.0 - 0.25 * wet;
+          sheen = wet * sheenAt(vW) * (0.4 + 0.6 * smoothstep(0.5, 0.7, fbm(vW.xz * 0.21 + 3.0)));
+        }
+        if (snow > 0.0) { // white walks; slush on the carriageway, thickest away from the wheel tracks
+          float road = kind == 100 || (kind >= 9 && kind <= 13) || kind == 102 ? 1.0 : 0.55 + 0.35 * smoothstep(0.3, 0.6, abs(fract(t / 1.8) - 0.5) * 2.0);
+          float cover = smoothstep(0.25, 0.7, snow + 0.3 * (noise(vW.xz * 0.3) - 0.5)) * road;
+          col = mix(col, vec3(0.86, 0.89, 0.93) * grain, cover);
+          dPaint *= 1.0 - 0.8 * cover;
+        }
         diffuseColor.rgb = col;
         #ifdef DECAL
           if (dPaint < 0.02) discard;
           diffuseColor = vec4(dCol, dPaint);
+          sheen *= 0.5;
         #endif`)
+      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += skyCol * sheen;')
   }
-  m.customProgramCacheKey = () => (decal ? 'road2d' : 'road2')
+  m.customProgramCacheKey = () => (decal ? 'road3d' : 'road3')
   return m
 }
 
@@ -173,13 +207,16 @@ export function buildingMaterial() {
   const m = new THREE.MeshLambertMaterial({ vertexColors: true })
   m.onBeforeCompile = (s) => {
     s.uniforms.night = night
+    surfUniforms(s)
     s.vertexShader = s.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute vec4 aWin;\nvarying vec4 vWin;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWin = aWin;')
+      .replace('#include <common>', '#include <common>\nattribute vec4 aWin;\nvarying vec4 vWin;\nvarying float vUp;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWin = aWin;\nvUp = normalize(mat3(modelMatrix) * objectNormal).y;')
     s.fragmentShader = s.fragmentShader
       .replace('#include <common>', `#include <common>
         varying vec4 vWin;
+        varying float vUp;
         ${COMMON}
+        ${SURF}
         float thin(float width, float fw) { return smoothstep(0.6, 1.3, width / fw); }
         float box(vec2 f, vec2 lo, vec2 hi, vec2 fw) { vec2 a = smoothstep(lo - fw, lo + fw, f) * (1.0 - smoothstep(hi - fw, hi + fw, f)); return a.x * a.y; }`)
       .replace('#include <color_fragment>', `#include <color_fragment>
@@ -225,6 +262,8 @@ export function buildingMaterial() {
           }
         }
         diffuseColor.rgb *= mix(0.62, 1.0, smoothstep(0.0, 5.0, z)); // contact shadow at the foot of walls
+        diffuseColor.rgb *= 1.0 - 0.18 * wet;
+        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.88, 0.9, 0.94), smoothstep(0.3, 0.7, snow) * smoothstep(0.55, 0.85, vUp)); // snow on roofs
         // lit windows at night: a seeded share of the window cells glows warm
         vec3 glow = vec3(0.0);
         if (night > 0.01 && style > 0.5 && z < 900.0) {
@@ -241,7 +280,7 @@ export function buildingMaterial() {
       // the glow's strength rides in alpha, so the post pass can keep lit windows warm under a night grade
       .replace('#include <opaque_fragment>', '#include <opaque_fragment>\ngl_FragColor.a = 1.0 - min(1.0, dot(glow, vec3(0.5)));')
   }
-  m.customProgramCacheKey = () => 'building2'
+  m.customProgramCacheKey = () => 'building3'
   return m
 }
 
