@@ -57,6 +57,7 @@ export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll
       get snow() { return surface?.snow.value ?? 0 },
       set snow(v) { if (surface) { surface.snow.value = Math.max(0, Math.min(1, v)); requestRender() } },
       get sky() { return surface?.sky.value },
+      get seaHole() { return surface?.seaHole.value }, // Vector4 (x, sea level, z, radius): no map sea in there (radius 0: off)
     },
     post, // { uniforms: { gain (vec3), sat (float) } } colour grade of the final image
     data, // static data the core has loaded

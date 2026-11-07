@@ -57,6 +57,7 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.light.setSunDirection(v)` | move the sun (a `Vector3` pointing towards it); shadows follow |
 | `city.light.night` | 0 (day) to 1 (night): lights a share of the windows |
 | `city.surface.wet`, `.snow`, `.sky` | weather on the map's ground, roads and roofs: `wet` (0–1) darkens them and makes paving mirror `sky` (a `THREE.Color`) at grazing angles; `snow` (0–1) whitens flat ground and roofs, the roads less (set by the weather plugin) |
+| `city.surface.seaHole` | a `Vector4` (x, sea level, z, radius): the map's sea is left out within radius of (x, z), up to 3 m above sea level, where a plugin draws its own water (the sail plugin's waves); radius 0 (the default) turns it off |
 | `city.post.uniforms.tint` / `.desat` | grade of the final image: multiply (`Vector3`, 1 = none) and desaturate (0–1) |
 | `city.tiles` | the tile streamer (advanced) |
 | `city.on(event, fn)` | `'frame'` `(dt, t)`, `'view'` `(view)`, `'tile:load'` / `'tile:unload'` `(tile)`, `'weather'` `(weather)`, `'player'` `(player)`; returns an unsubscribe function |
@@ -156,6 +157,10 @@ camera. The drive plugin is the example: it dives from the map into a chase came
   with `city.traffic.nearby` and, when present, `city.multiplayer.nearby(x, z, r)` (same shape).
 - **Ships** (`plugins/ships`): `city.ships.nearby(x, z, r)`, the vessels within `r` metres of their hull, in the
   shape of `city.traffic.nearby` (anchored ones with speed 0). The sail plugin bumps into them.
+- **The sea while sailing** (`plugins/sail/water.js`): the sail plugin swaps the flat sea within a kilometre of the boat
+  for a wave surface driven by the wind (`city.surface.seaHole`); `city.player.y` rides the waves. Its grid size follows
+  `city.quality.tier` (`'low'`, and phones: a coarser grid); a tier can set its own as `tier.sea = { n, glints }` (grid
+  vertices a side, sun glints on or off).
 - **Bridge piers** (`plugins/landmarks`): `city.landmarks.piers`, a flat array of boxes standing in the water,
   `x, z, half length, half width, rot` each (the long axis is `(cos rot, −sin rot)` in x / z).
 - **A game on screen**: a plugin that takes over the screen with its own camera and controls adds the classes

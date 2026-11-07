@@ -14,7 +14,9 @@ const COMMON = `
 
 // Weather on the ground (city.surface): wet darkens paved and planted ground and gives it a sheen of the sky at
 // grazing angles (puddles shine most); snow whitens flat ground, roofs and, less, the roads.
-export const surface = { wet: { value: 0 }, snow: { value: 0 }, sky: { value: new THREE.Color(0x8090a0) } }
+// seaHole (x, sea level, z, radius; radius 0 = off): the map's sea is left out within radius of (x, z) and below sea
+// level + 3 m, where a plugin draws its own water (the sail plugin's waves)
+export const surface = { wet: { value: 0 }, snow: { value: 0 }, sky: { value: new THREE.Color(0x8090a0) }, seaHole: { value: new THREE.Vector4() } }
 const SURF = `uniform float wet, snow; uniform vec3 skyCol;
   // the sky seen in a wet surface at p (up-facing): Schlick fresnel towards the camera
   float sheenAt(vec3 p) { float c = max(dot(normalize(cameraPosition - p), vec3(0.0, 1.0, 0.0)), 0.0); return pow(1.0 - c, 5.0); }`
@@ -33,15 +35,17 @@ export function groundMaterial() {
   const m = new THREE.MeshLambertMaterial()
   m.onBeforeCompile = (s) => {
     surfUniforms(s)
+    s.uniforms.seaHole = surface.seaHole
     s.vertexShader = s.vertexShader
       .replace('#include <common>', '#include <common>\nattribute float cls;\nflat varying float vCls;\nvarying vec3 vW;\nvarying float vSlope;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCls = cls;\nvW = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvSlope = 1.0 - objectNormal.y;')
     s.fragmentShader = s.fragmentShader
-      .replace('#include <common>', `#include <common>\nflat varying float vCls;\nvarying vec3 vW;\nvarying float vSlope;\n${COMMON}\n${SURF}
+      .replace('#include <common>', `#include <common>\nflat varying float vCls;\nvarying vec3 vW;\nvarying float vSlope;\nuniform vec4 seaHole;\n${COMMON}\n${SURF}
         const vec3 CL[${GROUND_COLOURS.length}] = vec3[](${GROUND_COLOURS.map((c) => `vec3(${c.map((v) => (v / 255).toFixed(4)).join(',')})`).join(',')});`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         int c = int(vCls + 0.5);
         vec2 p = vW.xz;
+        if (c == 19 && seaHole.w > 0.0 && vW.y < seaHole.y + 3.0 && distance(p, seaHole.xz) < seaHole.w) discard;
         vec3 col = srgb(CL[c]);
         float n = fbm(p * 0.08), fine = noise(p * 1.7);
         float px = max(fwidth(p.x), 1e-3); // metres per pixel, to fade detail before it can shimmer
