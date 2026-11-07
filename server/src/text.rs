@@ -33,7 +33,7 @@ pub fn clean_name(raw: &str) -> Option<String> {
 /// Names that would pass for the site or its staff, also when spelled with look-alike letters.
 fn reserved(name: &str) -> bool {
     let folded: String = name.chars().filter_map(|c| fold(c).filter(|c| c.is_ascii_alphanumeric())).collect();
-    const WORDS: [&str; 9] = ["admin", "moderator", "system", "official", "borodutch", "staff", "server", "support", "vancouverincode"];
+    const WORDS: [&str; 8] = ["admin", "moderator", "system", "official", "staff", "server", "support", "vancouverincode"];
     WORDS.iter().any(|w| folded.contains(w)) || folded == "mod" || folded == "mods"
 }
 
@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(clean_name("x"), None);
         assert_eq!(clean_name("\u{200B}\u{200B}"), None);
         assert_eq!(clean_name("abcdefghijklmnopqrstuvwxyz").map(|s| s.chars().count()), Some(20));
-        for staff in ["Admin", "аdmin", "ADM1N", "The Moderator", "mod", "Server bot", "borodutch"] {
+        for staff in ["Admin", "аdmin", "ADM1N", "The Moderator", "mod", "Server bot"] {
             assert_eq!(clean_name(staff), None, "{staff}");
         }
     }

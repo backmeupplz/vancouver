@@ -140,7 +140,7 @@ export default function multiplayer(city) {
   form.append(input, send)
   const status = h('div', 'live-status')
   const meRow = h('div', 'live-me')
-  const nameIn = h('input'); nameIn.type = 'text'; nameIn.maxLength = 20; nameIn.setAttribute('aria-label', 'Your name'); nameIn.value = me.name
+  const nameIn = h('input'); nameIn.type = 'text'; nameIn.maxLength = 20; nameIn.setAttribute('aria-label', 'Your name'); nameIn.value = me.name; nameIn.autocomplete = 'off'; nameIn.name = 'chat-display-name'; for (const a of ['data-1p-ignore', 'data-lpignore', 'data-bwignore', 'data-form-type']) nameIn.setAttribute(a, a === 'data-form-type' ? 'other' : 'true') // not a login: no password-manager popups
   const swatch = h('button', 'live-swatch'); swatch.type = 'button'; swatch.title = 'Your colour'; swatch.setAttribute('aria-label', 'Change your colour')
   meRow.append(h('span', null, 'You'), nameIn, swatch)
   const blockedEl = h('details', 'live-blocked')
