@@ -1,11 +1,24 @@
 import * as THREE from 'three'
 import { MapControls } from './vendor/MapControls.js'
 
-// World: isoworld's east-north-up metres (tools/bake.py); three.js x = east, y = up, z = south.
+// World: east-north-up metres (tools/bake.py); three.js x = east, y = up, z = south.
 // The camera is theirs too (orthographic, looking north, 30° down, 6 drawing px per metre), so a
-// view is shared with the Illustrated tab as #x,y,s in their drawing pixels.
+// view lives in the URL as #x,y,s (drawing pixels at 6 px per metre, CSS px per drawing px).
 const $ = (s) => document.querySelector(s)
-const status = (t) => ($('#status').textContent = t)
+const loadingEl = $('#loading')
+const status = (t, frac) => { loadingEl.querySelector('.step').textContent = t; if (frac !== undefined) loadingEl.querySelector('.fill').style.width = `${Math.round(frac * 100)}%` }
+addEventListener('error', (e) => { loadingEl.classList.add('error'); status(`Something went wrong: ${e.message}`) })
+// a download that reports how far it got (bytes over Content-Length, or over the size we expect)
+async function download(url, expect, onProgress) {
+  const r = await fetch(url)
+  if (!r.ok) throw new Error(`${url}: ${r.status}`)
+  const total = +r.headers.get('content-length') || expect, reader = r.body.getReader(), parts = []
+  let got = 0
+  for (;;) { const { done, value } = await reader.read(); if (done) break; parts.push(value); got += value.length; onProgress(Math.min(1, got / total)) }
+  const out = new Uint8Array(got); let o = 0
+  for (const p of parts) { out.set(p, o); o += p.length }
+  return out.buffer
+}
 const rand = mulberry(1)
 function mulberry(a) {
   return () => {
@@ -18,9 +31,14 @@ function mulberry(a) {
 const pick = (a) => a[Math.floor(rand() * a.length)]
 let dirty = true // render on demand: only when the view, the cars or the window changed
 
-const [meta, buf] = await Promise.all([fetch('meta.json').then((r) => r.json()), fetch('city.bin').then((r) => r.arrayBuffer())])
-const texs = await Promise.all(meta.regions.map((r) => new THREE.TextureLoader().loadAsync(r.tex)))
-status('Building the city…')
+status('Downloading the city…', 0.02)
+const meta = await fetch('meta.json').then((r) => r.json())
+const prog = [0, 0, 0], show = () => status('Downloading the city…', 0.02 + 0.68 * (prog[0] * 0.6 + prog[1] * 0.3 + prog[2] * 0.1))
+const [buf, ...texs] = await Promise.all([
+  download('city.bin', meta.bytes || 6e6, (f) => { prog[0] = f; show() }),
+  ...meta.regions.map((r, i) => new THREE.TextureLoader().loadAsync(r.tex).then((t) => { prog[1 + i] = 1; show(); return t })),
+])
+status('Building the city…', 0.75)
 await new Promise(requestAnimationFrame)
 
 const mobile = matchMedia('(pointer: coarse)').matches || innerWidth < 700
@@ -641,7 +659,7 @@ traffic.onmessage = ({ data }) => {
   if (cars.visible) dirty = true
 }
 
-// ---------- camera: isoworld's ----------
+// ---------- camera: orthographic, looking north, 30° down ----------
 const K = 6, BX = 23551.5, BY = 9727.5, DW = 26624, DH = 21504 // their drawing: px per metre, origin, size
 const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 100, 16000)
 const VIEW = new THREE.Vector3(0, Math.sin(Math.PI / 6), Math.cos(Math.PI / 6)) // from the target towards the camera
@@ -669,7 +687,7 @@ function fromHash() {
   const [x, y, s] = location.hash.slice(1).split(',').map(Number)
   if ([x, y, s].every(Number.isFinite) && s > 0) { setView(x, y, s); return true }
 }
-if (!fromHash()) { // as the Illustrated tab opens: the whole central drawing
+if (!fromHash()) { // the central city
   const a = innerWidth / innerHeight
   setView(DW / 2, DH / 2, mobile && innerWidth < 600 ? (a < DW / DH ? innerHeight / DH : innerWidth / DW) : Math.min(innerWidth / DW, innerHeight / DH))
 }
@@ -683,7 +701,6 @@ function onView() {
   hashT = setTimeout(() => {
     const t = controls.target, h = `#${Math.round(t.x * K + BX)},${Math.round(BY + t.z * K * VIEW.y)},${cam.zoom.toFixed(4)}`
     history.replaceState(null, '', h)
-    for (const a of document.querySelectorAll('.tabs a')) a.hash = h
   }, 150)
 }
 // keep the camera over the map
@@ -728,8 +745,8 @@ const ink = new THREE.ShaderMaterial({
       float lap = max(abs(d(vec2(1.0, 0.0)) + d(vec2(-1.0, 0.0)) - 2.0 * c), abs(d(vec2(0.0, 1.0)) + d(vec2(0.0, -1.0)) - 2.0 * c));
       float e = smoothstep(thr, thr * 6.0, lap) * ink; // faint creases fade in instead of switching on
       vec3 cc = mix(col.rgb, col.rgb * vec3(0.16, 0.18, 0.22), e);
-      cc = max(mix(vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), cc, sat), 0.0); // the illustration's saturation (less zoomed out)
-      cc *= gain; // and its brighter, cooler light (fitted on side-by-side renders)
+      cc = max(mix(vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), cc, sat), 0.0); // a little extra saturation (less zoomed out)
+      cc *= gain; // brighter, cooler light up close
       gl_FragColor = vec4(cc, 1.0);
       #include <colorspace_fragment>
       gl_FragDepth = texture2D(tDepth, vUv).x; // the scene's depth, for the trees drawn on top
@@ -782,5 +799,7 @@ cars.visible = false
 loop()
 document.addEventListener('visibilitychange', () => { dirty = true })
 window.view = { cam, controls, setView, zAt, roads, renderer }
-status('')
+status('Ready', 1)
+requestAnimationFrame(() => loadingEl.classList.add('done'))
+setTimeout(() => loadingEl.remove(), 800)
 $('#hint').hidden = false

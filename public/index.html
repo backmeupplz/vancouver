@@ -18,24 +18,58 @@
 <meta name="twitter:description" content="An isometric Vancouver drawn entirely in code from OpenStreetMap.">
 <meta name="twitter:image" content="https://vancouver.borodutch.com/og.jpg">
 <style>
-  html, body { margin: 0; height: 100%; background: #0b1016; overflow: hidden; font: 13px/1.4 system-ui, sans-serif; color: #cfd8e0; }
+  :root { --panel: rgba(11, 16, 22, 0.78); --line: rgba(255, 255, 255, 0.12); --text: #e3eaf0; --muted: #93a3b5; --accent: #7fc4e8; }
+  html, body { margin: 0; height: 100%; background: #0b1016; overflow: hidden; font: 13px/1.45 system-ui, -apple-system, sans-serif; color: var(--text); }
   canvas { display: block; width: 100%; height: 100%; touch-action: none; }
-  #status { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; font-size: 15px; letter-spacing: .02em; }
-  .corner { position: fixed; padding: 8px 12px; background: rgba(11,16,22,.72); border-radius: 8px; }
-  #hint { left: 12px; bottom: 12px; }
-  #credit { right: 12px; bottom: 12px; }
-  a { color: #9cc3e6; }
-  @media (max-width: 600px) { #hint { display: none } #credit { left: 12px; font-size: 11px } }
+  a { color: var(--accent); }
+  .panel { position: fixed; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+  #bar { left: 12px; top: 12px; display: flex; align-items: center; gap: 4px; padding: 4px 4px 4px 12px; z-index: 20; }
+  #bar h1 { margin: 0 6px 0 0; font-size: 14px; font-weight: 650; letter-spacing: .01em; }
+  #bar button { font: inherit; color: var(--text); background: none; border: 0; border-radius: 7px; padding: 6px 10px; cursor: pointer; }
+  #bar button:hover, #bar button[aria-expanded="true"] { background: rgba(255, 255, 255, 0.1); }
+  #about { left: 12px; top: 58px; width: min(340px, calc(100% - 24px)); max-height: calc(100% - 140px); overflow-y: auto; padding: 14px 16px; z-index: 20; }
+  #about[hidden] { display: none; }
+  #about p { margin: 0 0 10px; color: var(--muted); }
+  #about p:first-child { color: var(--text); }
+  #about h2 { margin: 12px 0 6px; font-size: 10.5px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  #about ul { margin: 0; padding-left: 16px; color: var(--muted); }
+  #hint { right: 12px; bottom: 12px; padding: 7px 11px; color: var(--muted); }
+  /* loading: a centred card with a progress bar, then fades out */
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; z-index: 30; background: #0b1016; transition: opacity .5s; }
+  #loading.done { opacity: 0; pointer-events: none; }
+  #loading .card { width: min(320px, calc(100% - 48px)); text-align: center; }
+  #loading .title { font-size: 17px; font-weight: 650; margin-bottom: 4px; }
+  #loading .step { color: var(--muted); min-height: 1.45em; margin-bottom: 12px; }
+  #loading .track { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+  #loading .fill { height: 100%; width: 0; background: var(--accent); border-radius: 2px; transition: width .25s; }
+  #loading.error .fill { background: #e8857f; }
+  @media (max-width: 600px) { #hint { display: none } }
 </style>
-<link rel="stylesheet" href="tabs.css">
 <script type="importmap">{ "imports": { "three": "./vendor/three.module.min.js" } }</script>
 </head>
 <body>
 <canvas></canvas>
-<nav class="tabs"><a href="/" aria-current="page">In code</a><a href="/illustrated">Illustrated</a></nav>
-<div id="status">Loading Vancouver…</div>
-<div id="hint" class="corner" hidden>Drag to pan, scroll to zoom, right-drag to turn</div>
-<div id="credit" class="corner">Map data © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>, <a href="https://opendata.vancouver.ca/">City of Vancouver</a> (trees, LiDAR heights), terrain MRDEM (NRCan) · <a href="https://git.borodutch.com/backmeupplz/vancouver">Source code</a></div>
+<div id="bar" class="panel"><h1>Vancouver in code</h1><button id="aboutBtn" aria-expanded="false" aria-controls="about">About</button></div>
+<div id="about" class="panel" hidden>
+  <p>Vancouver drawn entirely in code: every building, street, tree and boat comes from open data and is rendered live in your browser with three.js.</p>
+  <p>Inspired by <a href="https://vancouver.isoworld.xyz/">isoworld's Isometric Vancouver</a>, a hand-guided illustration of the city.</p>
+  <p>Drag to pan, scroll or pinch to zoom, right-drag to turn. The link in the address bar keeps your view.</p>
+  <h2>Data</h2>
+  <ul>
+    <li>Streets, buildings, parks: © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a> (ODbL)</li>
+    <li>Trees and 2009 LiDAR building heights: <a href="https://opendata.vancouver.ca/">City of Vancouver Open Data</a></li>
+    <li>Terrain: MRDEM, Natural Resources Canada (<a href="https://open.canada.ca/en/open-government-licence-canada">OGL-Canada</a>)</li>
+  </ul>
+  <h2>Code</h2>
+  <p><a href="https://git.borodutch.com/backmeupplz/vancouver">Source code</a> · <a href="https://git.borodutch.com/backmeupplz/vancouver/src/branch/main/PLUGINS.md">Write a plugin</a></p>
+</div>
+<div id="hint" class="panel" hidden>Drag to pan · scroll to zoom · right-drag to turn</div>
+<div id="loading" role="status" aria-live="polite"><div class="card"><div class="title">Vancouver in code</div><div class="step">Loading…</div><div class="track"><div class="fill"></div></div></div></div>
+<script>
+  // the About toggle works before the city has loaded
+  const aboutBtn = document.getElementById('aboutBtn'), about = document.getElementById('about')
+  aboutBtn.onclick = () => { about.hidden = !about.hidden; aboutBtn.setAttribute('aria-expanded', String(!about.hidden)) }
+</script>
 <script type="module" src="main.js"></script>
 </body>
 </html>

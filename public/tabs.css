@@ -1,4 +1,0 @@
-.tabs { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 20; display: flex; gap: 2px; padding: 4px; background: rgba(11, 16, 22, 0.8); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 10px; font: 13px/1 system-ui, -apple-system, sans-serif; }
-.tabs a { color: #cfd8e0; text-decoration: none; padding: 8px 14px; border-radius: 7px; white-space: nowrap; }
-.tabs a:hover { background: rgba(255, 255, 255, 0.08); }
-.tabs a[aria-current="page"] { background: #e8eef5; color: #0b1016; }
