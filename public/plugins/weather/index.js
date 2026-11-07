@@ -182,6 +182,8 @@ export default function weather(city) {
     v3.set(Math.sin(c.az) * Math.cos(se), Math.sin(se), -Math.cos(c.az) * Math.cos(se)).multiplyScalar(1 - night)
       .add(new THREE.Vector3(Math.sin(mz) * Math.cos(me), Math.sin(me), -Math.cos(mz) * Math.cos(me)).multiplyScalar(night)).normalize()
     if (!lastDir || lastDir.angleTo(v3) > 0.002) { lastDir = v3.clone(); city.light.setSunDirection(v3) }
+    // windows light up through dusk (and earlier on dark, wet days)
+    if ('night' in city.light) city.light.night = Math.min(1, 1 - THREE.MathUtils.smoothstep(elDeg, -6, 8) + (c.kind === 'storm' || c.kind === 'rain' ? 0.25 * c.intensity : 0))
     const keep = c.kind === 'clear' || c.kind === 'cloudy' ? 1 - (1 - look.sun) * c.intensity : look.sun + (1 - look.sun) * (1 - wet) * 0.3
     sun.color.copy(tod.sun).lerp(c3.setHex(0xdde4f0), 1 - keep) // diffuse days: whiter, weaker sun
     sun.intensity = tod.sunI * keep

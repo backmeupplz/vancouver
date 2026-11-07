@@ -1,11 +1,32 @@
 # Vancouver in code
 
-An isometric Vancouver, live at https://vancouver.borodutch.com, drawn from OpenStreetMap data with three.js: every building footprint, street, beach, marina, bridge and park, with procedural trees, boats, windows.
+The Lower Mainland, from the Strait of Georgia to Port Coquitlam and from White Rock to the North Shore
+mountains, drawn entirely in code and rendered live in the browser with three.js: every building, street, tree,
+field and dock comes from open data, at real elevations. Live at https://vancouver.borodutch.com. Inspired by
+isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
 
-- `tools/fetch.sh` downloads the OSM extracts (`data/osm.json`, and `data/osm-ubc.json` with `BBOX=49.240,-123.275,49.282,-123.220 OUT=osm-ubc.json`) plus the City of Vancouver's public trees and 2009 LiDAR building footprints (not committed).
-- `uv run --with numpy,pillow,scipy,rasterio python3 tools/bake.py` turns them into `public/ground-<region>[-plain].jpg`, `public/city.bin` (terrain, buildings with pitched roofs, trees, boats, bridges, the road graph) and `public/meta.json`. Terrain is MRDEM (NRCan), read straight from its cloud GeoTIFF.
-- East-north-up metres, a 30° orthographic camera looking north; the view lives in the URL hash. Inspired by isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
-- `public/main.js` draws it with three.js: chunked meshes, billboard trees, an ink pass on the depth buffer, a shadow map fitted to the view, and rendering only when something changes. `public/code-traffic.js` simulates the traffic in a worker (lanes, junction curves, intelligent driver model, signals at major crossings).
-- `public/` is the whole site; the Dockerfile serves it with nginx (Tugport `borodutch.vancouver`, auto-deploys `main`).
+## How it's built
 
-Map data © OpenStreetMap contributors, ODbL.
+1. `tools/fetch.sh` downloads the data into `data/` (not committed): OpenStreetMap (Geofabrik's BC extract cut to
+   the Lower Mainland), City of Vancouver trees and 2009 LiDAR building sections, and NRCan's HRDEM 2 m LiDAR surface
+   and terrain models (`tools/hrdem.py`, resumable).
+2. `uv run --with osmium,shapely,numpy python3 tools/osm_split.py` sorts the OSM extract into 4 km buckets.
+3. `uv run --with numpy,scipy,pillow python3 tools/sea.py` floods the sea between the coastlines.
+4. `uv run --with numpy,scipy,rasterio python3 tools/heights.py` writes a coarse height grid of the whole map.
+5. `uv run --with numpy,scipy,pillow,shapely,mapbox-earcut,rasterio python3 tools/tiles.py [procs]` bakes the
+   map tiles into `public/tiles/` (about 2 minutes on 9 cores, ~115 MB): 1 km detail tiles and 4 km overview tiles
+   with terrain, ground polygons, roads with their node graph, buildings (OSM shapes, LiDAR heights and sections,
+   roof shapes), trees (LiDAR canopy peaks, species from the city's inventory) and points like traffic signals.
+6. `tools/publish.sh` copies the tiles to the server. They are not in git.
+
+## How it runs
+
+`public/` is the site (nginx, `Dockerfile`; Tugport `borodutch/vancouver` auto-deploys `main`, with the tiles on a
+volume). `public/main.js` sets up the camera, light, shadows, the ink outline pass and render-on-demand;
+`public/core/` streams tiles for what is on screen, builds their geometry in Web Workers and draws ground, roads,
+facades and trees with procedural shaders, crisp at any zoom. Everything else is a plugin (`public/plugins/`):
+lo-fi music, live weather and sun, TransLink transit on its timetable, live aircraft, ships, landmarks and iconic
+bridges. See [PLUGINS.md](PLUGINS.md) to write one.
+
+Map data © OpenStreetMap contributors (ODbL). City of Vancouver Open Data. HRDEM and MRDEM © Natural Resources
+Canada (Open Government Licence – Canada). Transit data © TransLink. Live aircraft: adsb.lol.

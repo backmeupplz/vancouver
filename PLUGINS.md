@@ -46,15 +46,63 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.renderer`, `city.canvas`, `city.controls` | three.js renderer, its canvas, the MapControls |
 | `city.world.fromLatLon(lat, lon)` | `THREE.Vector3` on the ground at that point |
 | `city.world.toLatLon(x, z)` | `{ lat, lon }` |
-| `city.world.heightAt(x, z)` | ground height in metres |
+| `city.world.heightAt(x, z)` | ground height in metres (real elevation, from the finest loaded tile; 0 where nothing is loaded yet) |
+| `city.world.eachTile(fn)` | `fn(tile)` for every loaded map tile now and later (`{ level, i, j, ox, oy, size, graph, terrain, footprints, water }`, see below); returns an unsubscribe |
+| `city.world.suppressBuildings(ring)` | `[[lat, lon], …]`: the generic building there is removed because your plugin draws its own |
 | `city.view.zoom`, `.center`, `.metresPerPixel`, `.bounds` | what is on screen (`bounds`: `{x0, z0, x1, z1}`) |
+| `city.view.useCamera(camera, opts)` | draw the map through your own camera, e.g. a `PerspectiveCamera` for a game (see below) |
+| `city.view.release()` | back to the map camera, exactly where it was |
+| `city.view.camera` | the camera the map is drawn with now: `city.camera`, or yours |
 | `city.light.sun`, `city.light.hemi` | the `DirectionalLight` (casts the shadows) and `HemisphereLight` |
 | `city.light.setSunDirection(v)` | move the sun (a `Vector3` pointing towards it); shadows follow |
+| `city.light.night` | 0 (day) to 1 (night): lights a share of the windows |
 | `city.post.uniforms.tint` / `.desat` | grade of the final image: multiply (`Vector3`, 1 = none) and desaturate (0–1) |
-| `city.data.roads` | the drivable road graph: `{ nNodes, meta: Int32Array(7 per piece: from, to, class, oneway, lanes, first point, points), pts: Float32Array(x, north, z per point) }` |
-| `city.on(event, fn)` | `'frame'` `(dt, t)`, `'view'` `(view)`; returns an unsubscribe function |
+| `city.tiles` | the tile streamer (advanced) |
+| `city.on(event, fn)` | `'frame'` `(dt, t)`, `'view'` `(view)`, `'tile:load'` / `'tile:unload'` `(tile)`, `'weather'` `(weather)`; returns an unsubscribe function |
 | `city.requestRender()`, `city.animate()` | see above |
 | `city.ui.addButton({ label, title, icon, onClick, panel })` | a toolbar button at the top right; with `panel: true`, `.panel` is a popover element you fill |
 | `city.ui.toast(text)` | a short message |
 
 `window.city` is the same object, handy from the browser console.
+
+## Map tiles
+
+The map streams in as you look around: 4096 m tiles (`level 1`) for the overview and 1024 m tiles (`level 0`) up
+close. Each tile carries its road graph so traffic, people and games can move on real streets:
+
+- `tile.graph.pieces`: `{ kind, lanes, oneway, drive, band, w, a, b, pts, z }` (`band`: the road has sidewalks drawn) per road piece between junctions. `kind`
+  indexes `motorway, trunk, primary, secondary, tertiary, residential, service, living, pedestrian, footway,
+  cycleway, path, steps, track, rail, lightrail, runway, taxiway`; `a`/`b` are OpenStreetMap node ids (they match
+  across tiles); `pts` is a flat `Float32Array` of world x, north pairs; `z` is the deck height on bridges, else
+  `null` (use `heightAt`). `oneway` pieces run from `a` to `b`. `w` is the carriageway width in metres.
+- `tile.graph.pois`: `{ kind, id, x, y }` points (detail tiles): `kind` 0 traffic signals, 1 crossing, 2 stop sign,
+  3 street lamp, 4 bench, 5 bus stop, 6 give way; `id` is the OSM node id (signals on a junction share the id of
+  the graph pieces' end there).
+- `tile.terrain`: `{ n, h, size }`, an `n`×`n` height grid over the tile, row 0 north.
+- `tile.footprints` (detail tiles): building outlines for collisions, `{ pts, start }`: ring `r` is the world x,
+  north pairs `pts[start[r]] … pts[start[r + 1] - 1]`. Parts that start more than 2.5 m up (you can drive under
+  them) and buildings a plugin replaced with `suppressBuildings` are left out.
+- `tile.water` (detail tiles with water): `{ n, mask }`, an `n`×`n` `Uint8Array`, 1 where the cell is water; cell
+  `(i, j)` counts east and north from the tile's south-west corner (`ox`, `oy`), `size / n` metres each.
+
+Detail tiles overlap their parent overview tile, so a plugin that wants each road once should use level 0 tiles
+(and level 1 only where no level 0 tile is loaded).
+
+## Your own camera
+
+A game can take over the view: `city.view.useCamera(camera, opts)` stops the MapControls and draws the map, the
+trees and `city.overlay` through `camera` (orthographic or perspective) until `city.view.release()`, which puts
+the map camera back exactly where it was. `opts` is read every frame, so keep moving it rather than calling again:
+
+- `opts.focus` (`Vector3`, required): the ground point the map streams around, usually a little ahead of the player.
+- `opts.radius` (metres, default 900): tiles load within this square around the focus; 1100 or less loads the
+  detail tiles (and their `graph`, `footprints`, `water`), more shows the overview tiles.
+- `opts.shadowRadius` (metres, default 300): the sharp sun shadows cover this square around the focus. The shadow
+  map is redrawn only when the focus moves on, so give moving things a blob shadow instead of `castShadow`.
+
+You own the camera: set its pose, `fov`, `aspect` (on resize), `near` and `far` every frame as you need. With a
+perspective camera the ink outlines are found from depth properly linearised and fade out over `scene.fog` (a
+`THREE.Fog` you set on `city.scene` is used by the map and the trees alike). While your camera is active,
+`city.view.zoom` is the map zoom that shows the focus at the same scale, `center` is the focus and `bounds` the
+streamed square, and `'view'` fires as the focus moves. Nothing changes for the map view when no plugin has a
+camera. The delivery plugin is the example: it dives from the map into a chase camera behind a van and back.

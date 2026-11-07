@@ -29,6 +29,15 @@ def tiles():
 
 
 def fetch(ij):
+    for attempt in range(4):
+        try: return fetch_once(ij)
+        except Exception as e:
+            err = e
+            import time; time.sleep(5 * (attempt + 1))
+    return ij, f'failed: {err}'
+
+
+def fetch_once(ij):
     import rasterio
     from rasterio.warp import reproject, Resampling
     from rasterio.transform import Affine

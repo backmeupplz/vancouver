@@ -50,7 +50,7 @@
   #tools button:hover, #tools button[aria-expanded="true"], #tools button[aria-pressed="true"] { background: rgba(255, 255, 255, 0.1); }
   .tool-panel { z-index: 21; padding: 12px 14px; width: min(300px, calc(100% - 24px)); max-height: calc(100% - 120px); overflow-y: auto; }
   .toast { left: 50%; top: 64px; transform: translateX(-50%); padding: 8px 14px; z-index: 40; }
-  @media (max-width: 600px) { #hint { display: none } }
+  @media (max-width: 600px) { #hint { display: none } #credits { bottom: 58px !important; left: 12px !important; right: auto !important; transform: none !important; max-width: calc(100% - 24px); flex-wrap: wrap; } }
 </style>
 <script type="importmap">{ "imports": { "three": "./vendor/three.module.min.js" } }</script>
 </head>
