@@ -1,6 +1,6 @@
 # Vancouver in code
 
-An isometric Vancouver, live at https://vancouver.borodutch.com, drawn from OpenStreetMap data with three.js: every building footprint, street, beach, marina, bridge and park, with procedural trees, boats, windows and a few hand-made landmarks (BC Place, Science World, Canada Place and its cruise ships).
+An isometric Vancouver, live at https://vancouver.borodutch.com, drawn from OpenStreetMap data with three.js: every building footprint, street, beach, marina, bridge and park, with procedural trees, boats, windows.
 
 - `tools/fetch.sh` downloads the OSM extracts (`data/osm.json`, and `data/osm-ubc.json` with `BBOX=49.240,-123.275,49.282,-123.220 OUT=osm-ubc.json`) plus the City of Vancouver's public trees and 2009 LiDAR building footprints (not committed).
 - `uv run --with numpy,pillow,scipy,rasterio python3 tools/bake.py` turns them into `public/ground-<region>[-plain].jpg`, `public/city.bin` (terrain, buildings with pitched roofs, trees, boats, bridges, the road graph) and `public/meta.json`. Terrain is MRDEM (NRCan), read straight from its cloud GeoTIFF.

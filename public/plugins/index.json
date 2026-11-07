@@ -3,5 +3,6 @@
 "plugins/weather/index.js",
 "plugins/transit/index.js",
 "plugins/ships/index.js",
-"plugins/planes/index.js"
+"plugins/planes/index.js",
+"plugins/landmarks/index.js"
 ]

@@ -574,41 +574,7 @@ for (let i = 0; i < np; i++) {
 }
 const roads = { nNodes, meta: rmeta, pts: new Float32Array(rpts) }
 
-// ---------- landmarks ----------
-const white = new THREE.MeshLambertMaterial({ color: 0xf2f2ee })
-const add = (geo, mat, x, y, z) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; scene.add(m); return m }
-if (meta.bcplace) {
-  const [x, y, r] = meta.bcplace, z = -y, g = zAt(x, y)
-  add(new THREE.CylinderGeometry(r * 0.95, r, 30, 48), new THREE.MeshLambertMaterial({ color: 0xbfc3c4 }), x, g + 15, z)
-  add(new THREE.SphereGeometry(r * 0.92, 48, 12, 0, Math.PI * 2, 0, Math.PI / 2).scale(1, 0.28, 1), white, x, g + 30, z)
-  const mast = new THREE.CylinderGeometry(0.8, 0.8, 22)
-  for (let i = 0; i < 36; i++) { const a = (i / 36) * Math.PI * 2; add(mast, white, x + Math.cos(a) * r * 0.98, g + 41, z + Math.sin(a) * r * 0.98) }
-}
-if (meta.scienceworld) {
-  const [x, y] = meta.scienceworld, g = zAt(x, y)
-  add(new THREE.CylinderGeometry(20, 22, 14, 24), new THREE.MeshLambertMaterial({ color: 0xa8b0b4 }), x, g + 7, -y)
-  add(new THREE.IcosahedronGeometry(23, 2), new THREE.MeshLambertMaterial({ color: 0xd6dcde, flatShading: true }), x, g + 35, -y)
-}
 const ll = (lat, lon) => [(lon - meta.origin[1]) * meta.k[0], (lat - meta.origin[0]) * meta.k[1]]
-{ // Canada Place: pier, five sails and two cruise ships
-  const [ax, ay] = ll(49.2880, -123.1144), [bx, by] = ll(49.2896, -123.1078), sea = zAt(ax, ay)
-  const pl = Math.hypot(bx - ax, by - ay), ux = (bx - ax) / pl, uz = -(by - ay) / pl, az = -ay
-  for (const [side, at, len] of [[-1, 0.45, 290], [1, 0.55, 265]]) {
-    const x = ax + ux * pl * at + uz * side * 88, z = az + uz * pl * at - ux * side * 88
-    const ship = new THREE.Group()
-    const parts = [[34, 14, len, 7, 0, 0x1d2a3a], [32, 22, len * 0.82, 25, -len * 0.04, 0xf2f2ee], [26, 10, len * 0.55, 41, -len * 0.06, 0xf2f2ee], [8, 12, 16, 52, len * 0.12, 0x2b4a7a]]
-    for (const [w, h, l, y, zz, col] of parts) {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l).translate(0, y, zz), col === 0xf2f2ee ? white : new THREE.MeshLambertMaterial({ color: col }))
-      m.castShadow = m.receiveShadow = true; ship.add(m)
-    }
-    ship.position.set(x, sea, z); ship.rotation.y = Math.atan2(ux, uz)
-    scene.add(ship)
-  }
-  for (let i = 0; i < 5; i++) {
-    const t = 0.62 + i * 0.07, x = ax + ux * pl * t, z = az + uz * pl * t
-    add(new THREE.ConeGeometry(14, 30, 4), white, x + uz * (i % 2 ? 12 : -12), sea + 38, z - ux * (i % 2 ? 12 : -12))
-  }
-}
 
 // ---------- traffic: simulated in a worker, drawn as instances placed in the vertex shader ----------
 const CARS = mobile ? 2600 : 5200
