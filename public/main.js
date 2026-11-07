@@ -803,3 +803,5 @@ status('Ready', 1)
 requestAnimationFrame(() => loadingEl.classList.add('done'))
 setTimeout(() => loadingEl.remove(), 800)
 $('#hint').hidden = false
+// cozy procedurally generated lo-fi, with its own small player (plugins/lofi)
+import('./plugins/lofi/lofi.js').then((m) => m.default()).catch((e) => console.warn('lofi', e))
