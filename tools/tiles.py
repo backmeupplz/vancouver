@@ -15,6 +15,7 @@ import mapbox_earcut as earcut
 sys.path.insert(0, os.path.dirname(__file__))
 from world import xy, latlon, extent, L0, L1, KX, KY, LAT_O, LON_O
 from roofs import roof_lookup
+from facades import facade_lookup, NONE as B_NONE, GLASS as B_GLASS, SOLID as B_SOLID
 
 OUT = os.environ.get('OUT', 'public/tiles')
 HR = 2.0  # HRDEM cell, metres
@@ -707,7 +708,7 @@ def house_kind(info, main):
     siding, a porch) and the Vancouver Special (1965-85, two storeys, a shallow gable, stucco over a brick base)"""
     t, btype, a = info['t'], info['btype'], info['a']
     if not (btype in HOUSES or btype == 'yes' and 60 < a < 400) or main['h'] > 11: return None
-    year = start_year(t)
+    year = info['year']
     if year and year < 1940: return CHARACTER
     if not main['roof']: return None
     pitch, rise = main['pitch'], (main['ridge'] or 0) - main['h']
@@ -726,7 +727,7 @@ def start_year(t):
 def style_of(info, h, rnd, kind):
     t, btype, a = info['t'], info['btype'], info['a']
     mat = (t.get('building:material') or '').strip().lower()
-    year = start_year(t)
+    year = info['year']  # OSM start_date, else the tax report's year built
     tower = h > 30 and btype in RESID | {'hotel'}
     zn = info['zone']
     if mat in MATERIAL:
@@ -735,7 +736,8 @@ def style_of(info, h, rnd, kind):
         if s == CHARACTER and h > 12: return COMM
         return s
     if kind is not None: return kind
-    heritage = t.get('heritage') or t.get('historic') in ('building', 'yes', 'church', 'monument', 'manor', 'house') or year and year < 1930
+    heritage = t.get('heritage') or t.get('historic') in ('building', 'yes', 'church', 'monument', 'manor', 'house') or year and year < 1930 \
+        or info['fac'].get('heritage') and (year or 0) < 1940  # on the city's register (it lists modernist ones too)
     if heritage and btype not in HOUSES and h < 45:
         return STONE if btype in ('civic', 'public', 'government', 'cathedral') or t.get('amenity') in ('bank', 'townhall', 'courthouse', 'place_of_worship') else BRICK
     if zn == 'historic' and h < 32 and btype not in HOUSES and rnd.random() < 0.8: return BRICK
@@ -826,7 +828,9 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
         shape = t.get('roof:shape', '')
         btype = t.get('building', t.get('building:part', 'yes'))
         shop = bool(t.get('shop') or t.get('office') or t.get('amenity') in SHOP_AMENITY) or (shops is not None and len(shops.query(Polygon(r).buffer(3), predicate='intersects')) > 0)
-        info = dict(t=t, btype=btype, a=a, shop=shop, lv=lv, ind=ind is not None and shapely.contains_xy(ind, c[0], c[1]), zone=zone(c))
+        fac = facade_lookup(r) or {}  # tools/facades.py: year built, heritage, wall colour, storey, balconies
+        info = dict(t=t, btype=btype, a=a, shop=shop, lv=lv, ind=ind is not None and shapely.contains_xy(ind, c[0], c[1]), zone=zone(c),
+                    fac=fac, year=start_year(t) or fac.get('year') or None, ring=r)
         gid = rnd.randrange(1, 1 << 30)
         parts = None
         if chm is not None and not is_part and not mn and np.percentile(chm, 90) > 2.2:
@@ -867,20 +871,48 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
         tagc = colour(t.get('roof:colour'))
         matc = ROOF_MAT.get((t.get('roof:material') or '').lower(), 0) and ROOF_MAT[t['roof:material'].lower()] | 0x1000000
         mainc = 0 if tagc else photo_roof(main)
-        fh = floor_h(style, top, info['lv'], shop)
+        fac = info['fac']
+        fh = fac.get('storey') or floor_h(style, top, info['lv'], shop)  # the LiDAR's storey rhythm, else levels, else the style's
         gh = max(p['ridge'] or p['h'] for p in ps)
+        # walls: the mapper's colour, else a known building's, else the sunlit walls in the 2022 LiDAR (not on glass: that
+        # is the sky in it), else the palette
         wall = colour(t.get('building:colour'))
+        if not wall and fac.get('wall') and (fac['wsrc'] == 2 or style not in (GLASS, OFFICE)): wall = fac['wall'] | 0x1000000
         if not wall and info['zone'] == 'granville' and style == SHED:  # Granville Island's painted tin
             wall = rnd.choice((0xb84a3a, 0xd8a838, 0x3a6a9a, 0x4a7a5a, 0x8a8c8e, 0xc86a3a, 0x5a8aa0)) | 0x1000000
         res = info['btype'] != 'hotel' and (style in (APT, GLASS) or style == CONCRETE and info['btype'] in RESID and top > 24)
+        fx = facade_fx(style, res, top, info['year'], info['btype'], fac, main['ring'])
         d = rnd.uniform(0.03, 0.3)
         if style == CHARACTER and streets is not None and main['roof'] and main['a'] < 300:
             ps.append(porch(main, streets))
         for p in ps:  # roof colour: the mapper's, else the 2022 photo's (this part's, else the building's), else the material's
             roofc = tagc or (photo_roof(p) if p is not main else mainc) or mainc or matc
-            p.update(style=style, wall=wall, roofc=roofc, fh=fh, shop=shop, res=res, gh=gh, ring=inset(p['ring'], d), h=p['h'] + rnd.random() * 0.1)
+            p.update(style=style, wall=wall, roofc=roofc, fh=fh, shop=shop, res=res, gh=gh, fx=fx, ring=inset(p['ring'], d), h=p['h'] + rnd.random() * 0.1)
             del p['info']
     return out
+
+
+def octant(ang):
+    """compass octant (0 east, 2 north, ...) of a direction in radians"""
+    return round(ang / (math.pi / 4)) % 8
+
+
+def facade_fx(style, res, top, year, btype, fac, ring):
+    """(balcony kind, facade pattern, balcony facing octants) from the building's era unless facades.py knows better;
+    0s leave it to the page's own rules (and old tiles carry none). Kinds and patterns: tools/facades.py LOOKS."""
+    kind, pat, facing = fac.get('balc', 0), fac.get('pattern', 0), fac.get('facing', 0)
+    if year and res and top > 9 and not kind:
+        if year < 1950: kind = B_NONE  # walk-ups and old apartment blocks
+        elif year < 1986:  # 1960s-80s concrete towers: solid-fronted balconies along the long sides
+            kind = B_SOLID
+            ang = obb(ring)[2] + math.pi / 2
+            facing = (1 << octant(ang)) | (1 << octant(ang + math.pi))
+        else: kind = B_GLASS  # Vancouverism: glass-railed balconies all round
+    if year and not pat:
+        if style == GLASS: pat = 3 if year < 2006 else 9  # green glass and balconies, then window walls
+        elif style == APT and top > 20: pat = 1 if year < 1986 else 3
+        elif style == CONCRETE and btype not in RESID and 1955 <= year < 1986: pat = 10  # window bands between concrete
+    return kind, pat, facing
 
 
 def photo_roof(p):
@@ -1416,7 +1448,7 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
         b['mn'] = max(0.0, b['mn'] or 0.0); b['h'] = max(0.5, b['h'])
         units = b.get('units') if detail else None
         fl = (1 if b['mn'] else 0) | (2 if b['roof'] else 0) | (4 if b['wall'] else 0) | (8 if b['roofc'] else 0) | (16 if abs(b['gh'] - b['h']) > 0.5 else 0) \
-            | 32 | (64 if units is not None else 0)
+            | 32 | (64 if units is not None else 0) | (128 if any(b.get('fx', ())) else 0)
         bb += struct.pack('<BBhH', fl, b['style'], int(round(b['base'] * 10)), int(min(6000, b['h'] * 10)))
         if fl & 1: bb += struct.pack('<H', int(max(0, min(6000, b['mn'] * 10))))
         if fl & 2: bb += struct.pack('<BH', b['roof'], int(min(6000, b['ridge'] * 10)))
@@ -1425,6 +1457,9 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
         if fl & 16: bb += struct.pack('<HI', int(min(6000, b['gh'] * 10)), b['gid'])
         # facade: storey height (1/20 m) and bits (1 storefront ground floor, 2 homes: balconies allowed)
         bb += struct.pack('<BB', int(min(255, round(b['fh'] * 20))), (1 if b['shop'] else 0) | (2 if b['res'] else 0))
+        if fl & 128:  # facade looks (tools/facades.py): balcony kind | pattern << 4, balcony facing octants (0 = all round)
+            kind, pat, facing = b['fx']
+            bb += struct.pack('<BB', kind | pat << 4, facing)
         if fl & 64:  # rooftop plant the LiDAR saw (none = a clean roof): centre, size along/across, height, angle
             bb += struct.pack('<B', len(units))
             for x, y, su, sv, uh, ang in units:

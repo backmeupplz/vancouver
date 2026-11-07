@@ -30,6 +30,14 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    `data/ortho/`, `tools/ortho.sh` turns them into 0.5 m GeoTIFFs (GDAL with the open libecwj2 3.3 plugin, in podman) and
    `uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/roofs.py` samples every footprint into
    `data/roofs.npz` (`tools/roofs.py preview` draws photo vs colours). Only roofs.npz is needed to bake.
+   Walls follow the real buildings where the data knows them (`tools/facades.py` → `data/facades.npz`, optional): the
+   city's property tax report gives every building its year built, which picks 1960s-80s concrete towers with solid
+   balcony fronts on their long sides, 1990s green glass with glass balconies all round, window walls after 2005, and
+   window bands on old concrete offices; the heritage register marks the old brick and stone. The city's 2022 LiDAR
+   (coloured points, 1 km tiles listed in `data/lidar2022/urls.json`, downloaded by hand into `data/lidar2022/` and
+   unzipped into `las/`) gives the storey height from the rhythm of the floors on the walls;
+   Mapillary street photos (`tools/mapillary.py`, token through the vault, CC BY-SA 4.0) give wall colours seen from
+   the street; a short list of landmarks (`LOOKS`) is set by hand from public photos.
 6. `tools/publish.sh` copies the tiles to the server. They are not in git.
 
 ## How it runs
@@ -42,6 +50,7 @@ lo-fi music, live weather and sun, TransLink transit on its timetable, live airc
 bridges, and driving (parcel deliveries too), walking, hiking real trails and sailing through it all. See
 [PLUGINS.md](PLUGINS.md) to write one.
 
-Map data © OpenStreetMap contributors (ODbL). City of Vancouver Open Data; 2022 orthophoto © City of Vancouver
-(Open Government Licence – Vancouver). HRDEM and MRDEM © Natural Resources Canada (Open Government Licence – Canada).
+Map data © OpenStreetMap contributors (ODbL). City of Vancouver Open Data; 2022 orthophoto and LiDAR, property tax
+report and heritage register © City of Vancouver (Open Government Licence – Vancouver). Street photos: Mapillary
+contributors (CC BY-SA 4.0). HRDEM and MRDEM © Natural Resources Canada (Open Government Licence – Canada).
 Transit data © TransLink. Live aircraft: adsb.lol.

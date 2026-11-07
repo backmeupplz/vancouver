@@ -398,6 +398,8 @@ function buildings(t, terr, level) {
     if (fl & 16) { gH = dv.getUint16(o, true) / 10; gid = dv.getUint32(o + 2, true); o += 6 }
     let fh = 0, bits = 0, plant = null // storey height; bits 1 storefront, 2 residential; rooftop plant the LiDAR saw
     if (fl & 32) { fh = dv.getUint8(o) / 20; bits = dv.getUint8(o + 1); o += 2 }
+    let fx = 0, facing = 0 // the building's own facade (tools/facades.py): balcony kind | pattern << 4, balcony facing octants
+    if (fl & 128) { fx = dv.getUint8(o); facing = dv.getUint8(o + 1); o += 2 }
     if (fl & 64) {
       const nu = dv.getUint8(o); o += 1; plant = []
       for (let k = 0; k < nu; k++, o += 8) plant.push([dv.getInt16(o, true) * t.k, dv.getInt16(o + 2, true) * t.k, dv.getUint8(o + 4) / 10, dv.getUint8(o + 5) / 10, dv.getUint8(o + 6) / 20, (dv.getUint8(o + 7) / 256) * Math.PI])
@@ -418,7 +420,8 @@ function buildings(t, terr, level) {
     const gr = mulberry(gid), pick = (a) => a[Math.floor(gr() * a.length)]
     const seed = gr(), r = gr(), tower = gH > 20
     // facade pattern: -1 none, 1 punched windows, 2 curtain wall, 3 glass balconies, 5 wood siding, 6 ribbed metal,
-    // 7 big box, 8 Vancouver Special, 9 glass condo; the storefront and the storey height ride along (see materials.js)
+    // 7 big box, 8 Vancouver Special, 9 glass condo, 10 window bands; the storefront and the storey height ride along
+    // (see materials.js)
     let style = 1
     if (style0 === 0) style = h < 4 ? -1 : r < 0.5 ? 5 : 1
     else if (style0 === 2) style = 2
@@ -430,10 +433,12 @@ function buildings(t, terr, level) {
     else if (style0 === 12) style = 8
     const front = !!(bits & 1) || (style0 === 4 && !(fl & 32) && h >= 5) // old tiles: commercial = storefront
     if (style0 === 4 && h < 5) style = -1
+    if (fx >> 4) style = fx >> 4
     const fq = Math.max(1, Math.min(31, Math.round(((fh || 3.2) - 2.4) / 0.15)))
     const styleW = style + (fq + (front && style !== 6 && style !== 7 ? 32 : 0)) / 64
     const storey = 2.4 + fq * 0.15
-    const balc = detail && h - mn > 9 && np <= 120 && (fl & 32 ? bits & 2 && (style === 3 || style === 9 || style0 === 7 && tower) : style === 3)
+    const bk = fx & 15 // balconies: 1 none, 2 glass, 3 solid fronts; 0: by the pattern
+    const balc = detail && h - mn > 9 && np <= 120 && (bk ? bk > 1 : fl & 32 ? bits & 2 && (style === 3 || style === 9 || style0 === 7 && tower) : style === 3)
     const pal = PALETTES[style0] || PALETTES[4]
     const wall = shade(wallHex & 0x1000000 ? lin(wallHex & 0xffffff) : (TRUE.has(style0) ? lin : hex)(pick(pal.wall)), 0.97 + gr() * 0.06)
     const ownRoof = !roofShape || style0 === 8 || style0 >= 11
@@ -481,7 +486,7 @@ function buildings(t, terr, level) {
     // balconies: a slab and a railing (glass, or concrete on the older towers) on every floor, all the way round
     if (balc) {
       const D = 1.15, ring = offset(pts, D)
-      const slabC = shade(wall, 1.05), railC = style0 === 7 ? shade(wall, 0.78) : RAIL[Math.floor(seed * RAIL.length)], pw = ROOFW(seed)
+      const slabC = shade(wall, 1.05), railC = bk === 3 || !bk && style0 === 7 ? shade(wall, 0.78) : RAIL[Math.floor(seed * RAIL.length)], pw = ROOFW(seed)
       const fy0 = base + Math.max(mn, front ? 4.5 : 0) + storey
       for (let fy = Math.max(fy0, y0 + 2.5); fy < y1 - 2.4; fy += storey) {
         for (let i = 0; i < np; i++) {
@@ -489,6 +494,7 @@ function buildings(t, terr, level) {
           const len = Math.hypot(p[0] - a[0], p[1] - a[1])
           if (len < 2.5) continue
           const nx = (p[1] - a[1]) / len, nz = (p[0] - a[0]) / len
+          if (facing && !faces(facing, nx, -nz)) continue
           quad(Bal, [a[0], fy, -a[1]], [p[0], fy, -p[1]], [P[0], fy, -P[1]], [A[0], fy, -A[1]], slabC, [0, 1, 0], pw)
           quad(Bal, [A[0], fy - 0.4, -A[1]], [P[0], fy - 0.4, -P[1]], [P[0], fy, -P[1]], [A[0], fy, -A[1]], shade(slabC, 0.86 + 0.14 * Math.abs(nx)), [nx, 0, nz], pw)
           quad(Bal, [A[0], fy, -A[1]], [P[0], fy, -P[1]], [P[0], fy + 1.05, -P[1]], [A[0], fy + 1.05, -A[1]], shade(railC, 0.9 + 0.1 * Math.abs(nx)), [nx, 0, nz], pw)
@@ -500,6 +506,12 @@ function buildings(t, terr, level) {
     footprints: fpStart.length > 1 ? { pts: new Float32Array(fp), start: new Uint32Array(fpStart) } : null }
 }
 const ROOFW = (seed) => [0, 0, 999, seed]
+// a wall facing (east, north) is in one of the octants (bit 0 east, 2 north, ...) or next to one: footprints get
+// simplified and inset after their facing was measured
+function faces(mask, e, n) {
+  const k = (((Math.round(Math.atan2(n, e) / (Math.PI / 4)) % 8) + 8) % 8)
+  return !!(mask & (1 << k) || mask & (1 << ((k + 1) & 7)) || mask & (1 << ((k + 7) & 7)))
+}
 function pack(B) {
   return { position: new Float32Array(B.pos), normal: new Int8Array(B.nor), color: new Uint8Array(B.col), aWin: new Float32Array(B.win) }
 }

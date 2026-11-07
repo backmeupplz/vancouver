@@ -257,6 +257,14 @@ export function buildingMaterial() {
             pat = mix(base, glass, ix * iy);
             avg = mix(base, glassC * 0.95, 0.64);
             col = mix(avg, pat, detail);
+          } else if (style == 10.0) { // window bands: tinted ribbon windows between concrete spandrels (1950s-80s)
+            vec2 g = vec2(u / 1.5, zf / storey), fw = max(fwidth(g), vec2(1e-4)), f = fract(g);
+            float detail = clamp(1.6 - 2.5 * max(fw.x, fw.y), 0.0, 1.0);
+            float win = band(f.y, 0.38, 0.9, fw.y) * mix(0.9, smoothstep(0.06 - fw.x, 0.06 + fw.x, f.x), thin(0.06, fw.x));
+            vec3 glass = srgb(vec3(0.30, 0.33, 0.36)) * (0.8 + 0.4 * f.y);
+            pat = mix(base, glass, win);
+            avg = mix(base, glass, 0.45);
+            col = mix(avg, pat, detail);
           } else if (style == 6.0) { // ribbed metal cladding, roller doors at the foot
             float g = u / 0.9, fw = max(fwidth(g), 1e-4), detail = clamp(1.6 - 2.5 * fw, 0.0, 1.0);
             col = base * (1.0 - 0.1 * detail * (1.0 - smoothstep(0.0, 0.18 + fw, abs(fract(g) - 0.5) * 2.0 - 0.7)));
@@ -324,7 +332,7 @@ export function buildingMaterial() {
       // the glow's strength rides in alpha, so the post pass can keep lit windows warm under a night grade
       .replace('#include <opaque_fragment>', '#include <opaque_fragment>\ngl_FragColor.a = 1.0 - min(1.0, dot(glow, vec3(0.5)));')
   }
-  m.customProgramCacheKey = () => 'building4'
+  m.customProgramCacheKey = () => 'building5'
   return m
 }
 

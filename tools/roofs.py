@@ -193,28 +193,20 @@ def bake(procs):
 
 
 # ---------------------------------------------------------------- lookup (tiles.py)
-_DB = None
+def ring_db(path):
+    """an npz of footprints (rc: ring points, ro: ring offsets) and per-footprint fields -> dict with an STRtree, or False"""
+    import shapely
+    if not os.path.exists(path): return False
+    d = np.load(path)
+    ro = d['ro']; ids = np.repeat(np.arange(len(ro) - 1), np.diff(ro))
+    polys = shapely.make_valid(shapely.polygons(shapely.linearrings(d['rc'], indices=ids)))
+    return dict(polys=polys, tree=shapely.STRtree(polys), **{k: d[k] for k in d.files if k not in ('rc', 'ro')})
 
 
-def _db():
-    global _DB
-    if _DB is None:
-        import shapely
-        if not os.path.exists(OUT): _DB = False; return _DB
-        d = np.load(OUT)
-        ro = d['ro']; ids = np.repeat(np.arange(len(ro) - 1), np.diff(ro))
-        polys = shapely.polygons(shapely.linearrings(d['rc'], indices=ids))
-        polys = shapely.make_valid(polys)
-        _DB = dict(polys=polys, tree=shapely.STRtree(polys), rgb=d['rgb'], rgb2=d['rgb2'], share2=d['share2'], flags=d['flags'])
-    return _DB
-
-
-def roof_lookup(ring):
-    """ring: world-xy footprint -> (0xRRGGBB, 0xRRGGBB second or 0, share2 %, flags) or None outside the photo."""
+def ring_match(db, ring):
+    """the footprint in db that is this ring (best overlap), else the smallest one under its centre, else None"""
     import shapely
     from shapely.geometry import Polygon
-    db = _db()
-    if not db: return None
     q = shapely.make_valid(Polygon(ring))
     hits = db['tree'].query(q, predicate='intersects')
     if not len(hits): return None
@@ -225,7 +217,20 @@ def roof_lookup(ring):
         inside = shapely.contains_xy(db['polys'][hits], *q.representative_point().coords[0])
         if not inside.any(): return None
         k = int(np.flatnonzero(inside)[np.argmin(shapely.area(db['polys'][hits][inside]))])
-    h = int(hits[k])
+    return int(hits[k])
+
+
+_DB = None
+
+
+def roof_lookup(ring):
+    """ring: world-xy footprint -> (0xRRGGBB, 0xRRGGBB second or 0, share2 %, flags) or None outside the photo."""
+    global _DB
+    if _DB is None: _DB = ring_db(OUT)
+    if not _DB: return None
+    h = ring_match(_DB, ring)
+    if h is None: return None
+    db = _DB
     hexc = lambda c: int(c[0]) << 16 | int(c[1]) << 8 | int(c[2])
     return hexc(db['rgb'][h]), hexc(db['rgb2'][h]) if db['share2'][h] else 0, int(db['share2'][h]), int(db['flags'][h])
 
