@@ -60,7 +60,8 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.tiles` | the tile streamer (advanced) |
 | `city.on(event, fn)` | `'frame'` `(dt, t)`, `'view'` `(view)`, `'tile:load'` / `'tile:unload'` `(tile)`, `'weather'` `(weather)`, `'player'` `(player)`; returns an unsubscribe function |
 | `city.requestRender()`, `city.animate()` | see above |
-| `city.ui.addButton({ label, title, icon, onClick, panel })` | a toolbar button at the top right; with `panel: true`, `.panel` is a popover element you fill |
+| `city.ui.addButton({ label, title, icon, onClick, panel })` | a toolbar button at the top right (a dock at the bottom on phones); with `panel: true`, `.panel` is a popover element you fill (a bottom sheet on phones); `.set({ icon, label })` relabels it |
+| `city.ui.sheet(el, close)`, `.closeAll()`, `.onCloseAll(fn)`, `.compact` | your own panel behaving like the toolbar's (close button, drag down to close on phones; only one open at a time); `compact` is true in the phone layout (`html.compact` in CSS) |
 | `city.ui.toast(text)` | a short message |
 | `city.traffic` | the simulated cars, from the life plugin (see below); `undefined` without it |
 

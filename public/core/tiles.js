@@ -6,7 +6,9 @@ import { FAMILY } from './materials.js'
 
 const SIZES = [1024, 4096]
 const DETAIL_ZOOM = 0.11 // camera.zoom from which detail tiles load (a 1 km tile is ~700 px wide)
-const MAX_CACHED = [80, 48]
+// tiles kept off screen (detail, overview) for coming back: a detail tile is ~4 MB of geometry, held twice (JS and
+// GPU), so phones keep fewer (a 3 GB iPhone's tab is killed somewhere past 1 GB)
+const MAX_CACHED = matchMedia('(pointer: coarse)').matches ? [24, 16] : [80, 48]
 const WORKERS = Math.min(4, Math.max(2, (navigator.hardwareConcurrency || 4) - 2))
 
 export class Tiles {

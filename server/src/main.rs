@@ -1,10 +1,12 @@
 //! vancouver-live: visitor counts, multiplayer presence and chat for vancouver.borodutch.com.
-//! Env: PORT (8080), DATA (/data/live.db), MAX_PER_IP (8), ORIGINS (space-separated allowed page origins).
+//! Env: PORT (8080), DATA (/data/live.db), MAX_PER_IP (8), ORIGINS (space-separated allowed page origins),
+//! HOLD (comma-separated usernames only their owners from before usernames can take back, e.g. "borodutch").
 #[tokio::main]
 async fn main() {
     let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
     let cfg = vancouver_live::Config {
         db: env("DATA", "/data/live.db"),
+        hold: env("HOLD", "").split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect(),
         max_per_ip: env("MAX_PER_IP", "8").parse().expect("MAX_PER_IP"),
         origins: env("ORIGINS", vancouver_live::ORIGINS).split_whitespace().map(String::from).collect(),
     };

@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0b1016">
 <title>Vancouver in code</title>
 <meta name="description" content="An isometric Vancouver drawn entirely in code from OpenStreetMap: every building, street, marina and tree from Stanley Park to Queen Elizabeth Park.">
 <meta property="og:type" content="website">
@@ -18,22 +19,28 @@
 <meta name="twitter:description" content="An isometric Vancouver drawn entirely in code from OpenStreetMap.">
 <meta name="twitter:image" content="https://vancouver.borodutch.com/og.jpg">
 <style>
-  :root { --panel: rgba(11, 16, 22, 0.78); --line: rgba(255, 255, 255, 0.12); --text: #e3eaf0; --muted: #93a3b5; --accent: #7fc4e8; }
-  html, body { margin: 0; height: 100%; background: #0b1016; overflow: hidden; font: 13px/1.45 system-ui, -apple-system, sans-serif; color: var(--text); }
+  :root { --panel: rgba(11, 16, 22, 0.78); --line: rgba(255, 255, 255, 0.12); --text: #e3eaf0; --muted: #93a3b5; --accent: #7fc4e8;
+    /* the edges UI keeps clear of: 12 px, or the notch / home indicator when that is more */
+    --st: max(12px, env(safe-area-inset-top)); --sr: max(12px, env(safe-area-inset-right)); --sb: max(12px, env(safe-area-inset-bottom)); --sl: max(12px, env(safe-area-inset-left));
+    --vv-h: 100%; --vv-top: 0px; /* the part of the page the on-screen keyboard leaves (see the script below) */ }
+  html, body { margin: 0; height: 100%; background: #0b1016; overflow: hidden; overscroll-behavior: none; font: 13px/1.45 system-ui, -apple-system, sans-serif; color: var(--text); -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  body { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+  input, textarea, .selectable { user-select: text; -webkit-user-select: text; }
+  button { touch-action: manipulation; }
   canvas { display: block; width: 100%; height: 100%; touch-action: none; }
   a { color: var(--accent); }
   .panel { position: fixed; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
-  #bar { left: 12px; top: 12px; display: flex; align-items: center; gap: 4px; padding: 4px 4px 4px 12px; z-index: 20; }
-  #bar h1 { margin: 0 6px 0 0; font-size: 14px; font-weight: 650; letter-spacing: .01em; }
+  #bar { left: var(--sl); top: var(--st); display: flex; align-items: center; gap: 4px; padding: 4px 4px 4px 12px; z-index: 20; max-width: calc(100% - var(--sl) - var(--sr)); box-sizing: border-box; }
+  #bar h1 { margin: 0 6px 0 0; font-size: 14px; font-weight: 650; letter-spacing: .01em; white-space: nowrap; }
   #bar button { font: inherit; color: var(--text); background: none; border: 0; border-radius: 7px; padding: 6px 10px; cursor: pointer; }
   #bar button:hover, #bar button[aria-expanded="true"] { background: rgba(255, 255, 255, 0.1); }
-  #about { left: 12px; top: 58px; width: min(340px, calc(100% - 24px)); max-height: calc(100% - 140px); overflow-y: auto; padding: 14px 16px; z-index: 20; }
+  #about { left: var(--sl); top: calc(var(--st) + 46px); width: min(340px, calc(100% - 24px)); max-height: calc(100% - 140px); overflow-y: auto; padding: 14px 16px; z-index: 20; box-sizing: border-box; }
   #about[hidden] { display: none; }
   #about p { margin: 0 0 10px; color: var(--muted); }
   #about p:first-child { color: var(--text); }
   #about h2 { margin: 12px 0 6px; font-size: 10.5px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
   #about ul { margin: 0; padding-left: 16px; color: var(--muted); }
-  #hint { right: 12px; bottom: 12px; padding: 7px 11px; color: var(--muted); }
+  #hint { right: var(--sr); bottom: var(--sb); padding: 7px 11px; color: var(--muted); }
   /* loading: a centred card with a progress bar, then fades out */
   #loading { position: fixed; inset: 0; display: grid; place-items: center; z-index: 30; background: #0b1016; transition: opacity .5s; }
   #loading.done { opacity: 0; pointer-events: none; }
@@ -43,24 +50,56 @@
   #loading .track { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
   #loading .fill { height: 100%; width: 0; background: var(--accent); border-radius: 2px; transition: width .25s; }
   #loading.error .fill { background: #e8857f; }
-  .lofi { --lofi-bottom: 12px; }
-  #tools { right: 12px; top: 12px; display: flex; gap: 2px; padding: 4px; z-index: 20; }
+  .lofi { --lofi-bottom: var(--sb); --lofi-left: var(--sl); }
+  #tools { right: var(--sr); top: var(--st); display: flex; gap: 2px; padding: 4px; z-index: 20; }
   #tools[hidden], .tool-panel[hidden] { display: none; }
-  #tools button { font: inherit; color: var(--text); background: none; border: 0; border-radius: 7px; padding: 6px 10px; cursor: pointer; white-space: nowrap; }
+  #tools button { font: inherit; color: var(--text); background: none; border: 0; border-radius: 7px; padding: 6px 10px; cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; }
   #tools button:hover, #tools button[aria-expanded="true"], #tools button[aria-pressed="true"] { background: rgba(255, 255, 255, 0.1); }
-  .tool-panel { z-index: 21; padding: 12px 14px; width: min(300px, calc(100% - 24px)); max-height: calc(100% - 120px); overflow-y: auto; }
-  .toast { left: 50%; top: 64px; transform: translateX(-50%); padding: 8px 14px; z-index: 40; }
-  @media (max-width: 600px) { #hint { display: none } #credits { bottom: 58px !important; left: 12px !important; right: auto !important; transform: none !important; max-width: calc(100% - 24px); flex-wrap: wrap; } }
+  #tools .ic:empty { display: none; }
+  .tool-panel { z-index: 21; padding: 12px 14px; width: min(300px, calc(100% - 24px)); max-height: calc(100% - 120px); overflow-y: auto; box-sizing: border-box; }
+  .sheet-x, .sheet-grip { display: none; }
+  .toast { left: 50%; top: calc(var(--st) + 52px); transform: translateX(-50%); padding: 8px 14px; z-index: 40; max-width: calc(100% - 48px); box-sizing: border-box; text-align: center; }
+  #credits { bottom: var(--sb) !important; }
+
+  /* ---------- phones (html.compact: narrow, or a touch screen in landscape): the toolbar becomes a dock at the
+     bottom, panels become bottom sheets with a handle, everything clears the notch and the home indicator ---------- */
+  .compact #hint { display: none; }
+  .compact #bar { padding: 0 0 0 12px; height: 44px; }
+  .compact #bar h1 { font-size: 13.5px; }
+  .compact #bar button { min-height: 44px; min-width: 44px; padding: 0 12px; }
+  .compact #tools { top: auto; left: var(--sl); right: var(--sr); bottom: var(--sb); padding: 3px; gap: 0; justify-content: space-around; overflow-x: auto; scrollbar-width: none; border-radius: 14px; }
+  .compact #tools::-webkit-scrollbar { display: none; }
+  .compact #tools button { flex: 1 0 58px; flex-direction: column; gap: 1px; min-height: 50px; padding: 4px 2px 3px; font-size: 11px; line-height: 1.1; border-radius: 11px; position: relative; }
+  .compact #tools .ic { font-size: 19px; line-height: 22px; }
+  .compact #tools .live-badge { position: absolute; top: 3px; left: calc(50% + 6px); margin: 0; }
+  .compact .lofi { --lofi-bottom: calc(var(--sb) + 64px); }
+  .compact #credits { left: var(--sl) !important; right: auto !important; top: calc(var(--st) + 50px) !important; bottom: auto !important; transform: none !important; max-width: calc(100% - var(--sl) - var(--sr)) !important; flex-wrap: wrap; row-gap: 0; background: none !important; border: 0 !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; padding: 0 2px !important; font-size: 10.5px !important; color: rgba(227, 234, 240, .78) !important; text-shadow: 0 1px 2px rgba(0, 0, 0, .8); pointer-events: auto; }
+  .toast { pointer-events: none; }
+  .compact .toast { top: calc(var(--st) + 56px); }
+  .compact body.dlv-picking .toast { top: calc(var(--st) + 116px); }
+  .compact body.dlv-on .toast { top: auto; bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 170px); }
+  .compact .tool-panel, .compact #about { left: 0; right: 0; top: auto !important; bottom: 0; width: auto; max-height: calc(var(--vv-h) - var(--st) - 52px); border-radius: 16px 16px 0 0; border-width: 1px 0 0; padding: 42px max(16px, env(safe-area-inset-right)) calc(14px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); z-index: 27; background: rgba(13, 19, 26, .92); overscroll-behavior: contain; font-size: 14px; animation: sheet-in .22s ease-out; }
+  .compact .sheet-grip { display: block; position: absolute; left: 0; right: 0; top: 0; height: 34px; touch-action: none; cursor: grab; z-index: 1; }
+  .compact .sheet-grip::before { content: ''; position: absolute; left: 50%; top: 8px; width: 38px; height: 5px; margin-left: -19px; border-radius: 3px; background: rgba(255, 255, 255, .28); }
+  .compact .sheet-x { display: grid; place-items: center; position: absolute; right: max(4px, env(safe-area-inset-right)); top: 0; width: 44px; height: 44px; padding: 0; border: 0; background: none; color: var(--muted); font: 22px/1 system-ui, sans-serif; cursor: pointer; z-index: 2; }
+  .compact #about a { display: inline-block; padding: 3px 0; }
+  .compact .tool-panel button, .compact .tool-panel input[type=range], .compact .tool-panel label, .compact .tool-panel input[type=datetime-local] { min-height: 44px; box-sizing: border-box; }
+  .compact .tool-panel input[type=checkbox] { width: 20px; height: 20px; margin: 0 4px 0 0; accent-color: var(--accent); }
+  .compact input, .compact select, .compact textarea { font-size: 16px !important; } /* iOS zooms into smaller inputs */
+  @media (orientation: landscape) { .compact .tool-panel, .compact #about { width: min(600px, 100%); margin: 0 auto; border-width: 1px 1px 0; } }
+  body.sheet-dragging .tool-panel, body.sheet-dragging #about, body.sheet-dragging .sheet { transition: none !important; animation: none !important; }
+  @keyframes sheet-in { from { transform: translateY(40px); opacity: .4 } to { transform: none; opacity: 1 } }
+  @media (prefers-reduced-motion: reduce) { .compact .tool-panel, .compact #about { animation: none } }
 </style>
 <script type="importmap">{ "imports": { "three": "./vendor/three.module.min.js" } }</script>
 </head>
 <body>
 <canvas></canvas>
 <div id="bar" class="panel"><h1>Vancouver in code</h1><button id="aboutBtn" aria-expanded="false" aria-controls="about">About</button></div>
-<div id="about" class="panel" hidden>
+<div id="about" class="panel" hidden role="dialog" aria-label="About"><button type="button" class="sheet-x" aria-label="Close">×</button>
   <p>Vancouver drawn entirely in code: every building, street, tree and boat comes from open data and is rendered live in your browser with three.js.</p>
   <p>Inspired by <a href="https://vancouver.isoworld.xyz/">isoworld's Isometric Vancouver</a>, a hand-guided illustration of the city.</p>
-  <p>Drag to pan, scroll or pinch to zoom, right-drag to turn. The link in the address bar keeps your view.</p>
+  <p>Drag to pan, scroll or pinch to zoom, right-drag (or twist two fingers) to turn, two fingers up or down to tilt. The link in the address bar keeps your view.</p>
   <h2>Data</h2>
   <ul>
     <li>Streets, buildings, parks: © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a> (ODbL)</li>
@@ -74,9 +113,25 @@
 <div id="hint" class="panel" hidden>Drag to pan · scroll to zoom · right-drag to turn</div>
 <div id="loading" role="status" aria-live="polite"><div class="card"><div class="title">Vancouver in code</div><div class="step">Loading…</div><div class="track"><div class="fill"></div></div></div></div>
 <script>
+  // phones: html.compact (narrow, or a touch screen in landscape) switches the layout, see the CSS above
+  const compact = () => document.documentElement.classList.toggle('compact', innerWidth <= 600 || (matchMedia('(pointer: coarse)').matches && innerHeight <= 500))
+  compact(); addEventListener('resize', compact)
+  // the on-screen keyboard: --vv-h / --vv-top are the visible part of the page, so sheets with an input keep it in view
+  const vv = window.visualViewport
+  if (vv) {
+    const fit = () => {
+      const r = document.documentElement
+      r.style.setProperty('--vv-h', `${vv.height}px`); r.style.setProperty('--vv-top', `${vv.offsetTop}px`)
+      r.classList.toggle('kb', vv.height < innerHeight * 0.75) // html.kb: the keyboard is up
+    }
+    vv.addEventListener('resize', fit); vv.addEventListener('scroll', fit); fit()
+  }
+  // no page zoom on iOS (it ignores user-scalable=no): pinches belong to the map
+  for (const e of ['gesturestart', 'gesturechange']) document.addEventListener(e, (ev) => ev.preventDefault(), { passive: false })
   // the About toggle works before the city has loaded
   const aboutBtn = document.getElementById('aboutBtn'), about = document.getElementById('about')
   aboutBtn.onclick = () => { about.hidden = !about.hidden; aboutBtn.setAttribute('aria-expanded', String(!about.hidden)) }
+  about.querySelector('.sheet-x').onclick = () => aboutBtn.click()
 </script>
 <script type="module" src="main.js"></script>
 </body>

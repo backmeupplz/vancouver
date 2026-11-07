@@ -314,6 +314,8 @@ export default function drive(city) {
     splash() { if (!audio()) return; const t = ac.currentTime; tone(320, t, 0.3, 0.04, 'triangle'); tone(240, t + 0.05, 0.3, 0.03, 'triangle') },
     horn() { if (!audio()) return; const t = ac.currentTime; tone(523, t, 0.16, 0.05, 'square'); tone(523, t + 0.2, 0.18, 0.05, 'square'); tone(659, t, 0.16, 0.03, 'square'); tone(659, t + 0.2, 0.18, 0.03, 'square') },
   }
+  // haptics where the phone has them (Android; iOS Safari has no navigator.vibrate)
+  const buzz = (p) => { try { navigator.vibrate?.(p) } catch {} }
   function setMuted(m) { muted = m; try { localStorage.setItem('delivery.muted', m ? '1' : '0') } catch {}; if (ac) ac.out.gain.value = m ? 0 : 1; ui.mute.textContent = m ? 'Sound off' : 'Sound on' }
 
   // ================================================================ HUD
@@ -323,7 +325,7 @@ export default function drive(city) {
     const css = document.createElement('style')
     css.textContent = `
       .dlv { position: fixed; z-index: 25; font: 13px/1.35 system-ui, -apple-system, sans-serif; color: #fdf6ea; pointer-events: none; }
-      .dlv[hidden] { display: none }
+      .dlv[hidden] { display: none !important }
       .dlv.card, .dlv .card { background: rgba(38, 30, 28, 0.62); border: 1px solid rgba(255, 236, 214, 0.16); border-radius: 14px; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); box-shadow: 0 6px 22px rgba(0,0,0,.18); }
       .dlv button { pointer-events: auto; font: inherit; color: inherit; background: rgba(38, 30, 28, 0.62); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border: 1px solid rgba(255,236,214,.18); border-radius: 9px; padding: 5px 10px; cursor: pointer; }
       .dlv button:hover { background: rgba(70, 56, 52, 0.75) }
@@ -366,6 +368,7 @@ export default function drive(city) {
       body.dlv-on.dlv-touchy #credits { display: none !important }
       body.dlv-on #bar, body.dlv-on #hint, body.dlv-on #about, body.dlv-on #tools, body.dlv-on .tool-panel { display: none !important }
       body.dlv-on.dlv-touchy .lofi { left: 50% !important; transform: translateX(-50%); bottom: 168px !important; }
+      .dlv-touch button { -webkit-touch-callout: none; }
       .dlv-menu { display: grid; gap: 6px; }
       .dlv-menu button { display: flex; gap: 10px; align-items: center; text-align: left; font: inherit; color: var(--text); background: rgba(255,255,255,.05); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
       .dlv-menu button:hover { background: rgba(255,255,255,.12) }
@@ -376,12 +379,43 @@ export default function drive(city) {
         .dlv-btns .opt { display: none }
         .dlv-job .where, .dlv-job .sub, .dlv-job .what { max-width: 250px }
         .dlv-pick { font-size: 13px; white-space: nowrap; top: 64px }
+      }
+      /* phones (html.compact): one row at the top (shift or speed | chat, map), the job card under it, the pedals
+         in the bottom corners clear of the notch and the home indicator, the music between them */
+      .compact .dlv-co { left: var(--sl); top: var(--st); padding: 5px 11px; min-height: 44px; box-sizing: border-box; }
+      .compact .dlv-co .name { font-size: 10.5px } .compact .dlv-co .stats { gap: 10px; margin-top: 1px }
+      .compact .dlv-co .credit { display: none }
+      .compact .dlv-read { left: var(--sl); top: var(--st); height: 44px; display: flex; align-items: center; gap: 4px; box-sizing: border-box; padding: 0 12px; font-size: 13px; max-width: calc(100% - var(--sl) - var(--sr) - 146px); }
+      .compact .dlv-btns { right: var(--sr); top: var(--st); }
+      .compact .dlv-btns .opt, .dlv-btns .short, .compact .dlv-btns .long { display: none }
+      .compact .dlv-btns .short { display: inline }
+      .compact .dlv-btns [data-exit] { width: 78px; height: 44px; padding: 0; border-radius: 12px; }
+      .compact .dlv-job { top: calc(var(--st) + 52px); left: var(--sl); right: var(--sr); transform: none; width: auto; max-width: 460px; padding: 8px 12px 8px 8px; gap: 10px; }
+      .compact .dlv-job > div:last-child { min-width: 0; flex: 1 }
+      .compact .dlv-job .where, .compact .dlv-job .sub, .compact .dlv-job .what { max-width: none }
+      .compact .dlv-job .where { font-size: 15px }
+      .compact .dlv-arrow { width: 46px; height: 46px; }
+      .compact .dlv-pick { top: calc(var(--st) + 52px); left: var(--sl); right: var(--sr); transform: none; justify-content: space-between; white-space: normal; font-size: 14px; }
+      .compact .dlv-pick button { min-height: 44px; padding: 0 14px; flex: none; }
+      .compact .dlv-pop { max-width: calc(100% - 48px); box-sizing: border-box; }
+      .compact .dlv-touch { --pb: max(16px, calc(env(safe-area-inset-bottom) + 4px)); height: auto; top: 0; }
+      .compact .dlv-touch button { bottom: var(--pb); }
+      .compact .dlv-touch .l { left: var(--sl) } .compact .dlv-touch .r { left: calc(var(--sl) + 84px) }
+      .compact .dlv-touch .gas { right: var(--sr) } .compact .dlv-touch .brk { right: calc(var(--sr) + 86px); bottom: var(--pb) }
+      .compact .dlv-touch .act { right: var(--sr); bottom: calc(var(--pb) + 112px); height: 44px; border-radius: 22px; }
+      .compact body.dlv-on .lofi { padding: 0 } .compact body.dlv-on .lofi-name, .compact body.dlv-on .lofi canvas { display: none }
+      .compact body.dlv-on.dlv-touchy .lofi { bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 112px) !important; }
+      @media (orientation: landscape) {
+        .compact .dlv-job { max-width: min(420px, 50%); }
+        .compact .dlv-touch .act { bottom: calc(var(--pb) + 112px); }
+        .compact body.dlv-on .lofi { padding: 0 } .compact body.dlv-on .lofi-name, .compact body.dlv-on .lofi canvas { display: none }
+      .compact body.dlv-on.dlv-touchy .lofi { bottom: max(16px, calc(env(safe-area-inset-bottom) + 4px)) !important; }
       }`
     document.head.append(css)
     const el = (cls, html) => { const d = document.createElement('div'); d.className = cls; d.innerHTML = html; d.hidden = true; document.body.append(d); return d }
     const co = el('dlv dlv-co card', `<div class="name">Salmonberry Parcel Co.</div>
       <div class="stats"><span><b data-n>0</b> delivered</span><span><b data-m>$0.00</b></span><span data-c></span></div><div class="credit">Streets © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors</div>`)
-    const btns = el('dlv dlv-btns', '<button class="opt" data-assist title="Gently lines the van up with the road (G)">Assist on</button><button class="opt" data-mute title="Sound (M)">Sound on</button><button data-exit title="Back to the map (Esc)">Back to map</button>')
+    const btns = el('dlv dlv-btns', '<button class="opt" data-assist title="Gently lines the van up with the road (G)">Assist on</button><button class="opt" data-mute title="Sound (M)">Sound on</button><button data-exit title="Back to the map (Esc)" aria-label="Back to the map"><span class="long">Back to map</span><span class="short">‹ Map</span></button>')
     const read = el('dlv dlv-read card', '')
     const job = el('dlv dlv-job card', `<div class="dlv-arrow"><div class="n">N</div><svg viewBox="0 0 30 30"><path d="M15 3 L25 25 L15 20 L5 25 Z" fill="#ffc9b5" stroke="#3a2a26" stroke-width="1.5" stroke-linejoin="round"/></svg></div>
       <div><div class="what" data-w></div><div class="where" data-p></div><div class="sub" data-s></div><div class="meta"><span data-d></span><span data-t></span></div></div>`)
@@ -397,7 +431,7 @@ export default function drive(city) {
   }
   const touchState = { left: false, right: false, gas: false, brake: false }
   for (const b of ui.touch.querySelectorAll('[data-k]')) {
-    const k = b.dataset.k, set = (on) => (e) => { e.preventDefault(); touchState[k] = on; b.classList.toggle('on', on); if (on) audio() }
+    const k = b.dataset.k, set = (on) => (e) => { e.preventDefault(); if (on && !touchState[k]) buzz(6); touchState[k] = on; b.classList.toggle('on', on); if (on) audio() }
     b.addEventListener('pointerdown', (e) => { try { b.setPointerCapture(e.pointerId) } catch {} set(true)(e) })
     for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) b.addEventListener(ev, set(false))
     b.addEventListener('contextmenu', (e) => e.preventDefault())
@@ -437,7 +471,7 @@ export default function drive(city) {
   const button = city.ui.addButton({ label: 'Drive', icon: '🚐', title: 'Explore the streets by van or on foot, or deliver parcels (D)', panel: true })
   button.panel.innerHTML = `<div class="dlv-menu">
     <button data-m="car"><span>🚐</span><div>Explore by van<small>Drive anywhere, no jobs</small></div></button>
-    <button data-m="foot"><span>🚶</span><div>Explore on foot<small>Walk the sidewalks; E gets in the van</small></div></button>
+    <button data-m="foot"><span>🚶</span><div>Explore on foot<small>Walk the sidewalks; ${touchy ? 'hop' : 'E gets'} in the van</small></div></button>
     <button data-m="deliver"><span>📦</span><div>Deliveries<small>Parcels to real streets nearby, a compass, tips</small></div></button></div>`
   for (const b of button.panel.querySelectorAll('[data-m]')) b.addEventListener('click', () => { button.panel.hidden = true; button.button.setAttribute('aria-expanded', 'false'); startPick(b.dataset.m) })
 
@@ -728,6 +762,7 @@ export default function drive(city) {
     if (impact < 0.8 || performance.now() - P.bumpT < 350) return
     P.bumpT = performance.now()
     sfx.bump(clamp(impact / 9, 0.25, 1))
+    buzz(Math.round(clamp(impact * 7, 15, 70)))
     shake = Math.min(0.55, 0.08 + impact * 0.05)
     if (job && impact > 2) job.bumps++
     fn?.()
@@ -1016,7 +1051,7 @@ export default function drive(city) {
   }
   function arrive() {
     if (job.stage === 'pickup') {
-      sfx.pickup()
+      sfx.pickup(); buzz(30)
       job.stage = 'drop'; job.bumps = 0
       popup('Picked up!', `${job.item[0].toUpperCase()}${job.item.slice(1)} for ${job.to.who}`)
       setTarget()
@@ -1027,7 +1062,7 @@ export default function drive(city) {
     const base = 6 + (job.dist / 1000) * 5, tip = Math.max(1, (left > 0 ? 3 + 7 * (left / job.limit) : 1.5) - job.bumps * 0.6)
     const pay = Math.round((base + tip) * 100) / 100
     shift.n++; shift.money += pay
-    sfx.deliver()
+    sfx.deliver(); buzz([30, 70, 30, 70, 60])
     popup(`+$${pay.toFixed(2)}`, `${job.to.who.split(' ')[0]}: ${pick(THANKS)} (tip $${tip.toFixed(2)})`)
     job = null
     hideMarkers()

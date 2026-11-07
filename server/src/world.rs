@@ -5,21 +5,32 @@
 //! of the traffic (10 Hz per player, to every player nearby): a state is 18 bytes and a snapshot
 //! entry 21, against ~90 bytes as JSON. Everything rare (hello, chat, blocks, roster) is small JSON.
 //!
+//! Identity: every browser is a UUID v4, kept as a signed token in its localStorage (`uuid.hmac`). Ids from
+//! before UUIDs (16 hex digits) are still accepted and become a UUID derived from them (`legacy_uuid`), and
+//! their blocks were moved over when the server started. A user has a placeholder name ("Heron 44", made from
+//! the UUID, `chosen: false`, not unique) until they choose a username (unique, see text::name_key; kept in
+//! SQLite; changeable once a minute, the old name is free again at once). Someone from before usernames gets
+//! the name their browser had back when they reconnect (first come, first served; HOLD names only that way).
+//!
 //! client → server
-//!   text   {"t":"hello","token"?,"name","colour"}        first message, within 10 s
-//!   text   {"t":"name","name","colour"}
+//!   text   {"t":"hello","token"?,"colour","name"?}       first message, within 10 s; name only counts with a
+//!                                                          token from before UUIDs: the name that browser had
+//!   text   {"t":"name","name"?,"colour"?}                choose a username and/or a colour
+//!   text   {"t":"check","name"}                          is this username free? (debounce it: ≤ 4/s)
 //!   text   {"t":"chat","ch":"g"|"n","text"}              global, or players within 1.5 km
 //!   text   {"t":"block","id"} / {"t":"unblock","id"}
 //!   binary [1][mode u8: 0 stopped, 1 car, 2 foot][x f32][y f32][z f32][heading i16 ×1e4][speed i16 ×100]   ≤ 10 Hz while playing
 //! server → client
-//!   text   {"t":"welcome","s","id","token","name","colour","blocks":[id],"players":[{s,id,name,colour}],"chat":[…],"stats"}
-//!   text   {"t":"join","s","id","name","colour"} / {"t":"leave","s"}   players starting / stopping (or renamed)
-//!   text   {"t":"chat","ch","id","name","colour","text","ts"} / {"t":"you","name","colour"} / {"t":"stats",…} / {"t":"error","msg"}
-//!   binary [1][n u16] n × [slot u32][x f32][y f32][z f32][heading i16][speed i16][mode u8]   10 Hz: players within 1.5 km, nearest 64
+//!   text   {"t":"welcome","s","id","token","name","chosen","colour","blocks":[id],"players":[{s,id,name,chosen,colour}],"chat":[…],"stats"}
+//!   text   {"t":"join","s","id","name","chosen","colour"} / {"t":"leave","s"}   players starting / stopping (or renamed)
+//!   text   {"t":"chat","ch","id","name","chosen","colour","text","ts"} / {"t":"you","name","chosen","colour"} / {"t":"stats",…}
+//!   text   {"t":"check","name","why":"ok"|"yours"|"taken"|"invalid"|"short"|"long"|"reserved"}   the answer to a check
+//!   text   {"t":"error","msg","about"?:"name","why"?,"wait"?}   (a refused username: why as above, or "wait" seconds)
+//!   binary [1][n u16] n × [slot u32][x f32][y f32][z f32][heading i16][speed i16][mode u8]   10 Hz: players within 1.5 km, nearest 256
 //!   binary [2][n u16] n × [slot u32][x f32][z f32][mode u8]                                  every 2 s: every player, for the map
 //! All numbers little-endian; x east, z south, y up, metres (three.js world of the page).
-use crate::db::{Db, Stats};
-use crate::text::{clean_colour, clean_name, clean_text};
+use crate::db::{Claim, Db, Stats};
+use crate::text::{clean_colour, clean_text, name_key, username};
 use axum::body::Bytes;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
@@ -33,7 +44,7 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 
 pub const TICK: Duration = Duration::from_millis(100);
 pub const NEAR: f32 = 1500.0; // metres: players this close get each other's positions 10 times a second
-const MAX_NEAR: usize = 64; // at most this many in one snapshot (the nearest)
+const MAX_NEAR: usize = 256; // live positions for the nearest this many; everyone else still shows on the map (2 s list)
 const COARSE_TICKS: u64 = 20; // the map list every 2 s
 const STATS_TICKS: u64 = 300; // visitor counts every 30 s, or every 5 s while the number online changes
 const STALE: Duration = Duration::from_secs(10); // a player silent this long has stopped
@@ -41,7 +52,7 @@ const HELLO_WITHIN: Duration = Duration::from_secs(10);
 const HISTORY: usize = 30; // global lines a newcomer gets
 pub const CHAT_MAX: usize = 200; // characters
 const MAX_BLOCKS: usize = 1000;
-const MAX_TOTAL: usize = 5000; // connections
+const MAX_TOTAL: usize = 60_000; // connections (abuse guard only; the map list counts in u16)
 /// The map's extent with a few km to spare (the Lower Mainland: lat 48.99–49.48, lon -123.33 to -122.40)
 pub const EXTENT: [f32; 6] = [-19_500.0, 55_000.0, -25_000.0, 36_000.0, -100.0, 2_500.0]; // x0 x1 z0 z1 y0 y1
 
@@ -119,8 +130,9 @@ pub struct Client {
     pub kill: Arc<AtomicBool>,
     ip: u64,
     since: Instant,
-    pub id: Option<String>, // set by hello
+    pub id: Option<String>, // set by hello: a UUID
     pub name: String,
+    pub chosen: bool, // the name is a username they chose (else a placeholder)
     colour: String,
     pub blocks: HashSet<String>,
     pub state: Option<State>,
@@ -130,6 +142,7 @@ pub struct Client {
     states: Bucket,
     chats: Bucket,
     names: Bucket,
+    checks: Bucket,
     blocking: Bucket,
     teleports: Bucket,
     strikes: u32,
@@ -162,8 +175,9 @@ fn hidden(a: &Client, b: &Client) -> bool {
 #[derive(Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum In {
-    Hello { token: Option<String>, name: String, colour: String },
-    Name { name: String, colour: String },
+    Hello { token: Option<String>, #[serde(default)] colour: String, name: Option<String> },
+    Name { name: Option<String>, colour: Option<String> },
+    Check { name: String },
     Chat { ch: String, text: String },
     Block { id: String },
     Unblock { id: String },
@@ -181,6 +195,9 @@ pub struct World {
     history: VecDeque<Line>,
     per_ip: HashMap<u64, usize>,
     pub max_per_ip: usize,
+    /// name keys (text::name_key) that only someone from before usernames can take back, by coming back with
+    /// their old token and that name (HOLD env): so a known name can't be grabbed while its owner is away
+    pub hold: HashSet<String>,
     db: Db,
     secret: [u8; 32],
     stats: Option<(Stats, Instant)>,
@@ -199,7 +216,12 @@ fn hex(b: &[u8]) -> String {
 impl World {
     pub fn new(db: Db, max_per_ip: usize) -> World {
         let secret = db.secret().expect("reading the token secret");
-        World { clients: HashMap::new(), next: 1, ticks: 0, history: VecDeque::new(), per_ip: HashMap::new(), max_per_ip, db, secret, stats: None, coarse_empty: true, sent_now: 0 }
+        match db.migrate_ids(|old| legacy_uuid(&secret, old)) {
+            Ok(0) => {}
+            Ok(n) => eprintln!("moved {n} blocks to UUIDs"),
+            Err(e) => eprintln!("moving blocks to UUIDs: {e}"),
+        }
+        World { clients: HashMap::new(), next: 1, ticks: 0, history: VecDeque::new(), per_ip: HashMap::new(), max_per_ip, hold: HashSet::new(), db, secret, stats: None, coarse_empty: true, sent_now: 0 }
     }
 
     // ------------------------------------------------------------------ identity tokens
@@ -208,18 +230,19 @@ impl World {
         m.update(id.as_bytes());
         m
     }
-    /// `id.signature`: the id is 16 random hex digits, the signature HMAC-SHA256 of it (first 16 bytes).
+    /// `id.signature`: the id is a UUID v4, the signature HMAC-SHA256 of it (first 16 bytes).
     pub fn token(&self, id: &str) -> String {
         format!("{id}.{}", hex(&self.mac(id).finalize().into_bytes()[..16]))
     }
-    /// The id a token carries, when it is ours.
+    /// The UUID a token carries, when it is ours (a token from before UUIDs gives its id's UUID).
     pub fn verify(&self, token: &str) -> Option<String> {
         let (id, sig) = token.split_once('.')?;
-        if !valid_id(id) || sig.len() != 32 {
+        if !(valid_id(id) || valid_legacy(id)) || sig.len() != 32 || !sig.is_ascii() {
             return None;
         }
         let bytes: Vec<u8> = (0..16).map(|i| u8::from_str_radix(&sig[i * 2..i * 2 + 2], 16)).collect::<Result<_, _>>().ok()?;
-        self.mac(id).verify_truncated_left(&bytes).ok().map(|_| id.to_string())
+        self.mac(id).verify_truncated_left(&bytes).ok()?;
+        Some(if valid_legacy(id) { legacy_uuid(&self.secret, id) } else { id.to_string() })
     }
 
     // ------------------------------------------------------------------ connections
@@ -250,6 +273,7 @@ impl World {
                 since: now,
                 id: None,
                 name: String::new(),
+                chosen: false,
                 colour: String::new(),
                 blocks: HashSet::new(),
                 state: None,
@@ -258,7 +282,8 @@ impl World {
                 msgs: b(30.0, 60.0),
                 states: b(12.0, 20.0),
                 chats: b(0.5, 4.0),
-                names: b(0.3, 3.0),
+                names: b(0.5, 6.0),
+                checks: b(4.0, 8.0),
                 blocking: b(5.0, 60.0),
                 teleports: b(0.1, 2.0),
                 strikes: 0,
@@ -314,10 +339,11 @@ impl World {
         let Ok(msg) = serde_json::from_str::<In>(raw) else { return self.strike(slot, now) };
         let hello = c.id.is_some();
         match msg {
-            In::Hello { token, name, colour } if !hello => self.hello(slot, token, &name, &colour),
+            In::Hello { token, colour, name } if !hello => self.hello(slot, token, &colour, name.as_deref()),
             _ if !hello => return self.strike(slot, now),
             In::Hello { .. } => return self.strike(slot, now),
-            In::Name { name, colour } => self.rename(slot, &name, &colour, now),
+            In::Name { name, colour } => self.rename(slot, name.as_deref(), colour.as_deref(), now),
+            In::Check { name } => return self.check_name(slot, &name, now),
             In::Chat { ch, text } => self.chat(slot, &ch, &text, now),
             In::Block { id } => return self.block(slot, &id, true, now),
             In::Unblock { id } => return self.block(slot, &id, false, now),
@@ -325,13 +351,29 @@ impl World {
         Ok(())
     }
 
-    fn hello(&mut self, slot: u32, token: Option<String>, name: &str, colour: &str) {
-        let id = token.and_then(|t| self.verify(&t)).unwrap_or_else(|| hex(&rand::random::<[u8; 8]>()));
+    fn hello(&mut self, slot: u32, token: Option<String>, colour: &str, name: Option<&str>) {
+        let legacy = token.as_deref().is_some_and(|t| t.split('.').next().is_some_and(valid_legacy));
+        let id = token.and_then(|t| self.verify(&t)).unwrap_or_else(new_uuid);
         let blocks: HashSet<String> = self.db.blocks(&id).unwrap_or_default().into_iter().collect();
+        let mut chosen = self.db.username(&id).unwrap_or_else(|e| {
+            eprintln!("reading a username: {e}");
+            None
+        });
+        // someone from before usernames comes back (a tab still running the old page reconnects at once after the
+        // deploy, and the new page sends the name it kept): the name they had becomes theirs, first come first
+        // served, held names included, unless it was only the old random placeholder
+        if chosen.is_none()
+            && legacy
+            && let Some(n) = name.and_then(|n| username(n).ok()).filter(|n| !generated(n))
+            && matches!(self.db.claim(&id, &n, &name_key(&n), unix()), Ok(Claim::Ok))
+        {
+            chosen = Some(n);
+        }
         let token = self.token(&id);
         let stats = self.stats();
         let c = self.clients.get_mut(&slot).unwrap();
-        c.name = clean_name(name).unwrap_or_else(|| format!("Guest {}", &id[..4]));
+        c.chosen = chosen.is_some();
+        c.name = chosen.unwrap_or_else(|| placeholder(&id));
         c.colour = clean_colour(colour).unwrap_or_else(|| "#f2a07e".into());
         c.id = Some(id.clone());
         c.blocks = blocks;
@@ -345,26 +387,97 @@ impl World {
             .collect();
         let mut blocks: Vec<&String> = c.blocks.iter().collect();
         blocks.sort();
-        c.json(&json!({ "t": "welcome", "s": slot, "id": id, "token": token, "name": c.name, "colour": c.colour, "blocks": blocks, "players": players, "chat": chat, "stats": stats }));
+        c.json(&json!({ "t": "welcome", "s": slot, "id": id, "token": token, "name": c.name, "chosen": c.chosen, "colour": c.colour, "blocks": blocks, "players": players, "chat": chat, "stats": stats }));
     }
 
-    fn rename(&mut self, slot: u32, name: &str, colour: &str, now: Instant) {
+    fn rename(&mut self, slot: u32, name: Option<&str>, colour: Option<&str>, now: Instant) {
         let c = self.clients.get_mut(&slot).unwrap();
         if !c.names.take(now) {
-            return c.json(&json!({ "t": "error", "msg": "Wait a moment before changing your name again." }));
+            return c.json(&json!({ "t": "error", "msg": "Wait a moment before changing that again." }));
         }
-        let Some(name) = clean_name(name) else {
-            return c.json(&json!({ "t": "error", "msg": "That name is not allowed: use 2–20 letters or digits." }));
-        };
-        c.name = name;
-        if let Some(col) = clean_colour(colour) {
+        let id = c.id.clone().unwrap();
+        let mut changed = false;
+        if let Some(col) = colour.and_then(clean_colour) {
+            changed |= c.colour != col;
             c.colour = col;
         }
-        c.json(&json!({ "t": "you", "name": c.name, "colour": c.colour }));
-        if c.state.is_some() {
-            let c = &self.clients[&slot];
-            self.broadcast_join(c);
+        if let Some(raw) = name.filter(|n| *n != c.name || !c.chosen) {
+            let refuse = |c: &Client, why: &str, wait: i64| {
+                let msg = match why {
+                    "taken" => "Someone already has that name (or one that looks just like it).".to_string(),
+                    "reserved" => "That name is reserved.".to_string(),
+                    "short" | "long" => "Use 3 to 20 characters.".to_string(),
+                    "wait" => format!("You can change your name again in {wait} s."),
+                    _ => "Use letters, digits, spaces and - _ . ' only.".to_string(),
+                };
+                c.json(&json!({ "t": "error", "about": "name", "why": why, "wait": wait, "msg": msg }));
+            };
+            let name = match username(raw) {
+                Ok(n) => n,
+                Err(why) => return refuse(c, why, 0),
+            };
+            if self.held(&name_key(&name)) {
+                return refuse(&self.clients[&slot], "reserved", 0);
+            }
+            match self.db.claim(&id, &name, &name_key(&name), unix()) {
+                Ok(Claim::Ok) => {}
+                Ok(Claim::Taken) => return refuse(&self.clients[&slot], "taken", 0),
+                Ok(Claim::Wait(s)) => return refuse(&self.clients[&slot], "wait", s),
+                Err(e) => {
+                    eprintln!("saving a username: {e}");
+                    return self.clients[&slot].json(&json!({ "t": "error", "msg": "Couldn't save that, try again." }));
+                }
+            }
+            // every tab of this browser takes the new name
+            let col = self.clients[&slot].colour.clone();
+            for o in self.clients.values_mut().filter(|o| o.id.as_deref() == Some(id.as_str())) {
+                o.name = name.clone();
+                o.chosen = true;
+                if o.slot == slot {
+                    o.colour = col.clone();
+                }
+            }
+            changed = true;
         }
+        let me: Vec<u32> = self.clients.values().filter(|o| o.id.as_deref() == Some(id.as_str())).map(|o| o.slot).collect();
+        for s in me {
+            let o = &self.clients[&s];
+            if s == slot || changed {
+                o.json(&json!({ "t": "you", "name": o.name, "chosen": o.chosen, "colour": o.colour }));
+            }
+            if changed && o.state.is_some() {
+                self.broadcast_join(o);
+            }
+        }
+    }
+
+    /// A held name nobody has taken back yet: not for anyone to choose (once its owner has it, it's simply taken).
+    fn held(&self, key: &str) -> bool {
+        self.hold.contains(key) && matches!(self.db.name_owner(key), Ok(None))
+    }
+
+    /// Is this username free for this client? Answers {"t":"check","name","why"}.
+    fn check_name(&mut self, slot: u32, raw: &str, now: Instant) -> Result<(), Kick> {
+        let c = self.clients.get_mut(&slot).ok_or("gone")?;
+        if !c.checks.take(now) || raw.len() > 200 {
+            return self.strike(slot, now);
+        }
+        let c = &self.clients[&slot];
+        let why = match username(raw) {
+            Err(why) => why,
+            Ok(name) => match self.db.name_owner(&name_key(&name)) {
+                Ok(Some(o)) if c.id.as_deref() == Some(o.as_str()) => "yours",
+                Ok(Some(_)) => "taken",
+                Ok(None) if self.hold.contains(&name_key(&name)) => "reserved",
+                Ok(None) => "ok",
+                Err(e) => {
+                    eprintln!("checking a username: {e}");
+                    "ok" // the claim decides
+                }
+            },
+        };
+        c.json(&json!({ "t": "check", "name": raw, "why": why }));
+        Ok(())
     }
 
     fn chat(&mut self, slot: u32, ch: &str, text: &str, now: Instant) {
@@ -385,7 +498,7 @@ impl World {
         c.last_chat = Some((text.clone(), now));
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         let c = &self.clients[&slot];
-        let line = json!({ "t": "chat", "ch": ch, "id": c.id, "name": c.name, "colour": c.colour, "text": text, "ts": ts }).to_string();
+        let line = json!({ "t": "chat", "ch": ch, "id": c.id, "name": c.name, "chosen": c.chosen, "colour": c.colour, "text": text, "ts": ts }).to_string();
         let me = c.state;
         for o in self.clients.values() {
             if o.id.is_none() || hidden(c, o) {
@@ -564,7 +677,7 @@ impl World {
     /// with blocks involved.
     // ponytail: O(clients × players) block check every 2 s; index blocks by id if it ever shows up in a profile
     fn coarse(&mut self) {
-        let players: Vec<&Client> = self.clients.values().filter(|c| c.state.is_some()).take(4000).collect();
+        let players: Vec<&Client> = self.clients.values().filter(|c| c.state.is_some()).collect();
         if players.is_empty() && self.coarse_empty {
             return;
         }
@@ -611,12 +724,58 @@ impl World {
     }
 }
 
+/// A UUID v4 in its usual lowercase form.
 fn valid_id(id: &str) -> bool {
+    let b = id.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, &c)| if matches!(i, 8 | 13 | 18 | 23) { c == b'-' } else { matches!(c, b'0'..=b'9' | b'a'..=b'f') })
+        && b[14] == b'4'
+        && matches!(b[19], b'8' | b'9' | b'a' | b'b')
+}
+
+/// An id from before UUIDs: 16 hex digits.
+fn valid_legacy(id: &str) -> bool {
     id.len() == 16 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// 16 random-looking bytes as a UUID v4 (version and variant bits set).
+fn uuid(mut b: [u8; 16]) -> String {
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h = hex(&b);
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
+pub fn new_uuid() -> String {
+    uuid(rand::random())
+}
+
+/// The UUID an id from before UUIDs became: HMAC of it, so it is the same on every replica and restart and
+/// can't be guessed from the old id without the server's secret.
+pub fn legacy_uuid(secret: &[u8; 32], old: &str) -> String {
+    let mut m = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+    m.update(b"legacy id:");
+    m.update(old.as_bytes());
+    uuid(m.finalize().into_bytes()[..16].try_into().unwrap())
+}
+
+const ANIMALS: [&str; 16] = ["Otter", "Heron", "Orca", "Raven", "Seal", "Salmon", "Eagle", "Beaver", "Cedar", "Crab", "Puffin", "Fern", "Moose", "Loon", "Marmot", "Hummingbird"];
+
+/// A name the server or the old page made up ("Heron 44", "Guest 3f2a"), not one someone chose.
+fn generated(name: &str) -> bool {
+    let Some((a, b)) = name.rsplit_once(' ') else { return false };
+    (ANIMALS.contains(&a) && b.len() == 2 && b.bytes().all(|c| c.is_ascii_digit())) || (a == "Guest" && b.len() == 4 && b.bytes().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// The name someone has until they choose one: an animal and a number from their UUID ("Heron 44").
+pub fn placeholder(id: &str) -> String {
+    let b = id.as_bytes();
+    let n = |i: usize| u8::from_str_radix(&id[i..i + 2], 16).unwrap_or(b[i % b.len()]) as usize;
+    format!("{} {}", ANIMALS[n(0) % ANIMALS.len()], 10 + n(2) % 90)
+}
+
 fn roster(c: &Client) -> Value {
-    json!({ "s": c.slot, "id": c.id, "name": c.name, "colour": c.colour })
+    json!({ "s": c.slot, "id": c.id, "name": c.name, "chosen": c.chosen, "colour": c.colour })
 }
 
 fn roster_msg(c: &Client) -> Value {
@@ -659,9 +818,12 @@ mod tests {
         fn join(&mut self, name: &str) -> C {
             let (tx, rx) = mpsc::channel(512);
             let (slot, _) = self.w.connect(tx, 7, self.now);
-            self.w.text(slot, &json!({ "t": "hello", "name": name, "colour": "#112233" }).to_string(), self.now).unwrap();
+            self.w.text(slot, &json!({ "t": "hello", "colour": "#112233" }).to_string(), self.now).unwrap();
+            self.w.text(slot, &json!({ "t": "name", "name": name }).to_string(), self.now).unwrap();
             let mut c = C { slot, rx };
-            assert_eq!(c.texts()[0]["t"], "welcome");
+            let m = c.texts();
+            assert_eq!(m[0]["t"], "welcome");
+            assert_eq!((&m[1]["t"], &m[1]["name"], &m[1]["chosen"]), (&json!("you"), &json!(name), &json!(true)));
             c
         }
         fn at(&mut self, c: &C, x: f32, z: f32) {
@@ -699,11 +861,184 @@ mod tests {
     #[test]
     fn tokens() {
         let t = T::new();
-        let tok = t.w.token("0123456789abcdef");
-        assert_eq!(t.w.verify(&tok).as_deref(), Some("0123456789abcdef"));
-        let forged = format!("fedcba9876543210{}", &tok[16..]);
-        assert_eq!(t.w.verify(&forged), None);
+        let id = new_uuid();
+        assert!(valid_id(&id), "{id}");
+        assert_ne!(id, new_uuid());
+        let tok = t.w.token(&id);
+        assert_eq!(t.w.verify(&tok).as_deref(), Some(id.as_str()));
+        let other = new_uuid();
+        assert_eq!(t.w.verify(&format!("{other}{}", &tok[36..])), None, "a signature is for one id only");
         assert_eq!(t.w.verify("nonsense"), None);
+        assert_eq!(t.w.verify(&format!("{id}.{}", "é".repeat(16))), None);
+        // a token from before UUIDs still works, as the same UUID every time
+        let old = t.w.token("0123456789abcdef");
+        let u = t.w.verify(&old).unwrap();
+        assert!(valid_id(&u) && u == legacy_uuid(&t.w.secret, "0123456789abcdef"), "{u}");
+        assert_eq!(t.w.verify(&format!("fedcba9876543210{}", &old[16..])), None);
+        assert!(!valid_id("0123456789abcdef") && !valid_id(&id.to_uppercase()));
+    }
+
+    #[test]
+    fn names_from_before_usernames_carry_over() {
+        let mut t = T::new();
+        t.w.hold = ["borodutch", "Kitsilano"].iter().map(|n| name_key(n)).collect();
+        let legacy = |t: &T, old: &str| {
+            let mut m = t.w.mac(old);
+            m.update(b"");
+            format!("{old}.{}", hex(&m.finalize().into_bytes()[..16]))
+        };
+        let hello = |t: &mut T, m: Value| {
+            let (tx, mut rx) = mpsc::channel(64);
+            let (slot, _) = t.w.connect(tx, 1, t.now);
+            t.w.text(slot, &m.to_string(), t.now).unwrap();
+            let Out::Text(w) = rx.try_recv().unwrap() else { panic!() };
+            (C { slot, rx }, serde_json::from_str::<Value>(&w).unwrap())
+        };
+        // a newcomer can't take a held name, nor send a name in hello
+        let (mut x, w) = hello(&mut t, json!({ "t": "hello", "name": "borodutch" }));
+        assert_eq!(w["chosen"], false);
+        t.w.text(x.slot, r#"{"t":"check","name":"BoroDutch"}"#, t.now).unwrap();
+        assert_eq!(x.texts()[0]["why"], "reserved");
+        t.w.text(x.slot, r#"{"t":"name","name":"borodutch"}"#, t.now).unwrap();
+        assert_eq!(x.texts()[0]["why"], "reserved");
+        // its owner from before comes back with the old token (an old tab reconnecting after the deploy): it's theirs
+        let tok = legacy(&t, "00000000000000aa");
+        let (_, w) = hello(&mut t, json!({ "t": "hello", "token": tok, "name": "borodutch", "colour": "#000000" }));
+        let owner = legacy_uuid(&t.w.secret, "00000000000000aa");
+        assert_eq!((&w["id"], &w["name"], &w["chosen"]), (&json!(owner), &json!("borodutch"), &json!(true)));
+        // and kept: the next visit (new token, no name sent) has it, nobody else can have it
+        let (_, w) = hello(&mut t, json!({ "t": "hello", "token": w["token"] }));
+        assert_eq!(w["name"], "borodutch");
+        t.later(1000);
+        t.w.text(x.slot, r#"{"t":"name","name":"B0rodutch"}"#, t.now).unwrap();
+        assert_eq!(x.texts()[0]["why"], "taken");
+        let tok = legacy(&t, "00000000000000bb");
+        let (_, w) = hello(&mut t, json!({ "t": "hello", "token": tok, "name": "borodutch" }));
+        assert_eq!(w["chosen"], false, "another old user with the same old name: first come, first served");
+        // an old random name is not carried over; an ordinary chosen one is
+        let tok = legacy(&t, "00000000000000cc");
+        let (_, w) = hello(&mut t, json!({ "t": "hello", "token": tok, "name": "Otter 23" }));
+        assert_eq!(w["chosen"], false);
+        let tok = legacy(&t, "00000000000000dd");
+        let (_, w) = hello(&mut t, json!({ "t": "hello", "token": tok, "name": "Guest 3f2a" }));
+        assert_eq!(w["chosen"], false);
+        let tok = legacy(&t, "00000000000000ee");
+        let (_, w) = hello(&mut t, json!({ "t": "hello", "token": tok, "name": "  Sea   Wall " }));
+        assert_eq!((&w["name"], &w["chosen"]), (&json!("Sea Wall"), &json!(true)));
+    }
+
+    #[test]
+    fn placeholders_until_chosen() {
+        let mut t = T::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        let (slot, _) = t.w.connect(tx, 1, t.now);
+        t.w.text(slot, r##"{"t":"hello","name":"Sneaky","colour":"#123456"}"##, t.now).unwrap();
+        let Out::Text(w) = rx.try_recv().unwrap() else { panic!() };
+        let w: Value = serde_json::from_str(&w).unwrap();
+        let id = w["id"].as_str().unwrap();
+        assert!(valid_id(id));
+        assert_eq!(w["chosen"], false);
+        assert_eq!(w["name"], placeholder(id), "the name in hello is not taken: it would skip the uniqueness check");
+        assert!(ANIMALS.iter().any(|a| w["name"].as_str().unwrap().starts_with(a)));
+    }
+
+    #[test]
+    fn unique_usernames() {
+        let mut t = T::new();
+        let mut a = t.join("Heron");
+        let (tx, mut rx) = mpsc::channel(64);
+        let (slot, _) = t.w.connect(tx, 1, t.now);
+        t.w.text(slot, r#"{"t":"hello"}"#, t.now).unwrap();
+        rx.try_recv().unwrap();
+        let mut b = C { slot, rx };
+        let ask = |t: &mut T, c: &mut C, m: Value| {
+            t.later(300);
+            t.w.text(c.slot, &m.to_string(), t.now).unwrap();
+            c.texts().pop().unwrap()
+        };
+        // checks: taken (look-alikes too), yours, free, invalid
+        for (name, why) in [("heron", "taken"), ("НEron", "taken"), ("H3r0n", "taken"), ("Heron!", "invalid"), ("Ok", "short"), ("Admin", "reserved"), ("Egret", "ok")] {
+            assert_eq!(ask(&mut t, &mut b, json!({ "t": "check", "name": name }))["why"], why, "{name}");
+        }
+        assert_eq!(ask(&mut t, &mut a, json!({ "t": "check", "name": "HERON" }))["why"], "yours");
+        // claims
+        let e = ask(&mut t, &mut b, json!({ "t": "name", "name": "Ηeron" })); // Greek Eta
+        assert_eq!((&e["t"], &e["about"], &e["why"]), (&json!("error"), &json!("name"), &json!("taken")));
+        let e = ask(&mut t, &mut b, json!({ "t": "name", "name": "Zo\u{200B}e" }));
+        assert_eq!(e["why"], "invalid");
+        let y = ask(&mut t, &mut b, json!({ "t": "name", "name": "  Egret   Two " }));
+        assert_eq!((&y["t"], &y["name"], &y["chosen"]), (&json!("you"), &json!("Egret Two"), &json!(true)));
+        // once a minute: right away again is refused with the wait
+        let e = ask(&mut t, &mut b, json!({ "t": "name", "name": "Egret Three" }));
+        assert_eq!(e["why"], "wait");
+        assert!(e["wait"].as_i64().unwrap() > 50);
+        // a colour on its own is fine any time
+        let y = ask(&mut t, &mut b, json!({ "t": "name", "colour": "#ABCDEF" }));
+        assert_eq!((&y["name"], &y["colour"]), (&json!("Egret Two"), &json!("#abcdef")));
+        // the name is kept: a new connection with the same token gets it back
+        let bid = t.w.clients[&b.slot].id.clone().unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        let (slot, _) = t.w.connect(tx, 1, t.now);
+        t.w.text(slot, &json!({ "t": "hello", "token": t.w.token(&bid) }).to_string(), t.now).unwrap();
+        let Out::Text(w) = rx.try_recv().unwrap() else { panic!() };
+        let w: Value = serde_json::from_str(&w).unwrap();
+        assert_eq!((&w["id"], &w["name"], &w["chosen"]), (&json!(bid), &json!("Egret Two"), &json!(true)));
+        // other people see it in rosters and chat, with chosen: true
+        t.w.text(b.slot, r#"{"t":"chat","ch":"g","text":"hi"}"#, t.now).unwrap();
+        let l = a.texts().into_iter().find(|m| m["t"] == "chat").unwrap();
+        assert_eq!((&l["name"], &l["chosen"], &l["id"]), (&json!("Egret Two"), &json!(true), &json!(bid)));
+    }
+
+    #[test]
+    fn rename_reaches_everyone() {
+        let mut t = T::new();
+        let (a, mut b) = (t.join("Ann"), t.join("Ben"));
+        t.at(&a, 0.0, 0.0);
+        b.drain();
+        t.later(61_000); // T::join already chose a name, so this is a rename
+        let r = t.w.db.claim(&t.id(&a), "Annie", "annie", unix() + 61);
+        assert_eq!(r.unwrap(), Claim::Ok, "the database rule (once a minute) is tested in db.rs; here only the broadcast");
+        t.w.text(a.slot, r#"{"t":"name","name":"Annie"}"#, t.now).unwrap();
+        let j = b.texts().into_iter().find(|m| m["t"] == "join").unwrap();
+        assert_eq!((&j["s"], &j["name"]), (&json!(a.slot), &json!("Annie")));
+    }
+
+    #[test]
+    fn blocks_take_uuids() {
+        let mut t = T::new();
+        let mut a = t.join("Ann");
+        for bad in ["0123456789abcdef", "nonsense", "6D9F1F25-09DE-421E-9955-EFA233BE98C1"] {
+            t.w.text(a.slot, &json!({ "t": "block", "id": bad }).to_string(), t.now).unwrap();
+        }
+        assert!(t.w.clients[&a.slot].blocks.is_empty());
+        let someone = new_uuid();
+        t.w.text(a.slot, &json!({ "t": "block", "id": someone }).to_string(), t.now).unwrap();
+        assert!(t.w.clients[&a.slot].blocks.contains(&someone));
+        assert_eq!(t.w.db.blocks(&t.id(&a)).unwrap(), vec![someone]);
+        a.drain();
+    }
+
+    #[test]
+    fn legacy_blocks_follow_the_token() {
+        // a database from before UUIDs: Ann (old id) blocked Troll (old id)
+        let db = Db::open(":memory:").unwrap();
+        db.set_block("00000000000000aa", "00000000000000bb", true).unwrap();
+        let mut t = T { w: World::new(db, 4), now: Instant::now() };
+        let old_token = {
+            let mut m = t.w.mac("00000000000000aa");
+            m.update(b"");
+            format!("00000000000000aa.{}", hex(&m.finalize().into_bytes()[..16]))
+        };
+        let (tx, mut rx) = mpsc::channel(64);
+        let (slot, _) = t.w.connect(tx, 1, t.now);
+        t.w.text(slot, &json!({ "t": "hello", "token": old_token }).to_string(), t.now).unwrap();
+        let Out::Text(w) = rx.try_recv().unwrap() else { panic!() };
+        let w: Value = serde_json::from_str(&w).unwrap();
+        let (ann, troll) = (legacy_uuid(&t.w.secret, "00000000000000aa"), legacy_uuid(&t.w.secret, "00000000000000bb"));
+        assert_eq!(w["id"], ann);
+        assert_eq!(w["blocks"], json!([troll]));
+        assert!(valid_id(w["token"].as_str().unwrap().split('.').next().unwrap()), "a new-style token from now on");
+        assert_eq!(t.w.verify(w["token"].as_str().unwrap()).as_deref(), Some(ann.as_str()));
     }
 
     #[test]
@@ -714,11 +1049,12 @@ mod tests {
         let tok = t.w.token(&id);
         let (tx, mut rx) = mpsc::channel(64);
         let (slot, _) = t.w.connect(tx, 1, t.now);
-        t.w.text(slot, &json!({ "t": "hello", "token": tok, "name": "Alice", "colour": "x" }).to_string(), t.now).unwrap();
+        t.w.text(slot, &json!({ "t": "hello", "token": tok, "colour": "x" }).to_string(), t.now).unwrap();
         let Out::Text(w) = rx.try_recv().unwrap() else { panic!() };
         let w: Value = serde_json::from_str(&w).unwrap();
         assert_eq!(w["id"], id);
         assert_eq!(w["colour"], "#f2a07e"); // a bad colour falls back
+        assert_eq!((&w["name"], &w["chosen"]), (&json!("Alice"), &json!(true)));
     }
 
     #[test]
@@ -889,7 +1225,7 @@ mod tests {
         let aid = t.id(&a);
         let (tx, mut rx) = mpsc::channel(64);
         let (slot, _) = t.w.connect(tx, 1, t.now);
-        t.w.text(slot, &json!({ "t": "hello", "token": t.w.token(&aid), "name": "Ann", "colour": "#000000" }).to_string(), t.now).unwrap();
+        t.w.text(slot, &json!({ "t": "hello", "token": t.w.token(&aid), "colour": "#000000" }).to_string(), t.now).unwrap();
         let Out::Text(w) = rx.try_recv().unwrap() else { panic!() };
         let w: Value = serde_json::from_str(&w).unwrap();
         assert_eq!(w["blocks"], json!([bid]));

@@ -9,9 +9,13 @@ use vancouver_live::world::{State, encode_state};
 type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn start() -> String {
+    start_with(":memory:").await
+}
+
+async fn start_with(db: &str) -> String {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap().to_string();
-    let cfg = vancouver_live::Config { db: ":memory:".into(), max_per_ip: 3, origins: vec!["https://vancouver.borodutch.com".into()] };
+    let cfg = vancouver_live::Config { db: db.into(), hold: vec![], max_per_ip: 3, origins: vec!["https://vancouver.borodutch.com".into()] };
     tokio::spawn(vancouver_live::serve(l, cfg));
     addr
 }
@@ -24,8 +28,11 @@ async fn open(addr: &str, path: &str, ua: &str) -> Result<Ws, String> {
 }
 
 async fn hello(ws: &mut Ws, name: &str) -> Value {
-    ws.send(Message::text(json!({ "t": "hello", "name": name, "colour": "#3366cc" }).to_string())).await.unwrap();
-    next_json(ws, |m| m["t"] == "welcome").await
+    ws.send(Message::text(json!({ "t": "hello", "colour": "#3366cc" }).to_string())).await.unwrap();
+    let w = next_json(ws, |m| m["t"] == "welcome").await;
+    ws.send(Message::text(json!({ "t": "name", "name": name }).to_string())).await.unwrap();
+    assert_eq!(next_json(ws, |m| m["t"] == "you").await["name"], name);
+    w
 }
 
 async fn next_json(ws: &mut Ws, want: impl Fn(&Value) -> bool) -> Value {
@@ -159,4 +166,36 @@ async fn limits() {
     .await
     .unwrap();
     assert_eq!(code, 1008);
+}
+
+#[tokio::test]
+async fn usernames_survive_a_restart() {
+    let path = std::env::temp_dir().join(format!("live-ws-test-{}.db", std::process::id()));
+    let db = path.to_str().unwrap();
+    let _ = std::fs::remove_file(db);
+    let (token, id) = {
+        let addr = start_with(db).await;
+        let mut a = open(&addr, "/live/ws", "A").await.unwrap();
+        let w = hello(&mut a, "Wren").await;
+        assert_eq!(w["chosen"], false, "a placeholder until a name is chosen");
+        let mut b = open(&addr, "/live/ws", "B").await.unwrap();
+        hello(&mut b, "Finch").await;
+        b.send(Message::text(r#"{"t":"check","name":"WREN"}"#)).await.unwrap();
+        assert_eq!(next_json(&mut b, |m| m["t"] == "check").await["why"], "taken");
+        (w["token"].as_str().unwrap().to_string(), w["id"].as_str().unwrap().to_string())
+    };
+    // another server on the same file (a restart, or the next deploy): same token, same UUID, same name
+    let addr = start_with(db).await;
+    let mut a = open(&addr, "/live/ws", "A").await.unwrap();
+    a.send(Message::text(json!({ "t": "hello", "token": token }).to_string())).await.unwrap();
+    let w = next_json(&mut a, |m| m["t"] == "welcome").await;
+    assert_eq!((w["id"].as_str(), &w["name"], &w["chosen"]), (Some(id.as_str()), &json!("Wren"), &json!(true)));
+    let mut c = open(&addr, "/live/ws", "C").await.unwrap();
+    c.send(Message::text(r#"{"t":"hello"}"#)).await.unwrap();
+    next_json(&mut c, |m| m["t"] == "welcome").await;
+    c.send(Message::text(r#"{"t":"name","name":"finch"}"#)).await.unwrap();
+    assert_eq!(next_json(&mut c, |m| m["t"] == "error").await["why"], "taken");
+    for f in [db.to_string(), format!("{db}-wal"), format!("{db}-shm")] {
+        let _ = std::fs::remove_file(f);
+    }
 }

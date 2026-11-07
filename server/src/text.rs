@@ -14,20 +14,62 @@ fn combining(c: char) -> bool {
     matches!(c as u32, 0x0300..=0x036F | 0x0483..=0x0489 | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F)
 }
 
-/// A display name: letters and digits of any script plus space - _ . ', 2 to 20 characters,
-/// spaces collapsed. None when nothing usable is left or it poses as staff.
-pub fn clean_name(raw: &str) -> Option<String> {
-    let mut out = String::new();
-    for c in raw.chars() {
-        if c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '\'') {
-            out.push(c);
-        } else if c.is_whitespace() && !out.is_empty() && !out.ends_with(' ') {
-            out.push(' ');
-        }
+/// Why a username was refused (also the `why` the client gets back from a check).
+pub type Refused = &'static str;
+
+/// A username someone chose: 3 to 20 characters, letters and digits of any script plus space - _ . '
+/// (at least two letters or digits), spaces collapsed, not posing as staff. Nothing
+/// is dropped silently: a name with anything else in it is refused, so what people type is what others see.
+pub fn username(raw: &str) -> Result<String, Refused> {
+    let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !name.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '\'')) {
+        return Err("invalid");
     }
-    let out: String = out.trim().chars().take(20).collect::<String>().trim_end().to_string();
-    let letters = out.chars().filter(|c| c.is_alphanumeric()).count();
-    (letters >= 2 && !reserved(&out)).then_some(out)
+    let n = name.chars().count();
+    if n < 3 {
+        return Err("short");
+    }
+    if n > 20 {
+        return Err("long");
+    }
+    if name.chars().filter(|c| c.is_alphanumeric()).count() < 2 {
+        return Err("invalid");
+    }
+    if reserved(&name) {
+        return Err("reserved");
+    }
+    Ok(name)
+}
+
+/// What makes two usernames the same: case, look-alike letters (Cyrillic, Greek, full-width, digits used as
+/// letters, accents, l/I/1) and everything but letters and digits ignored, so "Heron", "НEron", "her0n" and
+/// "H.e.r.o.n" are one name.
+pub fn name_key(name: &str) -> String {
+    const ACCENTS: [(&str, char); 19] = [
+        ("àáâãäåāăą", 'a'), ("çćĉċč", 'c'), ("ďđ", 'd'), ("èéêëēĕėęě", 'e'), ("ĝğġģ", 'g'), ("ĥħ", 'h'), ("ìíîïĩīĭįı", 'i'),
+        ("ĵ", 'j'), ("ķ", 'k'), ("ĺļľŀł", 'l'), ("ñńņňŉ", 'n'), ("òóôõöøōŏő", 'o'), ("ŕŗř", 'r'), ("śŝşšß", 's'),
+        ("ţťŧ", 't'), ("ùúûüũūŭůűų", 'u'), ("ŵ", 'w'), ("ýÿŷ", 'y'), ("źżž", 'z'),
+    ];
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .filter_map(|c| {
+            // full-width forms, then capitals that only look Latin as capitals (Cyrillic En, Greek Eta, Nu…)
+            let c = match c as u32 {
+                0xFF10..=0xFF5A => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+                _ => c,
+            };
+            let c = match c {
+                'Н' | 'н' | 'Η' => 'h',
+                'Ν' => 'n',
+                'Β' => 'b',
+                'Ζ' => 'z',
+                'Ү' | 'ү' | 'Υ' => 'y',
+                _ => fold(c)?,
+            };
+            let c = ACCENTS.iter().find(|(from, _)| from.contains(c)).map_or(c, |a| a.1);
+            Some(if c == 'l' { 'i' } else { c })
+        })
+        .collect()
 }
 
 /// Names that would pass for the site or its staff, also when spelled with look-alike letters.
@@ -159,19 +201,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn names() {
-        assert_eq!(clean_name("  Harbour   Seal  ").as_deref(), Some("Harbour Seal"));
-        assert_eq!(clean_name("Zo\u{200B}e\u{202E}").as_deref(), Some("Zoe"));
-        assert_eq!(clean_name("Пётр").as_deref(), Some("Пётр"));
-        assert_eq!(clean_name("小明").as_deref(), Some("小明"));
-        assert_eq!(clean_name("a\u{0301}\u{0301}\u{0301}b").as_deref(), Some("ab")); // zalgo marks dropped
-        assert_eq!(clean_name("<b>x</b>").as_deref(), Some("bxb"));
-        assert_eq!(clean_name("x"), None);
-        assert_eq!(clean_name("\u{200B}\u{200B}"), None);
-        assert_eq!(clean_name("abcdefghijklmnopqrstuvwxyz").map(|s| s.chars().count()), Some(20));
+    fn usernames() {
+        assert_eq!(username("  Harbour   Seal "), Ok("Harbour Seal".into()));
+        assert_eq!(username("Пётр"), Ok("Пётр".into()));
+        assert_eq!(username("小明明"), Ok("小明明".into()));
+        assert_eq!(username("O'Neil_2.0"), Ok("O'Neil_2.0".into()));
+        assert_eq!(username("ab"), Err("short"));
+        assert_eq!(username("abcdefghijklmnopqrstu"), Err("long"));
+        assert_eq!(username("Zo\u{200B}e"), Err("invalid")); // invisible characters are refused, not dropped
+        assert_eq!(username("Zoe\u{202E}x"), Err("invalid"));
+        assert_eq!(username("a\u{0301}\u{0301}bc"), Err("invalid"));
+        assert_eq!(username("<b>x</b>"), Err("invalid"));
+        assert_eq!(username("a.-'_"), Err("invalid"));
+        assert_eq!(username("Moderator"), Err("reserved"));
+        assert_eq!(username("borodutch"), Ok("borodutch".into())); // the owner's own name is fine (main #19)
         for staff in ["Admin", "аdmin", "ADM1N", "The Moderator", "mod", "Server bot"] {
-            assert_eq!(clean_name(staff), None, "{staff}");
+            assert_eq!(username(staff), Err("reserved"), "{staff}");
         }
+    }
+
+    #[test]
+    fn same_name_keys() {
+        let k = name_key("Heron");
+        for same in ["heron", "HERON", "НEron", "Η\u{0435}ron", "Her0n", "H.e.r.o.n", "Héron", "Ｈｅｒｏｎ", "h e r o n"] {
+            assert_eq!(name_key(same), k, "{same}");
+        }
+        assert_eq!(name_key("Helen"), name_key("HeIen")); // capital I for l
+        assert_eq!(name_key("Bill"), name_key("Bi11"));
+        assert_ne!(name_key("Heron"), name_key("Herons"));
+        assert_ne!(name_key("Пётр"), name_key("Петя"));
+        assert_eq!(name_key("小明"), "小明");
     }
 
     #[test]

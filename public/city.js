@@ -75,14 +75,66 @@ export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll
   return city
 }
 
+// html.compact: the phone layout (index.html sets it); toolbar panels are bottom sheets there
+const compact = () => document.documentElement.classList.contains('compact')
+const CLOSE_ALL = 'ui:closesheets' // a panel, About or the chat opening: every other one closes
+
+// A panel that is a bottom sheet on phones: a close button, and dragging its top edge down closes it.
+// `close()` hides it (and whatever goes with that, e.g. a pressed toolbar button).
+function sheet(el, close) {
+  const x = () => {
+    if (el.querySelector(':scope > .sheet-x')) return
+    const g = document.createElement('div'), b = document.createElement('button')
+    g.className = 'sheet-grip'; g.setAttribute('aria-hidden', 'true')
+    g.addEventListener('pointerdown', drag)
+    b.type = 'button'; b.className = 'sheet-x'; b.textContent = '×'; b.setAttribute('aria-label', 'Close')
+    b.onclick = close
+    el.prepend(g, b)
+  }
+  // the grip (touch-action: none, so the browser doesn't take the touch for scrolling) follows the finger down
+  function drag(e) {
+    if (!compact()) return
+    const y0 = e.clientY, t0 = performance.now()
+    let dy = 0
+    try { e.target.setPointerCapture(e.pointerId) } catch {}
+    document.body.classList.add('sheet-dragging')
+    const move = (ev) => { dy = Math.max(0, ev.clientY - y0); el.style.transform = `translateY(${dy}px)` }
+    const up = () => {
+      removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('pointercancel', up)
+      document.body.classList.remove('sheet-dragging')
+      const fast = dy / Math.max(1, performance.now() - t0) > 0.5
+      el.style.transition = 'transform .18s ease-out'
+      if (dy > 80 || (dy > 24 && fast)) { el.style.transform = 'translateY(100%)'; setTimeout(() => { close(); el.style.transform = el.style.transition = '' }, 170) }
+      else { el.style.transform = ''; setTimeout(() => (el.style.transition = ''), 200) }
+    }
+    addEventListener('pointermove', move); addEventListener('pointerup', up); addEventListener('pointercancel', up)
+  }
+  x()
+  return x // call again after replacing the element's contents
+}
+
 function makeUI() {
   const bar = document.getElementById('tools')
+  // About (index.html) is a sheet too
+  const about = document.getElementById('about'), aboutBtn = document.getElementById('aboutBtn')
+  if (about && aboutBtn) {
+    const close = () => { about.hidden = true; aboutBtn.setAttribute('aria-expanded', 'false') }
+    sheet(about, close)
+    aboutBtn.addEventListener('click', () => { if (about.hidden) document.dispatchEvent(new Event(CLOSE_ALL)) }, true) // before its own toggle
+    document.addEventListener(CLOSE_ALL, close)
+  }
   return {
-    // a toolbar button at the top right; with `panel: true` it opens a small panel under it
+    // a toolbar button at the top right (on phones: the dock at the bottom); with `panel: true` it opens a small
+    // panel under it (on phones: a bottom sheet). `set({ icon, label })` changes what the button says.
     addButton({ label, title, icon, onClick, panel }) {
       const b = document.createElement('button')
       b.type = 'button'
-      b.textContent = icon ? `${icon} ${label || ''}`.trim() : label
+      const ic = document.createElement('span'), lb = document.createElement('span')
+      ic.className = 'ic'; lb.className = 'lb'
+      ic.setAttribute('aria-hidden', 'true')
+      const set = ({ icon: i = icon, label: l = label } = {}) => { icon = i; label = l; ic.textContent = i || ''; lb.textContent = l || '' }
+      set()
+      b.append(ic, lb)
       if (title) b.title = title
       b.setAttribute('aria-label', title || label)
       bar.append(b)
@@ -92,22 +144,35 @@ function makeUI() {
         el = document.createElement('div')
         el.className = 'panel tool-panel'
         el.hidden = true
+        el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', label || title)
         document.body.append(el)
         b.setAttribute('aria-expanded', 'false')
+        const close = () => { el.hidden = true; b.setAttribute('aria-expanded', 'false') }
+        const ensureX = sheet(el, close)
+        document.addEventListener(CLOSE_ALL, close)
         b.addEventListener('click', () => {
           const open = el.hidden
-          for (const p of document.querySelectorAll('.tool-panel')) p.hidden = true
-          for (const x of bar.querySelectorAll('button[aria-expanded]')) x.setAttribute('aria-expanded', 'false')
-          el.hidden = !open; b.setAttribute('aria-expanded', String(open))
-          if (open) { const r = b.getBoundingClientRect(); el.style.top = `${r.bottom + 8}px`; el.style.right = `${Math.max(12, innerWidth - r.right)}px` }
+          document.dispatchEvent(new Event(CLOSE_ALL))
+          if (!open) return
+          ensureX() // the plugin may have replaced the panel's contents since
+          el.hidden = false; b.setAttribute('aria-expanded', 'true')
+          if (compact()) { el.style.top = el.style.right = '' } else { const r = b.getBoundingClientRect(); el.style.top = `${r.bottom + 8}px`; el.style.right = `${Math.max(12, innerWidth - r.right)}px` }
         })
       }
       if (onClick) b.addEventListener('click', onClick)
-      return { button: b, panel: el, remove() { b.remove(); el?.remove(); bar.hidden = !bar.children.length } }
+      return { button: b, panel: el, set, remove() { b.remove(); el?.remove(); bar.hidden = !bar.children.length } }
     },
+    // the bottom-sheet behaviour of toolbar panels, for a plugin's own panel: returns a function that puts the
+    // close button back (call it after replacing the panel's contents)
+    sheet,
+    // ask every open panel (toolbar panels, About, a plugin's sheet listening for it) to close
+    closeAll() { document.dispatchEvent(new Event(CLOSE_ALL)) },
+    onCloseAll(fn) { document.addEventListener(CLOSE_ALL, fn); return () => document.removeEventListener(CLOSE_ALL, fn) },
+    get compact() { return compact() },
     toast(text, ms = 3000) {
       const t = document.createElement('div')
       t.className = 'panel toast'
+      t.setAttribute('role', 'status')
       t.textContent = text
       document.body.append(t)
       setTimeout(() => t.remove(), ms)

@@ -92,6 +92,32 @@ controls.minZoom = mobile ? 0.035 : 0.02 // phones: not the whole region at once
 controls.maxZoom = 6
 controls.maxPolarAngle = 1.3
 controls.minPolarAngle = 0.15
+// two fingers: pinch to zoom (at the pinch) and twist (past 12°) to turn, or move both up or down to tilt. A gesture locks to
+// the first it looks like, so a pinch doesn't wobble the map round as OrbitControls' DOLLY_ROTATE does (it turns
+// and tilts with any drift of the fingers' midpoint).
+{
+  let g = null
+  const two = () => { // the two fingers in a fixed order (events come from either one)
+    const [p, q] = controls._pointers.map((id) => controls._pointerPositions[id])
+    return { d: Math.hypot(p.x - q.x, p.y - q.y), a: Math.atan2(p.y - q.y, p.x - q.x), x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 }
+  }
+  controls._handleTouchStartDollyRotate = () => { g = { ...two(), mode: null, s: 0, t: 0, v: 0 } }
+  controls._handleTouchMoveDollyRotate = () => {
+    if (!g) return
+    const n = two(), ds = Math.log(n.d / g.d), da = Math.atan2(Math.sin(n.a - g.a), Math.cos(n.a - g.a)), dy = n.y - g.y
+    if (!g.mode) { // decide: 14 px of parallel travel is a tilt; 6% of scale or 5° of twist is a pinch
+      g.s += ds; g.t += da; g.v += dy
+      if (Math.abs(g.v) > 14 && Math.abs(g.s) < 0.06 && Math.abs(g.t) < 0.09) g.mode = 'tilt'
+      else if (Math.abs(g.s) > 0.06 || Math.abs(g.t) > 0.09) g.mode = 'pinch'
+    }
+    if (g.mode === 'pinch') {
+      controls._dollyOut(Math.exp(ds * controls.zoomSpeed)); controls._updateZoomParameters(n.x, n.y)
+      g.tw = (g.tw || 0) + da
+      if (Math.abs(g.tw) > 0.2) controls._rotateLeft(da) // turning starts past a 12° twist, so pinches stay straight
+    } else if (g.mode === 'tilt') controls._rotateUp((2 * Math.PI * dy * controls.rotateSpeed) / renderer.domElement.clientHeight)
+    Object.assign(g, n)
+  }
+}
 function setView(X, Y, s) { // drawing px at the screen centre, CSS px per drawing px
   const E = (X - BX) / K, N = (BY - Y) / (K * VIEW.y)
   controls.target.set(E, 0, -N)

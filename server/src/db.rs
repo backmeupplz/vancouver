@@ -1,4 +1,4 @@
-//! The small SQLite file on /data: the token secret, visitor counts and block lists.
+//! The small SQLite file on /data: the token secret, visitor counts, usernames and block lists.
 //!
 //! Privacy: raw addresses are never stored. A visitor is SHA-256(today's salt, address, user agent),
 //! cut to 16 bytes. The salt is random and only today's is kept, so once a day is over its hashes
@@ -7,6 +7,18 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
 pub const DAY: i64 = 86_400;
+/// A username can change once a minute (the old one is free again at once).
+pub const RENAME_EVERY: i64 = 60;
+
+/// What became of a username claim.
+#[derive(Debug, PartialEq)]
+pub enum Claim {
+    Ok,
+    /// someone else has it (or one that looks the same)
+    Taken,
+    /// changed too recently: seconds to wait
+    Wait(i64),
+}
 
 pub struct Db {
     conn: Connection,
@@ -34,7 +46,8 @@ impl Db {
              CREATE TABLE IF NOT EXISTS salts (day INTEGER PRIMARY KEY, salt BLOB NOT NULL);
              CREATE TABLE IF NOT EXISTS visits (day INTEGER NOT NULL, hash BLOB NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY (day, hash));
              CREATE INDEX IF NOT EXISTS visits_seen ON visits (seen);
-             CREATE TABLE IF NOT EXISTS blocks (owner TEXT NOT NULL, target TEXT NOT NULL, PRIMARY KEY (owner, target));",
+             CREATE TABLE IF NOT EXISTS blocks (owner TEXT NOT NULL, target TEXT NOT NULL, PRIMARY KEY (owner, target));
+             CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, at INTEGER NOT NULL);",
         )?;
         Ok(Db { conn, salt: None })
     }
@@ -96,6 +109,59 @@ impl Db {
         Ok((q(now - DAY)?, q(now - 7 * DAY)?))
     }
 
+    /// A user's chosen name, if they have one.
+    pub fn username(&self, id: &str) -> rusqlite::Result<Option<String>> {
+        self.conn.query_row("SELECT name FROM users WHERE id = ?1", [id], |r| r.get(0)).optional()
+    }
+
+    /// Who has the name with this key (see text::name_key).
+    pub fn name_owner(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        self.conn.query_row("SELECT id FROM users WHERE key = ?1", [key], |r| r.get(0)).optional()
+    }
+
+    /// Gives `id` the name `name` (already checked with text::username; `key` its name_key) at unix time
+    /// `now`. Unique by key: the UNIQUE index settles a race between two replicas too.
+    pub fn claim(&mut self, id: &str, name: &str, key: &str, now: i64) -> rusqlite::Result<Claim> {
+        let tx = self.conn.transaction()?;
+        let mine: Option<(String, i64)> = tx.query_row("SELECT name, at FROM users WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        if let Some((old, at)) = &mine {
+            if old == name {
+                return Ok(Claim::Ok); // no change
+            }
+            if now - at < RENAME_EVERY {
+                return Ok(Claim::Wait(RENAME_EVERY - (now - at)));
+            }
+        }
+        let owner: Option<String> = tx.query_row("SELECT id FROM users WHERE key = ?1", [key], |r| r.get(0)).optional()?;
+        if owner.is_some_and(|o| o != id) {
+            return Ok(Claim::Taken);
+        }
+        let r = tx.execute(
+            "INSERT INTO users (id, name, key, at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (id) DO UPDATE SET name = excluded.name, key = excluded.key, at = excluded.at",
+            params![id, name, key, now],
+        );
+        match r {
+            Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => return Ok(Claim::Taken),
+            r => r?,
+        };
+        tx.commit()?;
+        Ok(Claim::Ok)
+    }
+
+    /// Ids from before usernames (16 hex digits) to their UUIDs, in the block lists. Idempotent.
+    pub fn migrate_ids(&self, to_uuid: impl Fn(&str) -> String) -> rusqlite::Result<usize> {
+        let old: Vec<(String, String)> = {
+            let mut st = self.conn.prepare("SELECT owner, target FROM blocks WHERE length(owner) = 16 OR length(target) = 16")?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?
+        };
+        let map = |id: &str| if id.len() == 16 { to_uuid(id) } else { id.to_string() };
+        for (o, t) in &old {
+            self.conn.execute("INSERT OR IGNORE INTO blocks (owner, target) VALUES (?1, ?2)", [map(o), map(t)])?;
+            self.conn.execute("DELETE FROM blocks WHERE owner = ?1 AND target = ?2", [o, t])?;
+        }
+        Ok(old.len())
+    }
+
     pub fn blocks(&self, owner: &str) -> rusqlite::Result<Vec<String>> {
         let mut st = self.conn.prepare_cached("SELECT target FROM blocks WHERE owner = ?1 LIMIT 1000")?;
         st.query_map([owner], |r| r.get(0))?.collect()
@@ -151,5 +217,44 @@ mod tests {
         db.set_block("a", "c", false).unwrap();
         assert_eq!(db.blocks("a").unwrap(), vec!["b".to_string()]);
         assert!(db.blocks("b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn usernames_persist_and_wait() {
+        let path = std::env::temp_dir().join(format!("live-test-{}.db", std::process::id()));
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+        let t = 1_800_000_000;
+        {
+            let mut db = Db::open(path).unwrap();
+            assert_eq!(db.claim("u1", "Heron", "heron", t).unwrap(), Claim::Ok);
+            assert_eq!(db.claim("u2", "HERON", "heron", t).unwrap(), Claim::Taken);
+            assert_eq!(db.claim("u1", "heron", "heron", t + 1).unwrap(), Claim::Wait(59)); // a minute between changes
+            assert_eq!(db.claim("u1", "Heron", "heron", t + 1).unwrap(), Claim::Ok); // the same name again is no change
+            assert_eq!(db.claim("u1", "Osprey", "osprey", t + 60).unwrap(), Claim::Ok);
+            assert_eq!(db.claim("u2", "Heron", "heron", t + 61).unwrap(), Claim::Ok); // the old one is free at once
+        }
+        // a restart keeps them
+        let db = Db::open(path).unwrap();
+        assert_eq!(db.username("u1").unwrap().as_deref(), Some("Osprey"));
+        assert_eq!(db.username("u2").unwrap().as_deref(), Some("Heron"));
+        assert_eq!(db.name_owner("osprey").unwrap().as_deref(), Some("u1"));
+        assert_eq!(db.username("nobody").unwrap(), None);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_ids_move_to_uuids() {
+        let db = Db::open(":memory:").unwrap();
+        db.set_block("0123456789abcdef", "fedcba9876543210", true).unwrap();
+        db.set_block("0123456789abcdef", "00000000-0000-4000-8000-000000000000", true).unwrap();
+        let to = |id: &str| format!("uuid-of-{id}");
+        assert_eq!(db.migrate_ids(to).unwrap(), 2);
+        let mut b = db.blocks("uuid-of-0123456789abcdef").unwrap();
+        b.sort();
+        assert_eq!(b, vec!["00000000-0000-4000-8000-000000000000".to_string(), "uuid-of-fedcba9876543210".to_string()]);
+        assert!(db.blocks("0123456789abcdef").unwrap().is_empty());
+        assert_eq!(db.migrate_ids(to).unwrap(), 0);
     }
 }

@@ -493,6 +493,15 @@ const CSS = `
 .lofi-menu button[aria-checked=true]{background:rgba(207,216,224,.16)}
 .lofi-menu i{font-style:normal;width:1.5em;text-align:center;font-size:14px}
 .lofi-menu small{margin-left:auto;padding-left:10px;opacity:.65}
+.compact .lofi{padding:0 12px 0 0;border-radius:12px;border:1px solid rgba(255,255,255,.12)}
+.compact .lofi button{width:44px;height:44px;border-radius:11px}
+.compact .lofi svg{width:16px;height:16px}
+.compact .lofi .lofi-vibe{font-size:18px}
+.compact .lofi input{display:none}
+.compact .lofi-name{max-width:11em}
+.compact .lofi .lofi-menu button{height:44px;padding:0 14px 0 8px;font-size:14px}
+.compact .lofi-menu{max-height:calc(100vh - 140px);overflow-y:auto}
+@media (orientation:landscape){.compact .lofi-menu:not([hidden]){display:grid;grid-template-columns:1fr 1fr;min-width:340px}}
 `
 const ICON = {
   play: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9.5-5.5z"/></svg>',

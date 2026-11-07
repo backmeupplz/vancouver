@@ -27,6 +27,8 @@ pub const ORIGINS: &str = "https://vancouver.borodutch.com http://127.0.0.1 http
 
 pub struct Config {
     pub db: String,
+    /// names kept for their owners from before usernames (see World::hold)
+    pub hold: Vec<String>,
     pub max_per_ip: usize,
     pub origins: Vec<String>,
 }
@@ -47,7 +49,9 @@ impl App {
 
 pub fn router(cfg: Config) -> Router {
     let db = db::Db::open(&cfg.db).expect("opening the database");
-    let app = App { world: Arc::new(Mutex::new(World::new(db, cfg.max_per_ip))), origins: Arc::new(cfg.origins), ip_key: rand::random() };
+    let mut world = World::new(db, cfg.max_per_ip);
+    world.hold = cfg.hold.iter().map(|n| text::name_key(n)).filter(|k| !k.is_empty()).collect();
+    let app = App { world: Arc::new(Mutex::new(world)), origins: Arc::new(cfg.origins), ip_key: rand::random() };
     let w = app.world.clone();
     tokio::spawn(async move {
         let mut t = tokio::time::interval(world::TICK);

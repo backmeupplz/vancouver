@@ -472,7 +472,7 @@ export default function weather(city) {
     clock.textContent = hhmm(w.hour)
     now.textContent = live ? `Live: ${Math.round(live.temp)}°C, ${live.desc}` : live === false ? 'Live: Open-Meteo unreachable, retrying' : 'Live: loading Vancouver weather…'
     const ic = w.isNight && (w.kind === 'clear' || w.kind === 'cloudy') ? ICON.night : ICON[w.kind]
-    btn.button.textContent = state.mode === 'live' && live ? `${ic} ${Math.round(live.temp)}°` : `${ic} Weather`
+    btn.set({ icon: ic, label: state.mode === 'live' && live ? `${Math.round(live.temp)}°` : 'Weather' })
   }
 
   apply()
