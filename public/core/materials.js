@@ -18,15 +18,17 @@ const GROUND_COLOURS = [
   [126, 160, 92], [122, 156, 88], [178, 174, 164], [168, 160, 146], [168, 176, 104], [112, 164, 74], [108, 174, 80], [112, 134, 82],
   [98, 130, 94], [56, 98, 54], [230, 214, 172], [152, 148, 142], [180, 162, 132], [150, 152, 154], [122, 125, 129], [204, 198, 186],
   [198, 172, 132], [100, 168, 72], [190, 102, 76], [40, 98, 150], [176, 150, 110], [96, 192, 222], [240, 244, 248],
+  // 23 trail, walk, cycle, ballast, sidewalk, blvd, road, arterial (order = tools/tiles.py GROUND)
+  [184, 164, 128], [206, 202, 194], [104, 108, 112], [140, 128, 114], [200, 198, 190], [108, 160, 76], [120, 123, 128], [104, 108, 115],
 ]
 export function groundMaterial() {
   const m = new THREE.MeshLambertMaterial()
   m.onBeforeCompile = (s) => {
     s.vertexShader = s.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute float cls;\nflat varying float vCls;\nvarying vec3 vW;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCls = cls;\nvW = (modelMatrix * vec4(transformed, 1.0)).xyz;')
+      .replace('#include <common>', '#include <common>\nattribute float cls;\nflat varying float vCls;\nvarying vec3 vW;\nvarying float vSlope;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCls = cls;\nvW = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvSlope = 1.0 - objectNormal.y;')
     s.fragmentShader = s.fragmentShader
-      .replace('#include <common>', `#include <common>\nflat varying float vCls;\nvarying vec3 vW;\n${COMMON}
+      .replace('#include <common>', `#include <common>\nflat varying float vCls;\nvarying vec3 vW;\nvarying float vSlope;\n${COMMON}
         const vec3 CL[${GROUND_COLOURS.length}] = vec3[](${GROUND_COLOURS.map((c) => `vec3(${c.map((v) => (v / 255).toFixed(4)).join(',')})`).join(',')});`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         int c = int(vCls + 0.5);
@@ -50,8 +52,11 @@ export function groundMaterial() {
           vec2 g = fract(p * 0.8); col *= 1.0 - 0.06 * near * (step(g.x, 0.06) + step(g.y, 0.06));
         } else if (c == 20) { // pier planks
           col *= 1.0 - 0.12 * near * step(fract(p.x * 1.4), 0.12);
-        } else if (c == 14) { // parking: worn asphalt
-          col *= 0.95 + 0.1 * fine;
+        } else if (c == 14 || c == 29 || c == 30 || c == 25) { // asphalt: parking, roads, cycle tracks
+          col *= 0.94 + 0.08 * fine + 0.04 * noise(p * 0.2);
+        } else if (c == 27 || c == 24) { // sidewalks and walks: concrete slabs
+          vec2 g = fract(p / 1.5); float fw = max(fwidth(p.x / 1.5), 1e-3);
+          col *= (0.95 + 0.06 * fine) * (1.0 - 0.07 * near * (1.0 - smoothstep(0.0, fw * 2.0, min(min(g.x, 1.0 - g.x), min(g.y, 1.0 - g.y)))));
         } else {
           col *= 0.9 + 0.2 * n + 0.05 * (fine - 0.5) * near;
         }
@@ -60,15 +65,20 @@ export function groundMaterial() {
           vec3 wild = srgb(vec3(0.24, 0.42, 0.24)) * (0.72 + 0.55 * fbm(p * 0.03 + vec2(n)));
           col = mix(col, wild, up);
         }
+        // slopes: darker and rockier the steeper they are, so hills, cliffs and plateaus (UBC, Burnaby Mountain) read
+        float sl = smoothstep(0.03, 0.45, vSlope);
+        if (c != 19) col = mix(col, srgb(vec3(0.46, 0.42, 0.36)) * (0.85 + 0.2 * n), sl * 0.45) * (1.0 - 0.28 * sl);
         diffuseColor.rgb = col;`)
   }
-  m.customProgramCacheKey = () => 'ground2'
+  m.customProgramCacheKey = () => 'ground4'
   return m
 }
 
 // ---------------------------------------------------------------- roads
-export function roadMaterial() {
-  const m = new THREE.MeshLambertMaterial()
+// decal = true: only the paint (lines, crosswalks, rails), blended onto the ground; else full bridge surfaces
+export function roadMaterial(decal = false) {
+  const m = new THREE.MeshLambertMaterial(decal ? { transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 } : {})
+  if (decal) m.defines = { DECAL: '' }
   m.onBeforeCompile = (s) => {
     s.vertexShader = s.vertexShader
       .replace('#include <common>', '#include <common>\nattribute vec4 aRoad;\nattribute vec4 aRoad2;\nvarying vec4 vR;\nvarying vec4 vR2;\nvarying vec3 vW;')
@@ -79,7 +89,7 @@ export function roadMaterial() {
         float s = vR.x, t = vR.y, w = vR.z; int kind = int(vR.w + 0.5);
         float at = abs(t), fs = max(fwidth(s), 1e-3), ft = max(fwidth(t), 1e-3);
         float detail = 1.0 - smoothstep(0.25, 0.7, max(fs, ft)); // markings fade out before they shimmer
-        vec3 col;
+        vec3 col; float dPaint = 0.0; vec3 dCol = vec3(1.0);
         float grain = 0.94 + 0.08 * noise(vW.xz * 2.3) + 0.04 * noise(vW.xz * 0.2);
         if (kind == 101) { // bridge deck fascia and underside
           col = srgb(vec3(0.78, 0.77, 0.73)) * grain;
@@ -97,6 +107,10 @@ export function roadMaterial() {
           col = mix(col, srgb(vec3(0.42, 0.32, 0.24)), sleeper * detail);
           float rail = band(at, 0.66, 0.78, ft);
           col = mix(col, srgb(vec3(0.62, 0.62, 0.64)), rail);
+          dPaint = max(sleeper * detail * 0.9, rail); dCol = rail > 0.5 ? srgb(vec3(0.62, 0.62, 0.64)) : srgb(vec3(0.42, 0.32, 0.24));
+        } else if (kind == 102) { // a mapped crosswalk: zebra bars across the walk
+          col = srgb(vec3(0.94, 0.94, 0.9));
+          dPaint = band(fract(s / 1.1), 0.0, 0.5, fs / 1.1) * step(at, w * 0.5 + 0.2); dCol = col;
         } else if (kind >= 9 && kind <= 13) { // footway, cycleway, path, steps, track
           col = kind == 10 ? srgb(vec3(0.40, 0.42, 0.44)) : kind == 11 || kind == 13 ? srgb(vec3(0.72, 0.64, 0.50)) : srgb(vec3(0.82, 0.80, 0.76));
           col *= grain;
@@ -124,15 +138,12 @@ export function roadMaterial() {
             if (kind <= 1) paint = max(paint, band(at, w * 0.5 - 0.55, w * 0.5 - 0.4, ft)); // edge lines
             paint *= junctionFade;
           }
-          if (kind <= 5) { // crosswalks (ladder) and stop lines just outside junctions
+          if (kind <= 4) { // stop lines just outside junctions (crosswalks are mapped ones, drawn separately)
             for (int e = 0; e < 2; e++) {
               float d = e == 0 ? dA : dB;
-              if (d > 30.0) continue;
-              float zone = band(d, 4.0, 7.2, fs);
-              float bars = band(abs(fract(t / 0.9) - 0.5), 0.0, 0.25, ft / 0.9);
-              paint = max(paint, zone * bars * step(at, w * 0.5 - 0.3));
-              float stop = band(d, 7.8, 8.25, fs) * step(0.0, oneway > 0.5 ? 1.0 : (e == 0 ? -t : t)) * step(at, w * 0.5 - 0.3);
-              if (kind <= 4) paint = max(paint, stop);
+              if (d > 20.0) continue;
+              float stop = band(d, 5.0, 5.45, fs) * step(0.0, oneway > 0.5 ? 1.0 : (e == 0 ? -t : t)) * step(at, w * 0.5 - 0.3);
+              paint = max(paint, stop);
             }
           }
           if (kind == 16) { // runway: centre dashes, edge lines, threshold piano keys
@@ -144,10 +155,15 @@ export function roadMaterial() {
             float c2 = band(at, 0.0, 0.2, ft); paint = max(paint, c2); if (c2 > 0.0) pc = yellow;
           }
           col = mix(col, pc, paint * detail);
+          dPaint = paint * detail; dCol = pc;
         }
-        diffuseColor.rgb = col;`)
+        diffuseColor.rgb = col;
+        #ifdef DECAL
+          if (dPaint < 0.02) discard;
+          diffuseColor = vec4(dCol, dPaint);
+        #endif`)
   }
-  m.customProgramCacheKey = () => 'road1'
+  m.customProgramCacheKey = () => (decal ? 'road2d' : 'road2')
   return m
 }
 

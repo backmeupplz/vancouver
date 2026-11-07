@@ -5,6 +5,7 @@
 "plugins/ships/index.js",
 "plugins/planes/index.js",
 "plugins/landmarks/index.js",
-"plugins/delivery/index.js",
-"plugins/life/index.js"
+"plugins/drive/index.js",
+"plugins/life/index.js",
+"plugins/multiplayer/index.js"
 ]

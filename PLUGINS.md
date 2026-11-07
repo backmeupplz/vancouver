@@ -58,7 +58,7 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.light.night` | 0 (day) to 1 (night): lights a share of the windows |
 | `city.post.uniforms.tint` / `.desat` | grade of the final image: multiply (`Vector3`, 1 = none) and desaturate (0–1) |
 | `city.tiles` | the tile streamer (advanced) |
-| `city.on(event, fn)` | `'frame'` `(dt, t)`, `'view'` `(view)`, `'tile:load'` / `'tile:unload'` `(tile)`, `'weather'` `(weather)`; returns an unsubscribe function |
+| `city.on(event, fn)` | `'frame'` `(dt, t)`, `'view'` `(view)`, `'tile:load'` / `'tile:unload'` `(tile)`, `'weather'` `(weather)`, `'player'` `(player)`; returns an unsubscribe function |
 | `city.requestRender()`, `city.animate()` | see above |
 | `city.ui.addButton({ label, title, icon, onClick, panel })` | a toolbar button at the top right; with `panel: true`, `.panel` is a popover element you fill |
 | `city.ui.toast(text)` | a short message |
@@ -105,4 +105,21 @@ perspective camera the ink outlines are found from depth properly linearised and
 `THREE.Fog` you set on `city.scene` is used by the map and the trees alike). While your camera is active,
 `city.view.zoom` is the map zoom that shows the focus at the same scale, `center` is the focus and `bounds` the
 streamed square, and `'view'` fires as the focus moves. Nothing changes for the map view when no plugin has a
-camera. The delivery plugin is the example: it dives from the map into a chase camera behind a van and back.
+camera. The drive plugin is the example: it dives from the map into a chase camera behind a van (or a walker) and back.
+
+## Shared between plugins
+
+- **Weather** (`plugins/weather`): `city.weather = { kind, intensity, isNight, hour, live, wind, atmosphere }`, re-emitted
+  as `'weather'` on change. `wind` is `[x, z]` m/s (towards); `atmosphere = { horizon, zenith, fogNear, fogFar }` (hex
+  colours, metres) is the street-level look a plugin with a perspective camera applies as its sky gradient and
+  `THREE.Fog`. Under such a camera the weather plugin draws rain and snow as a world-space volume around the camera
+  (with splashes) and lights the scene in lightning; the map view keeps its screen-space layer.
+- **Traffic** (`plugins/life`): `city.traffic.nearby(x, z, r)` → `[{ id, x, y, z, heading, length, width, speed }]`
+  (forward = `(sin heading, 0, cos heading)`), `city.traffic.setObstacle(id, obj | null)` (a player's vehicle or walker
+  `{ x, z, heading, length, width, speed }` that cars brake for), `city.traffic.bump(id, impulse)` (a car was hit).
+- **The player** (`plugins/drive`): while the user drives or walks, `city.player = { mode: 'car' | 'foot', x, y, z,
+  heading, speed, colour, vehicle: 'van' }` (updated every frame, read it when you need it), else `null`; `'player'` is
+  emitted on enter, leave and car ⇄ foot. `city.models.van(colour)` and `city.models.person(colour)` return the same
+  low-poly models (forward −z, origin on the ground; `person.update(dt, speed)` runs the walk cycle), so other players
+  look alike. The drive plugin publishes its van and walker with `setObstacle('player-van' | 'player-walker', …)` and
+  collides with `city.traffic.nearby` and, when present, `city.multiplayer.nearby(x, z, r)` (same shape).

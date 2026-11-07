@@ -1,9 +1,9 @@
 // The Salmonberry Parcel Co. van: a small low-poly kei-style delivery van, flat-shaded Lambert like the map.
 // Local frame: forward -z, up +y, origin on the ground between the axles. 4.3 m long, 1.8 m wide.
-export function makeVan(THREE) {
+export function makeVan(THREE, colour = 0xf2a07e) { // colour: the body (a hex number or CSS colour)
   const van = new THREE.Group()
   const M = (color, extra) => new THREE.MeshLambertMaterial({ color, flatShading: true, ...extra })
-  const body = M(0xf2a07e), cream = M(0xf6ead2), dark = M(0x3a3f47), glass = M(0x5d7f96), trim = M(0x8a8f96)
+  const body = M(new THREE.Color(colour)), cream = M(0xf6ead2), dark = M(0x3a3f47), glass = M(0x5d7f96), trim = M(0x8a8f96)
   const box = (w, h, l, mat, x, y, z) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), mat); m.position.set(x, y, z); van.add(m); return m }
 
   // cargo box at the back and the cab at the front, its windshield raked back

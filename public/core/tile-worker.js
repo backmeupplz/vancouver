@@ -1,7 +1,7 @@
 // Turns a streamed map tile (tools/tiles.py) into ready-to-draw geometry buffers, off the page's thread.
 // Coordinates in the buffers are local to the tile: x east, y up, z south, metres from the tile's SW corner.
 import earcut from '../vendor/earcut.js'
-const GROUND_LIFT = 0.02 // per ground class, so overlapping layers never fight for depth
+const GROUND_LIFT = 0 // the ground is one non-overlapping layer (tools/tiles.py), so no class needs lifting
 const KIND = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living', 'pedestrian', 'footway', 'cycleway',
   'path', 'steps', 'track', 'rail', 'lightrail', 'runway', 'taxiway']
 const K = Object.fromEntries(KIND.map((k, i) => [k, i]))
@@ -63,7 +63,8 @@ function build(t, level) {
   const out = { terrain: terr }
   out.ground = ground(t, terr, level)
   const lines = readLines(t)
-  out.roads = roads(t, terr, lines, level)
+  const rd = roads(t, terr, lines, level)
+  out.roads = rd.surf; out.paint = rd.paint
   out.graph = graph(t, lines)
   out.graph.pois = pois(t)
   const b = buildings(t, terr, level)
@@ -106,6 +107,13 @@ function ground(t, terr, level) {
   let o = s.off
   const runs = dv.getUint16(o, true); o += 2
   const pos = [], cls = [], idx = []
+  const seen = new Map() // shared vertices: one per (point, class), so each tile uploads about a third as much
+  const vert = (x, y, c, lift) => {
+    const key = Math.round(x * 50) * 1e7 + Math.round(y * 50) + c * 1e14
+    let i = seen.get(key)
+    if (i === undefined) { i = pos.length / 3; seen.set(key, i); pos.push(x, heightAt(terr, x, y) + lift, -y); cls.push(c) }
+    return i
+  }
   let hmin = Infinity, hmax = -Infinity
   for (const v of terr.h) { hmin = Math.min(hmin, v); hmax = Math.max(hmax, v) }
   const maxEdge = hmax - hmin < 2 ? Infinity : t.size / (terr.n - 1) // one terrain cell
@@ -129,12 +137,10 @@ function ground(t, terr, level) {
           else { const mx = (cx + ax) / 2, my = (cy + ay) / 2; emit(ax, ay, bx, by, mx, my, depth + 1); emit(mx, my, bx, by, cx, cy, depth + 1) }
           return
         }
-        const base = pos.length / 3
-        pos.push(ax, heightAt(terr, ax, ay) + lift, -ay, bx, heightAt(terr, bx, by) + lift, -by, cx, heightAt(terr, cx, cy) + lift, -cy)
-        cls.push(c, c, c)
+        const va = vert(ax, ay, c, lift), vb = vert(bx, by, c, lift), vc = vert(cx, cy, c, lift)
         // face up: earcut keeps the ring's winding; pick the order whose normal points +y
         const cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
-        if (cross > 0) idx.push(base, base + 1, base + 2); else idx.push(base, base + 2, base + 1)
+        if (cross > 0) idx.push(va, vb, vc); else idx.push(va, vc, vb)
       }
       for (let i = 0; i < tri.length; i += 3) {
         const a = tri[i] * 2, b = tri[i + 1] * 2, d = tri[i + 2] * 2
@@ -204,7 +210,7 @@ function readLines(t) {
     const np = pts.length / 2
     let z = null
     if (flags & 4) { z = new Float32Array(np); for (let p = 0; p < np; p++) { z[p] = dv.getInt16(o, true) / 10; o += 2 } }
-    out.push({ kind, lanes, oneway: !!(flags & 1), band: !!(flags & 2), drive: !!(flags & 8), layer, w, a, b, pts, z })
+    out.push({ kind, lanes, oneway: !!(flags & 1), band: !!(flags & 2), drive: !!(flags & 8), crossing: !!(flags & 16), layer, w, a, b, pts, z })
   }
   return out
 }
@@ -213,16 +219,18 @@ function readLines(t) {
 // carriageways on top, so a big road's sidewalk never covers a side street. Markings are drawn by the shader
 // from per-vertex (along, across) coordinates; they fade out near junctions.
 function roads(t, terr, lines, level) {
+  // Road surfaces, sidewalks and paths are part of the ground (baked as non-overlapping polygons). Here: bridge
+  // decks (full surfaces, raised on their LiDAR heights) and, as thin decals on the ground, the paint: lane lines,
+  // stop lines, the crosswalks OpenStreetMap maps, and rails.
   const deg = new Map()
   for (const L of lines) for (const n of [L.a, L.b]) deg.set(n, (deg.get(n) || 0) + 1)
-  const P = [], A = [], B = [], I = [] // position, aRoad (s, across, width, kind), aRoad2 (lanes+oneway, dStart, dEnd, len), index
-  let nv = 0
-  const strip = (pts, zs, half, lift, kind, extra, w, junctionA, junctionB) => {
-    // densify so the strip follows the ground, then offset left/right with mitred joins
+  const mk = () => ({ P: [], A: [], B: [], I: [], nv: 0 })
+  const surf = mk(), paint = mk()
+  const strip = (T, pts, zs, half, lift, kind, extra, w, junctionA, junctionB) => {
     const xs = [], ys = [], zz = []
     for (let i = 0; i < pts.length / 2 - 1; i++) {
       const x0 = pts[i * 2], y0 = pts[i * 2 + 1], x1 = pts[i * 2 + 2], y1 = pts[i * 2 + 3]
-      const L = Math.hypot(x1 - x0, y1 - y0), n = zs ? 1 : Math.max(1, Math.ceil(L / 8))
+      const L = Math.hypot(x1 - x0, y1 - y0), n = zs ? 1 : Math.max(1, Math.ceil(L / 6))
       for (let k = 0; k < n; k++) {
         const f = k / n
         xs.push(x0 + (x1 - x0) * f); ys.push(y0 + (y1 - y0) * f)
@@ -241,58 +249,67 @@ function roads(t, terr, lines, level) {
       const p = Math.max(0, i - 1), q = Math.min(m - 1, i + 1)
       let tx = xs[q] - xs[p], ty = ys[q] - ys[p]; const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl
       let nx = -ty, ny = tx, k = 1
-      if (i > 0 && i < m - 1) { // miter
+      if (i > 0 && i < m - 1) {
         let ax = xs[i] - xs[i - 1], ay = ys[i] - ys[i - 1]; const al = Math.hypot(ax, ay) || 1; ax /= al; ay /= al
         k = 1 / Math.max(0.5, Math.abs(-ay * nx + ax * ny))
       }
-      const y = zz[i] ?? heightAt(terr, xs[i], ys[i])
       for (const side of [-1, 1]) {
-        P.push(xs[i] + nx * half * k * side, y + lift, -(ys[i] + ny * half * k * side))
-        A.push(cum[i], side * half, w, kind)
-        B.push(extra, junctionA ? cum[i] : 999, junctionB ? len - cum[i] : 999, len)
+        const px = xs[i] + nx * half * k * side, py = ys[i] + ny * half * k * side
+        const y = zz[i] ?? heightAt(terr, px, py) // decals follow the ground under each edge, not the centre line
+        T.P.push(px, y + lift, -py)
+        T.A.push(cum[i], side * half, w, kind)
+        T.B.push(extra, junctionA ? cum[i] : 999, junctionB ? len - cum[i] : 999, len)
       }
-      if (i) { const b = nv + (i - 1) * 2; I.push(b, b + 2, b + 1, b + 1, b + 2, b + 3) }
+      if (i) { const b = T.nv + (i - 1) * 2; T.I.push(b, b + 2, b + 1, b + 1, b + 2, b + 3) }
     }
-    nv += m * 2
+    T.nv += m * 2
   }
   // bridge decks: a fascia on both sides and an underside, so a deck reads as a slab, not a ribbon
   const deck = (L) => {
-    const pts = L.pts, zs = L.z, m = pts.length / 2, half = L.w / 2 + (L.band ? 2.5 : 0.6), th = L.kind <= K.tertiary ? 1.6 : 0.9
+    const T = surf, pts = L.pts, zs = L.z, m = pts.length / 2, half = L.w / 2 + (L.band ? 2.5 : 0.6), th = L.kind <= K.tertiary ? 1.6 : 0.9
     for (let i = 0; i < m - 1; i++) {
       const x0 = pts[i * 2], y0 = pts[i * 2 + 1], x1 = pts[i * 2 + 2], y1 = pts[i * 2 + 3]
       const l = Math.hypot(x1 - x0, y1 - y0) || 1, nx = -(y1 - y0) / l, ny = (x1 - x0) / l
       for (const sd of [-1, 1]) {
         const ax = x0 + nx * half * sd, ay = y0 + ny * half * sd, bx = x1 + nx * half * sd, by = y1 + ny * half * sd
-        const b = nv
-        P.push(ax, zs[i] + 0.35, -ay, bx, zs[i + 1] + 0.35, -by, bx, zs[i + 1] - th, -by, ax, zs[i] - th, -ay)
-        for (let k = 0; k < 4; k++) { A.push(0, half * sd, L.w, 101); B.push(0, 999, 999, l) }
-        if (sd > 0) I.push(b, b + 1, b + 2, b, b + 2, b + 3); else I.push(b, b + 2, b + 1, b, b + 3, b + 2)
-        nv += 4
+        const b = T.nv
+        T.P.push(ax, zs[i] + 0.35, -ay, bx, zs[i + 1] + 0.35, -by, bx, zs[i + 1] - th, -by, ax, zs[i] - th, -ay)
+        for (let k = 0; k < 4; k++) { T.A.push(0, half * sd, L.w, 101); T.B.push(0, 999, 999, l) }
+        if (sd > 0) T.I.push(b, b + 1, b + 2, b, b + 2, b + 3); else T.I.push(b, b + 2, b + 1, b, b + 3, b + 2)
+        T.nv += 4
       }
-      const b = nv // underside
-      P.push(x0 - nx * half, zs[i] - th, -(y0 - ny * half), x1 - nx * half, zs[i + 1] - th, -(y1 - ny * half), x1 + nx * half, zs[i + 1] - th, -(y1 + ny * half), x0 + nx * half, zs[i] - th, -(y0 + ny * half))
-      for (let k = 0; k < 4; k++) { A.push(0, 0, L.w, 101); B.push(0, 999, 999, l) }
-      I.push(b, b + 1, b + 2, b, b + 2, b + 3); nv += 4
+      const b = T.nv
+      T.P.push(x0 - nx * half, zs[i] - th, -(y0 - ny * half), x1 - nx * half, zs[i + 1] - th, -(y1 - ny * half), x1 + nx * half, zs[i + 1] - th, -(y1 + ny * half), x0 + nx * half, zs[i] - th, -(y0 + ny * half))
+      for (let k = 0; k < 4; k++) { T.A.push(0, 0, L.w, 101); T.B.push(0, 999, 999, l) }
+      T.I.push(b, b + 1, b + 2, b, b + 2, b + 3); T.nv += 4
     }
   }
-  for (const L of lines) if (L.z && L.kind <= K.track) deck(L)
-  // pass 1: bands (sidewalks + boulevards, or rail ballast / path surface), pass 2: carriageways on top
-  const order = [...lines].sort((p, q) => q.kind - p.kind) // minor first, major last (drawn on top)
+  const len = (L) => { let s = 0; for (let i = 0; i < L.pts.length / 2 - 1; i++) s += Math.hypot(L.pts[i * 2 + 2] - L.pts[i * 2], L.pts[i * 2 + 3] - L.pts[i * 2 + 1]); return s }
+  const order = [...lines].sort((p, q) => q.kind - p.kind)
   for (const L of order) {
-    if (!L.band) continue
-    const boulevard = L.kind === K.residential || L.kind === K.tertiary ? 2.2 : 0, walk = L.kind <= K.secondary ? 3.2 : 2.0
-    const half = L.w / 2 + boulevard + walk
-    strip(L.pts, L.z, half, 0.12 + (L.z ? 0.3 : 0), 100, boulevard * 256 + walk * 16, L.w, false, false) // kind 100 = band
-  }
-  for (const L of order) {
-    const rank = 18 - L.kind
     const ja = (deg.get(L.a) || 0) >= 3, jb = (deg.get(L.b) || 0) >= 3
-    const lift = 0.18 + rank * 0.004 + (L.z ? 0.35 : 0) + (L.kind >= K.footway && L.kind <= K.track ? -0.03 : 0)
-    strip(L.pts, L.z, L.w / 2, lift, L.kind, L.lanes + (L.oneway ? 32 : 0), L.w, ja, jb)
+    if (L.z) { // bridges: the whole surface, raised
+      if (L.kind > K.track && L.kind !== K.rail && L.kind !== K.lightrail) continue
+      if (L.band) { const bl = L.kind === K.residential || L.kind === K.tertiary ? 0 : 0, walk = 2.0; strip(surf, L.pts, L.z, L.w / 2 + walk, 0.3, 100, bl * 256 + walk * 16, L.w, false, false) }
+      strip(surf, L.pts, L.z, L.w / 2, 0.36 + (18 - L.kind) * 0.004, L.kind, L.lanes + (L.oneway ? 32 : 0), L.w, ja, jb)
+      continue
+    }
+    if (level !== 0) continue // the overview shows surfaces only
+    const l = len(L)
+    if (L.kind <= K.living && (L.lanes >= 2 || L.kind <= K.trunk) && l > 12) {
+      strip(paint, L.pts, null, L.w / 2, 0.05, L.kind, L.lanes + (L.oneway ? 32 : 0), L.w, ja && l > 30, jb && l > 30)
+    } else if (L.crossing) {
+      strip(paint, L.pts, null, Math.max(1.5, L.w / 2 + 0.4), 0.06, 102, 0, L.w, false, false) // zebra
+    } else if (L.kind === K.rail || L.kind === K.lightrail) {
+      strip(paint, L.pts, null, 1.3, 0.05, L.kind, 0, L.w, false, false)
+    }
   }
-  if (!nv) return null
-  const PP = new Float32Array(P)
-  return { position: PP, normal: normals(terr, PP), aRoad: new Float32Array(A), aRoad2: new Float32Array(B), index: nv > 65535 ? new Uint32Array(I) : new Uint16Array(I) }
+  const pack = (T) => {
+    if (!T.nv) return null
+    const PP = new Float32Array(T.P)
+    return { position: PP, normal: normals(terr, PP), aRoad: new Float32Array(T.A), aRoad2: new Float32Array(T.B), index: T.nv > 65535 ? new Uint32Array(T.I) : new Uint16Array(T.I) }
+  }
+  return { surf: pack(surf), paint: pack(paint) }
 }
 
 // drivable/walkable graph for plugins (traffic, people): pieces with global node ids and world points

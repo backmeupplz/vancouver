@@ -39,7 +39,47 @@ export class Tiles {
       const dv = new DataView(buf)
       this.coarse = { x0: dv.getFloat32(4, true), y1: dv.getFloat32(8, true), c: dv.getFloat32(12, true), w: dv.getUint32(16, true), h: dv.getUint32(20, true), z: new Int16Array(buf, 24) }
     } catch (e) { console.warn('heights', e) }
+    if (this.coarse) this.makeBase(`${this.base}base.png?v=${idx.built || 0}`)
     return idx
+  }
+
+  // the whole map at 1 px = 64 m (tools/heights.py), always drawn under the tiles: nothing is ever black while
+  // tiles load, at any zoom. Its heights are the lower envelope of the coarse grid, a little sunk, so it never
+  // pokes through the real ground.
+  makeBase(url) {
+    const g = this.coarse, step = 2, nx = Math.floor((g.w - 1) / step) + 1, ny = Math.floor((g.h - 1) / step) + 1
+    const pos = new Float32Array(nx * ny * 3), uv = new Float32Array(nx * ny * 2), idx = new Uint32Array((nx - 1) * (ny - 1) * 6)
+    const Z = (i, j) => g.z[Math.min(g.h - 1, j) * g.w + Math.min(g.w - 1, i)] / 10
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      let lo = Infinity
+      for (let a = -1; a <= step; a++) for (let b = -1; b <= step; b++) lo = Math.min(lo, Z(Math.max(0, i * step + a), Math.max(0, j * step + b)))
+      const k = j * nx + i
+      pos.set([g.x0 + i * step * g.c, lo - 4, -(g.y1 - j * step * g.c)], k * 3)
+      uv.set([(i * step + 0.5) / g.w, 1 - (j * step + 0.5) / g.h], k * 2)
+    }
+    let o = 0
+    for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) { const a = j * nx + i; idx.set([a, a + nx, a + 1, a + 1, a + nx, a + nx + 1], o); o += 6 }
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3)); geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2)); geo.setIndex(new THREE.BufferAttribute(idx, 1))
+    geo.computeVertexNormals()
+    const tex = new THREE.TextureLoader().load(url, () => this.onChange?.())
+    tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4
+    const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: tex, polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 16 }))
+    m.renderOrder = -1; m.matrixAutoUpdate = false
+    this.scene.add(m)
+    this.baseMesh = m
+  }
+
+  // highest coarse ground in a rectangle (world metres, y north): tall ground stands up into the view from outside it
+  maxHeight(x0, x1, y0, y1) {
+    const g = this.coarse
+    if (!g) return 0
+    const i0 = Math.max(0, Math.floor((x0 - g.x0) / g.c)), i1 = Math.min(g.w - 1, Math.ceil((x1 - g.x0) / g.c))
+    const j0 = Math.max(0, Math.floor((g.y1 - y1) / g.c)), j1 = Math.min(g.h - 1, Math.ceil((g.y1 - y0) / g.c))
+    const s = Math.max(1, Math.floor(Math.max(i1 - i0, j1 - j0) / 64))
+    let m = 0
+    for (let j = j0; j <= j1; j += s) for (let i = i0; i <= i1; i += s) m = Math.max(m, g.z[j * g.w + i] / 10)
+    return m
   }
 
   key(level, i, j) { return `${level}/${i}_${j}` }
@@ -49,9 +89,15 @@ export class Tiles {
   viewRect(camera, target, radius) {
     if (camera.isPerspectiveCamera) { const x = target.x, y = -target.z; return { x0: x - radius, x1: x + radius, y0: y - radius, y1: y + radius } }
     const z = camera.zoom, hw = (camera.right - camera.left) / z / 2, vh = (camera.top - camera.bottom) / z / 2
-    const cx = target.x, cn = -target.z
-    // ground depth seen = screen height / sin(30°); the target sits mid-screen
-    return { x0: cx - hw - 60, x1: cx + hw + 60, y0: cn - vh * 2 - 60, y1: cn + vh * 2 + 60 + Math.min(2500, 300 / Math.max(z, 0.05)) }
+    const cx = target.x, cn = -target.z, h0 = target.y || 0
+    // ground depth seen = screen height / sin(30°) around the target; ground higher than the target shows from
+    // further north (and from further south at the bottom edge), 1.73 m per metre of height difference
+    let y0 = cn - vh * 2 - 80, y1 = cn + vh * 2 + 80
+    const north = this.maxHeight(cx - hw, cx + hw, y1, y1 + 3500) - h0, south = this.maxHeight(cx - hw, cx + hw, y0 - 2500, y0) - h0
+    if (north > 0) y1 += Math.min(3500, north * 1.732)
+    if (south > 0) y0 -= Math.min(2500, south * 1.732)
+    const pad = Math.max(60, hw * 0.15) // a little beyond the edges, so panning reveals loaded ground
+    return { x0: cx - hw - pad, x1: cx + hw + pad, y0: y0 - pad, y1: y1 + pad }
   }
 
   update(camera, target, radius = 900) {
@@ -139,14 +185,15 @@ export class Tiles {
       geo.setAttribute('normal', new THREE.BufferAttribute(res.ground.normal, 3, true))
       add(geo, this.mats.ground, { receiveShadow: true })
     }
-    if (res.roads) {
+    for (const [r, mat] of [[res.roads, this.mats.road], [res.paint, this.mats.paint]]) { // bridge surfaces; paint on the ground
+      if (!r) continue
       const geo = new THREE.BufferGeometry()
-      geo.setAttribute('position', new THREE.BufferAttribute(res.roads.position, 3))
-      geo.setAttribute('aRoad', new THREE.BufferAttribute(res.roads.aRoad, 4))
-      geo.setAttribute('aRoad2', new THREE.BufferAttribute(res.roads.aRoad2, 4))
-      geo.setIndex(new THREE.BufferAttribute(res.roads.index, 1))
-      geo.setAttribute('normal', new THREE.BufferAttribute(res.roads.normal, 3, true))
-      add(geo, this.mats.road, { receiveShadow: true })
+      geo.setAttribute('position', new THREE.BufferAttribute(r.position, 3))
+      geo.setAttribute('aRoad', new THREE.BufferAttribute(r.aRoad, 4))
+      geo.setAttribute('aRoad2', new THREE.BufferAttribute(r.aRoad2, 4))
+      geo.setIndex(new THREE.BufferAttribute(r.index, 1))
+      geo.setAttribute('normal', new THREE.BufferAttribute(r.normal, 3, true))
+      add(geo, mat, { receiveShadow: true, renderOrder: mat === this.mats.paint ? 1 : 0 })
     }
     const bgeo = (b) => {
       const geo = new THREE.BufferGeometry()

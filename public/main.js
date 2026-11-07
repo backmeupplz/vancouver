@@ -14,6 +14,7 @@ addEventListener('error', (e) => { loadingEl?.classList.add('error'); if (loadin
 
 let city = null // the plugin host (city.js)
 let dirty = true // render on demand: only when something changed
+let shadowStale = false, lastShadow = 0 // new tiles refresh the shadow map, at most twice a second
 const mobile = matchMedia('(pointer: coarse)').matches || innerWidth < 700
 
 const renderer = new THREE.WebGLRenderer({ antialias: false, canvas: $('canvas'), powerPreference: 'high-performance' })
@@ -39,10 +40,10 @@ sun.shadow.bias = -0.0005
 scene.add(sun, sun.target)
 
 // ---------- the map ----------
-const mats = { ground: groundMaterial(), road: roadMaterial(), building: buildingMaterial(), tree: treeMaterial(treeAtlas()) }
+const mats = { ground: groundMaterial(), road: roadMaterial(), paint: roadMaterial(true), building: buildingMaterial(), tree: treeMaterial(treeAtlas()) }
 const tiles = new Tiles({
   scene, treeScene, mats,
-  onChange: () => { dirty = true; renderer.shadowMap.needsUpdate = true },
+  onChange: () => { dirty = true; shadowStale = true }, // shadows follow new tiles at most twice a second
   onLoad: (t) => city?.emit('tile:load', tileInfo(t)),
   onUnload: (t) => city?.emit('tile:unload', tileInfo(t)),
 })
@@ -241,6 +242,8 @@ function loop(now) {
   }
   city?.emit('frame', dt, now / 1000)
   updateShadows()
+  if (shadowStale && now - lastShadow > 500) { shadowStale = false; lastShadow = now; renderer.shadowMap.needsUpdate = true }
+  if (shadowStale) dirty = true // come back for it
   draw()
 }
 requestAnimationFrame(loop)

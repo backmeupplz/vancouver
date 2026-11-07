@@ -15,13 +15,14 @@ import mapbox_earcut as earcut
 sys.path.insert(0, os.path.dirname(__file__))
 from world import xy, latlon, extent, L0, L1, KX, KY, LAT_O, LON_O
 
-OUT = 'public/tiles'
+OUT = os.environ.get('OUT', 'public/tiles')
 HR = 2.0  # HRDEM cell, metres
 VERSION = 2
 
 # ---------------------------------------------------------------- ground classes (draw order = list order)
 GROUND = ['land', 'residential', 'commercial', 'industrial', 'farmland', 'grass', 'golf', 'scrub', 'wetland', 'forest', 'sand',
-          'rock', 'construction', 'apron', 'parking', 'plaza', 'playground', 'pitch', 'track', 'water', 'pier', 'pool', 'snow']
+          'rock', 'construction', 'apron', 'parking', 'plaza', 'playground', 'pitch', 'track', 'water', 'pier', 'pool', 'snow',
+          'trail', 'walk', 'cycle', 'ballast', 'sidewalk', 'blvd', 'road', 'arterial']  # streets last: they win where things overlap
 GI = {k: i for i, k in enumerate(GROUND)}
 
 
@@ -339,6 +340,23 @@ def build(ij):
 
     # ---- lines
     lines = road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0)
+    # streets as ground: carriageways, sidewalks and boulevards, paths and rail beds, unioned per class so junctions
+    # are clean (bridges are raised decks, drawn from the lines)
+    for L in lines:
+        if L['z'] or len(L['pts']) < 2: continue
+        k = L['kind']; ls = LineString(L['pts'])
+        cls = {'motorway': 'arterial', 'trunk': 'arterial', 'primary': 'arterial', 'secondary': 'arterial', 'tertiary': 'road', 'residential': 'road',
+               'service': 'road', 'living': 'road', 'pedestrian': 'walk', 'footway': 'walk', 'steps': 'walk', 'path': 'trail', 'track': 'trail',
+               'cycleway': 'cycle', 'rail': 'ballast', 'lightrail': 'ballast', 'runway': 'apron', 'taxiway': 'apron'}.get(k)
+        if not cls or L.get('crossing'): continue  # a crossing's footway lies on the road: the road wins, the zebra is paint
+        w = L['w'] if cls != 'ballast' else 3.4
+        polys.setdefault(cls, []).append(ls.buffer(w / 2, quad_segs=3, cap_style='round' if cls in ('road', 'arterial', 'walk') else 'flat'))
+        if L['band']:
+            blvd = 2.2 if k in ('residential', 'tertiary') else 0.0
+            walk = 3.0 if k in ('primary', 'secondary', 'trunk') else 2.0
+            outer = ls.buffer(w / 2 + blvd + walk, quad_segs=3, cap_style='flat')
+            polys.setdefault('sidewalk', []).append(outer)
+            if blvd: polys.setdefault('blvd', []).append(ls.buffer(w / 2 + blvd, quad_segs=3, cap_style='flat'))
 
     # ---- where no trunk may stand: carriageways (as drawn), rail, pitches, tracks, courts, car parks, beaches, pools
     nogo = Image.new('L', (N, N), 0); dn = ImageDraw.Draw(nogo)
@@ -698,7 +716,8 @@ def road_pieces(items, dsm, dtm, X0, Y0):
                 pts = densify(pts, 25)  # a long straight span needs points along it to carry its arch
                 z = deck_heights(pts, dsm, dtm, X0, Y0)
             out.append(dict(own=mid, kind=k, pts=pts, z=z, lanes=lanes, w=w, ow=ow, band=band, layer=int(hnum(t.get('layer')) or 0), a=refs[a], b=refs[b],
-                            name=t.get('name', ''), drive=k in DRIVE and t.get('access') not in ('private', 'no')))
+                            name=t.get('name', ''), drive=k in DRIVE and t.get('access') not in ('private', 'no'),
+                            crossing=k in ('footway', 'cycleway', 'path') and (t.get('footway') == 'crossing' or t.get('cycleway') == 'crossing') and t.get('crossing') not in ('unmarked', 'no')))
     return out
 
 
@@ -783,19 +802,37 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     wat = [p for p in polys.get('water', []) if p.intersects(tb)]
     water_u = unary_union(wat) if wat else None
     land_base = tb.difference(water_u) if wat else tb  # land and water meet edge to edge, never overlap
+    # per class: the union clipped to the tile and simplified, small bits dropped (the class below fills in)
+    per = {}
     for k in GROUND:
         src = [land_base] if k == 'land' else polys.get(k, [])
         cand = [p for p in src if p.intersects(tb)]
         if not cand: continue
         try: g = unary_union(cand).intersection(tb)
         except Exception: g = unary_union([c.buffer(0) for c in cand]).intersection(tb)
-        if wat and k not in ('water', 'pier', 'land'): g = g.difference(water_u)  # beaches etc. stop at the waterline
+        if wat and k not in ('water', 'pier', 'land') and k not in ('road', 'arterial', 'sidewalk', 'blvd', 'walk', 'cycle', 'trail', 'ballast'): g = g.difference(water_u)
         g = g.simplify(tol)
-        geoms = [p for p in (g.geoms if hasattr(g, 'geoms') else [g]) if p.geom_type == 'Polygon' and p.area >= min_area]
+        if k != 'land':
+            parts = [p for p in (g.geoms if hasattr(g, 'geoms') else [g]) if p.geom_type == 'Polygon' and p.area >= min_area]
+            if not parts: continue
+            g = unary_union(parts)
+        per[k] = g
+    # one non-overlapping layer: each class keeps what no class above it covers (no z-fighting anywhere)
+    covered = None
+    for k in reversed(GROUND):
+        if k not in per: continue
+        g = per[k]
+        mine = g if covered is None else g.difference(covered)
+        covered = g if covered is None else covered.union(g)
+        per[k] = mine
+    for k in GROUND:
+        if k not in per: continue
+        g = per[k]
+        geoms = [p for p in (g.geoms if hasattr(g, 'geoms') else [g]) if p.geom_type == 'Polygon' and p.area >= 0.01]
         if not geoms: continue
         body = bytearray()
         for p in geoms:
-            rings = [list(p.exterior.coords)[:-1]] + [list(r.coords)[:-1] for r in p.interiors if Polygon(r).area >= min_area / 4]
+            rings = [list(p.exterior.coords)[:-1]] + [list(r.coords)[:-1] for r in p.interiors]
             rings = [r for r in rings if len(r) >= 3]
             body += struct.pack('<H', len(rings))
             for r in rings: body += pack_ring(out, r)
@@ -817,7 +854,7 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     for L in sel:
         pts = L['pts'] if detail or len(L['pts']) <= 2 else list(LineString(L['pts']).simplify(1.5).coords)
         z = L['z'] if detail and L['z'] and len(pts) == len(L['pts']) else None
-        flags = (1 if L['ow'] else 0) | (2 if L['band'] else 0) | (4 if z else 0) | (8 if L['drive'] else 0)
+        flags = (1 if L['ow'] else 0) | (2 if L['band'] else 0) | (4 if z else 0) | (8 if L['drive'] else 0) | (16 if L.get('crossing') else 0)
         lb += struct.pack('<BBBbHII', KI[L['kind']], min(255, L['lanes']), flags, max(-8, min(7, L['layer'])), int(min(655, L['w']) * 100), nodes[L['a']], nodes[L['b']])
         lb += pack_ring(out, pts)
         if z: lb += np.round(np.array(z) * 10).astype('<i2').tobytes()
