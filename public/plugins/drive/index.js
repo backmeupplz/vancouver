@@ -82,8 +82,9 @@ export default function drive(city) {
       bb.push(x0, y0, x1, y1)
       for (let cx = Math.floor(x0 / CELL); cx <= Math.floor(x1 / CELL); cx++) for (let cy = Math.floor(y0 / CELL); cy <= Math.floor(y1 / CELL); cy++) put(fg, ckey(cx, cy), r)
     }
-    return { t, segs, rg, fg, fp, bb }
+    return { t, segs, rg, fg, fp, bb, segSeen: new Uint32Array(segs.length), fpSeen: new Uint32Array(bb.length / 4) }
   }
+  let stamp = 0 // dedupe marks (instead of a Set per query: these run several times a frame)
   function each(x, y, r, fn) { // fn(tileIndex) for detail tiles near (x, north)
     for (let i = Math.floor((x - r) / 1024); i <= Math.floor((x + r) / 1024); i++) for (let j = Math.floor((y - r) / 1024); j <= Math.floor((y + r) / 1024); j++) {
       const k = `${i}_${j}`
@@ -95,12 +96,12 @@ export default function drive(city) {
   // the nearest road segment point within r metres: drivable ones, or walkable ones (walk); deck: bridge decks only
   function nearestRoad(x, y, r, deck = false, walk = false) {
     let best = null, bd = r
+    const mark = ++stamp
     each(x, y, r, (b) => {
-      const seen = new Set()
       for (let cx = Math.floor((x - r) / CELL); cx <= Math.floor((x + r) / CELL); cx++) for (let cy = Math.floor((y - r) / CELL); cy <= Math.floor((y + r) / CELL); cy++) {
         for (const id of b.rg.get(ckey(cx, cy)) || []) {
-          if (seen.has(id)) continue
-          seen.add(id)
+          if (b.segSeen[id] === mark) continue
+          b.segSeen[id] = mark
           const s = b.segs[id]
           if ((walk ? !s.wlk : !s.drv) || (deck && s.z0 == null)) continue
           const dx = s.x1 - s.x0, dy = s.y1 - s.y0, L2 = dx * dx + dy * dy || 1
@@ -115,13 +116,13 @@ export default function drive(city) {
   // push a circle out of building footprints: returns the summed push (x, y) or null
   function collide(x, y, rad) {
     let px = 0, py = 0, hit = false
+    const mark = ++stamp
     each(x, y, rad, (b) => {
       if (!b.fp) return
-      const seen = new Set()
       for (let cx = Math.floor((x - rad) / CELL); cx <= Math.floor((x + rad) / CELL); cx++) for (let cy = Math.floor((y - rad) / CELL); cy <= Math.floor((y + rad) / CELL); cy++) {
         for (const r of b.fg.get(ckey(cx, cy)) || []) {
-          if (seen.has(r)) continue
-          seen.add(r)
+          if (b.fpSeen[r] === mark) continue
+          b.fpSeen[r] = mark
           if (x + rad < b.bb[r * 4] || x - rad > b.bb[r * 4 + 2] || y + rad < b.bb[r * 4 + 1] || y - rad > b.bb[r * 4 + 3]) continue
           const P = b.fp.pts, s0 = b.fp.start[r], s1 = b.fp.start[r + 1]
           let inside = false, bd = Infinity, bx = 0, by = 0
@@ -142,6 +143,30 @@ export default function drive(city) {
     return hit ? { x: px, y: py } : null
   }
   const insideBuilding = (x, y) => !!collide(x, y, 0.01)
+  // the first building wall on the way from (x0, y0) to (x1, y1): the fraction of the way (1 = none)
+  function wallHit(x0, y0, x1, y1) {
+    let best = 1
+    const mark = ++stamp, dx = x1 - x0, dy = y1 - y0
+    const lx = Math.min(x0, x1), hx = Math.max(x0, x1), ly = Math.min(y0, y1), hy = Math.max(y0, y1)
+    each((lx + hx) / 2, (ly + hy) / 2, Math.max(hx - lx, hy - ly) / 2 + 1, (b) => {
+      if (!b.fp) return
+      for (let cx = Math.floor(lx / CELL); cx <= Math.floor(hx / CELL); cx++) for (let cy = Math.floor(ly / CELL); cy <= Math.floor(hy / CELL); cy++) {
+        for (const r of b.fg.get(ckey(cx, cy)) || []) {
+          if (b.fpSeen[r] === mark) continue
+          b.fpSeen[r] = mark
+          if (hx < b.bb[r * 4] || lx > b.bb[r * 4 + 2] || hy < b.bb[r * 4 + 1] || ly > b.bb[r * 4 + 3]) continue
+          const P = b.fp.pts, s0 = b.fp.start[r], s1 = b.fp.start[r + 1]
+          for (let q = s0, w = s1 - 2; q < s1; w = q, q += 2) {
+            const ex = P[q] - P[w], ey = P[q + 1] - P[w + 1], den = dx * ey - dy * ex
+            if (Math.abs(den) < 1e-9) continue
+            const fx = P[w] - x0, fy = P[w + 1] - y0, t = (fx * ey - fy * ex) / den, u = (fx * dy - fy * dx) / den
+            if (t >= 0 && t < best && u >= 0 && u <= 1) best = t
+          }
+        }
+      }
+    })
+    return best
+  }
   function isWater(x, y) {
     const t = infos.get(`${Math.floor(x / 1024)}_${Math.floor(y / 1024)}`)
     if (!t?.water) return false
@@ -390,6 +415,8 @@ export default function drive(city) {
       .compact .dlv-btns .opt, .dlv-btns .short, .compact .dlv-btns .long { display: none }
       .compact .dlv-btns .short { display: inline }
       .compact .dlv-btns [data-exit] { width: 78px; height: 44px; padding: 0; border-radius: 12px; }
+      .compact .dlv-btns [data-assist] { height: 44px; padding: 0 10px; border-radius: 12px; }
+      .compact.dlv-assist .dlv-read { max-width: calc(100% - var(--sl) - var(--sr) - 230px); }
       .compact .dlv-job { top: calc(var(--st) + 52px); left: var(--sl); right: var(--sr); transform: none; width: auto; max-width: 460px; padding: 8px 12px 8px 8px; gap: 10px; }
       .compact .dlv-job > div:last-child { min-width: 0; flex: 1 }
       .compact .dlv-job .where, .compact .dlv-job .sub, .compact .dlv-job .what { max-width: none }
@@ -415,7 +442,7 @@ export default function drive(city) {
     const el = (cls, html) => { const d = document.createElement('div'); d.className = cls; d.innerHTML = html; d.hidden = true; document.body.append(d); return d }
     const co = el('dlv dlv-co card', `<div class="name">Salmonberry Parcel Co.</div>
       <div class="stats"><span><b data-n>0</b> delivered</span><span><b data-m>$0.00</b></span><span data-c></span></div><div class="credit">Streets © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors</div>`)
-    const btns = el('dlv dlv-btns', '<button class="opt" data-assist title="Gently lines the van up with the road (G)">Assist on</button><button class="opt" data-mute title="Sound (M)">Sound on</button><button data-exit title="Back to the map (Esc)" aria-label="Back to the map"><span class="long">Back to map</span><span class="short">‹ Map</span></button>')
+    const btns = el('dlv dlv-btns', '<button data-assist title="Lane assist (G): while you aren’t steering, the van gently straightens up along the road it’s on. It never steers against you."></button><button class="opt" data-mute title="Sound (M)">Sound on</button><button data-exit title="Back to the map (Esc)" aria-label="Back to the map"><span class="long">Back to map</span><span class="short">‹ Map</span></button>')
     const read = el('dlv dlv-read card', '')
     const job = el('dlv dlv-job card', `<div class="dlv-arrow"><div class="n">N</div><svg viewBox="0 0 30 30"><path d="M15 3 L25 25 L15 20 L5 25 Z" fill="#ffc9b5" stroke="#3a2a26" stroke-width="1.5" stroke-linejoin="round"/></svg></div>
       <div><div class="what" data-w></div><div class="where" data-p></div><div class="sub" data-s></div><div class="meta"><span data-d></span><span data-t></span></div></div>`)
@@ -439,7 +466,16 @@ export default function drive(city) {
   ui.tact.addEventListener('click', () => toggleFoot())
   ui.exit.onclick = () => exit()
   ui.cancel.onclick = () => cancelPick()
-  ui.assist.onclick = () => { assist = !assist; ui.assist.textContent = assist ? 'Assist on' : 'Assist off' }
+  // Lane assist, on by default: keys and touch buttons steer all or nothing, so holding a straight line takes constant
+  // tapping without it. It only acts while nothing is steering, above walking pace, on a road and nearly lined up
+  // with it, so it never fights the driver; the choice is remembered.
+  function setAssist(on) { assist = on; try { localStorage.setItem('delivery.assist', on ? '1' : '0') } catch {}; assistLabel() }
+  function assistLabel() { ui.assist.innerHTML = `<span class="long">Lane assist: ${assist ? 'on' : 'off'}</span><span class="short">Lane ${assist ? 'on' : 'off'}</span>` }
+  ui.assist.onclick = () => setAssist(!assist)
+  function assistHint() { // once, the first time the van is driven
+    try { if (localStorage.getItem('delivery.assistSeen')) return; localStorage.setItem('delivery.assistSeen', '1') } catch { return }
+    city.ui.toast(`Lane assist is ${assist ? 'on' : 'off'}: when you let go of the steering, the van straightens up along the road.${touchy ? ' The Lane button switches it.' : ' G or the button switches it.'}`, 7000)
+  }
   ui.mute.onclick = () => setMuted(!muted)
   ui.mute.textContent = muted ? 'Sound off' : 'Sound on'
   let popT = 0, helpT = 0
@@ -466,6 +502,8 @@ export default function drive(city) {
   let state = 'off', anim = null, offFrame = null, t0 = 0, mapPose = null, fromPose = null, saved = null
   let deliver = false, onFoot = false, hasVan = true, assist = true, job = null, shift = { n: 0, money: 0 }, hudAt = 0, jobRetry = 0, readAt = 0, street = null, shake = 0, skyAt = 0, fogFar = 850
   let pickKind = null, down = null
+  try { assist = localStorage.getItem('delivery.assist') !== '0' } catch {}
+  assistLabel()
   const keys = new Set()
 
   const button = city.ui.addButton({ label: 'Drive', icon: '🚐', title: 'Explore the streets by van or on foot, or deliver parcels (D)', panel: true })
@@ -623,7 +661,7 @@ export default function drive(city) {
     city.overlay.remove(blob, wblob, beam, ring, ring2, pool)
     city.scene.background = saved.bg; city.scene.fog = saved.fog
     publishPlayer(true)
-    document.body.classList.remove('dlv-on', 'dlv-touchy')
+    document.body.classList.remove('dlv-on', 'dlv-touchy'); document.documentElement.classList.remove('dlv-assist')
     button.button.setAttribute('aria-pressed', 'false')
     city.requestRender()
   }
@@ -648,14 +686,22 @@ export default function drive(city) {
     if (onFoot || Math.abs(car.speed) > 0.5 || snap) chase.yaw += wrap(P.yaw - chase.yaw) * k
     const fx = fwdX(chase.yaw), fy = fwdY(chase.yaw), sp = Math.max(0, P.speed)
     const back = onFoot ? 4.3 + sp * 0.18 : 8.6 + sp * 0.14, up = onFoot ? 1.9 + sp * 0.06 : 4.3 + sp * 0.05
-    let bx = P.x - fx * back, by = P.y - fy * back
-    // keep the boom out of buildings: shorten it to the first wall
-    for (let s = 0.25; s <= 1.0001; s += 0.25) {
-      if (insideBuilding(P.x - fx * back * s, P.y - fy * back * s)) { const f = Math.max(onFoot ? 0.3 : 0.35, s - 0.25); bx = P.x - fx * back * f; by = P.y - fy * back * f; break }
-    }
+    const bx = P.x - fx * back, by = P.y - fy * back
     const gy = Math.max(city.world.heightAt(bx, -by) + (onFoot ? 1.2 : 1.4), P.h + up)
     v3.set(bx, gy, -by)
     if (snap) chase.pos.copy(v3); else chase.pos.lerp(v3, 1 - Math.exp(-7 * dt))
+    // keep the camera out of buildings, every frame and after the smoothing (so it never glides through a wall):
+    // on the line from the player to the camera, stop short of the first wall; then step off walls beside it
+    const cx = chase.pos.x, cy = -chase.pos.z, k0 = wallHit(P.x, P.y, cx, cy)
+    if (k0 < 1) {
+      const len = Math.hypot(cx - P.x, cy - P.y) || 1, k = Math.max(0, k0 - 0.7 / len)
+      chase.pos.x = P.x + (cx - P.x) * k; chase.pos.z = -(P.y + (cy - P.y) * k)
+    }
+    const side = collide(chase.pos.x, -chase.pos.z, 0.6)
+    if (side) { chase.pos.x += side.x; chase.pos.z -= side.y }
+    // the near plane comes in when a wall is close, so it never cuts through one
+    const wall = collide(chase.pos.x, -chase.pos.z, 2.5)
+    chase.near = wall ? clamp((2.5 - Math.hypot(wall.x, wall.y)) * 0.6, 0.2, nearPlane()) : nearPlane()
     const ahead = onFoot ? 3 : 6
     v4.set(P.x + fwdX(P.yaw) * ahead, P.h + (onFoot ? 1.3 : 1.0), -(P.y + fwdY(P.yaw) * ahead))
     if (snap) chase.look.copy(v4); else chase.look.lerp(v4, 1 - Math.exp(-10 * dt))
@@ -901,7 +947,7 @@ export default function drive(city) {
       man.x = b.x + (b.tx - b.x) * e; man.y = b.y + (b.ty - b.y) * e; man.speed = e < 1 ? 3.2 : 0
       man.yaw += wrap(b.yaw - man.yaw) * Math.min(1, dt * 12)
       man.phase += dt * 9
-      if (e >= 1) { man.board = null; onFoot = false; car.parked = false; walker.visible = wblob.visible = false; sfx.door(); showHelp(); publishPlayer(true) }
+      if (e >= 1) { man.board = null; onFoot = false; car.parked = false; walker.visible = wblob.visible = false; sfx.door(); showHelp(); assistHint(); publishPlayer(true) }
       return
     }
     man.run = I.run
@@ -1084,6 +1130,7 @@ export default function drive(city) {
         if (deliver) ui.co.hidden = false; else ui.read.hidden = false
         ui.touch.hidden = false
         showHelp()
+        if (!onFoot) assistHint()
         hudAt = 0
       }
       return
@@ -1095,7 +1142,7 @@ export default function drive(city) {
     publish()
     place()
     chasePose(dt)
-    const fov = chaseFov(), near = nearPlane(), far = fogFar + 60
+    const fov = chaseFov(), near = chase.near ?? nearPlane(), far = fogFar + 60
     if (pcam.fov !== fov || pcam.near !== near || pcam.far !== far) { pcam.fov = fov; pcam.near = near; pcam.far = far; pcam.updateProjectionMatrix() }
     pcam.position.copy(chase.pos)
     if (shake > 0.001) { pcam.position.x += (Math.random() - 0.5) * shake; pcam.position.y += (Math.random() - 0.5) * shake; shake *= Math.exp(-10 * dt) }
@@ -1126,6 +1173,8 @@ export default function drive(city) {
     ui.tact.hidden = !can; ui.tact.textContent = can
     ui.act.hidden = !(nearVan() && !touchy); ui.act.innerHTML = '<kbd>E</kbd>Get in the van'
     ui.brk.textContent = onFoot ? 'Run' : 'Brake'
+    ui.assist.hidden = onFoot // it steers the van only
+    document.documentElement.classList.toggle('dlv-assist', !onFoot)
     const P = body(), name = street ? abbr(street.name) : ''
     if (!deliver) {
       const sp = Math.abs(P.speed) * 3.6

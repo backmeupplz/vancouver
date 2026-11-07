@@ -3,6 +3,7 @@ import { MapControls } from './vendor/MapControls.js'
 import { createCity, loadPlugins } from './city.js'
 import { Tiles } from './core/tiles.js'
 import { groundMaterial, roadMaterial, buildingMaterial, treeAtlas, treeMaterial, night, surface } from './core/materials.js'
+import { Trees3D } from './core/trees3d.js'
 
 // World: metres east (x) and north of an origin downtown (tools/world.py); three.js x = east, y = up, z = south.
 // Heights are real elevations. The camera is orthographic, looking north, 30° down; the view lives in the URL
@@ -38,7 +39,8 @@ function noWebGL(detail) {
 }
 let renderer
 try { renderer = new THREE.WebGLRenderer({ antialias: false, canvas: $('canvas'), powerPreference: 'high-performance' }) } catch (e) { noWebGL(e.message) }
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
+const PR = Math.min(devicePixelRatio, 2)
+renderer.setPixelRatio(PR)
 renderer.setSize(innerWidth, innerHeight)
 renderer.shadowMap.enabled = true
 renderer.shadowMap.type = mobile ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap
@@ -63,10 +65,12 @@ scene.add(sun, sun.target)
 const mats = { ground: groundMaterial(), road: roadMaterial(), paint: roadMaterial(true), building: buildingMaterial(), tree: treeMaterial(treeAtlas()) }
 const tiles = new Tiles({
   scene, treeScene, mats,
-  onChange: () => { dirty = true; shadowStale = true }, // shadows follow new tiles at most twice a second
+  // shadows follow new tiles at most twice a second; a tile that loads hidden changes neither them nor the picture
+  onChange: (shown = true) => { dirty = true; if (shown) { shadowStale = true; trees3d?.changed() } },
   onLoad: (t) => city?.emit('tile:load', tileInfo(t)),
-  onUnload: (t) => city?.emit('tile:unload', tileInfo(t)),
+  onUnload: (t) => { trees3d?.changed(); city?.emit('tile:unload', tileInfo(t)) },
 })
+const trees3d = new Trees3D({ scene, tiles, treeMaterial: mats.tree }) // real trees near a perspective camera
 const tileInfo = (t) => ({ level: t.level, i: t.i, j: t.j, ox: t.ox, oy: t.oy, size: t.level ? 4096 : 1024, graph: t.graph, terrain: t.terrain, footprints: t.footprints, water: t.water })
 status('Loading the map…', 0.05)
 const index = await tiles.init()
@@ -158,10 +162,12 @@ let own = null // { camera, opts: { focus, radius, shadowRadius } }
 const ownSeen = new THREE.Vector3(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3()
 let shMap = null // the map view's shadow fit, put back exactly on release
 const ownCamera = {
-  use(camera, opts) { own = { camera, opts }; controls.enabled = false; shMap = { ...sh }; sh.x = NaN; dirty = true; ownSeen.copy(opts.focus); city.emit('view', city.view) },
+  use(camera, opts) { own = { camera, opts }; ownSince = performance.now(); controls.enabled = false; shMap = { ...sh, persp: false }; sh.x = NaN; dirty = true; ownSeen.copy(opts.focus); city.emit('view', city.view) },
   release() {
     own = null; controls.enabled = true; dirty = true
-    if (Number.isFinite(shMap?.x)) { Object.assign(sh, shMap); fitShadows() } else sh.x = NaN
+    trees3d.off(); mats.tree.uniforms.cyl.value = 0
+    setPixelRatio(PR)
+    if (Number.isFinite(shMap?.x)) { Object.assign(sh, shMap); fitShadows() } else Object.assign(sh, { x: NaN, persp: false })
     city.emit('view', city.view)
   },
   get active() { return own },
@@ -177,18 +183,34 @@ const ownCamera = {
 // ---------- shadows: a sharp shadow map over what is on screen, refitted only when the view moves past it ----------
 const sh = { x: NaN, y: 0, z: 0, r: 0 }
 function updateShadows() {
+  if (own?.camera.isPerspectiveCamera) return perspectiveShadows(own.camera, own.opts.shadowRadius ?? 300)
   const r = own ? own.opts.shadowRadius ?? 300 : Math.hypot(innerWidth, innerHeight * 2) / K / cam.zoom / 2 + 80
   const t = own ? own.opts.focus : controls.target
   if (Math.hypot(t.x - sh.x, t.z - sh.z) < sh.r * 0.35 && r < sh.r && r > sh.r * 0.4) return
-  sh.x = t.x; sh.y = t.y; sh.z = t.z; sh.r = r * 1.5
+  sh.x = t.x; sh.y = t.y; sh.z = t.z; sh.r = r * 1.5; sh.persp = false
+  fitShadows()
+}
+// A perspective camera sees its shadows mostly close by: a square of half-size r that reaches from just behind the
+// camera to 1.5 r ahead of it, refitted (and redrawn) each time the camera has moved on a fifth of r. The light sits
+// 2 km away instead of 8, so its depth range, and with it the depth bias in metres, is four times tighter: shadows
+// start right at the foot of a wall instead of a few metres off it.
+function perspectiveShadows(C, r) {
+  C.getWorldDirection(v1); v1.y = 0
+  if (v1.lengthSq() < 1e-6) v1.set(0, 0, -1)
+  v1.normalize()
+  const x = C.position.x + v1.x * r * 0.55, z = C.position.z + v1.z * r * 0.55
+  if (sh.persp && Math.hypot(x - sh.x, z - sh.z) < r * 0.2 && Math.abs(r - sh.r) < r * 0.1) return
+  Object.assign(sh, { x, y: own.opts.focus.y, z, r, persp: true })
   fitShadows()
 }
 function fitShadows() {
   const texel = (2 * sh.r) / sun.shadow.mapSize.x, sx = Math.round(sh.x / texel) * texel, sz = Math.round(sh.z / texel) * texel
+  const D = sh.persp ? 2000 : 8000
   sun.shadow.normalBias = texel * 1.2
+  sun.shadow.bias = sh.persp ? -0.0005 / 4 : -0.0005
   sun.target.position.set(sx, sh.y, sz)
-  sun.position.copy(sun.target.position).addScaledVector(SUN, 8000)
-  Object.assign(sun.shadow.camera, { left: -sh.r, right: sh.r, top: sh.r, bottom: -sh.r, near: 10, far: 16000 })
+  sun.position.copy(sun.target.position).addScaledVector(SUN, D)
+  Object.assign(sun.shadow.camera, { left: -sh.r, right: sh.r, top: sh.r, bottom: -sh.r, near: 10, far: D * 2 })
   sun.shadow.camera.updateProjectionMatrix()
   renderer.shadowMap.needsUpdate = true
 }
@@ -199,13 +221,26 @@ rt.depthTexture = new THREE.DepthTexture(1, 1)
 const ink = new THREE.ShaderMaterial({
   uniforms: { tColor: { value: rt.texture }, tDepth: { value: rt.depthTexture }, sat: { value: 1.2 }, gain: { value: new THREE.Vector3(1, 1, 1) }, tint: { value: new THREE.Vector3(1, 1, 1) },
     desat: { value: 0 }, px: { value: new THREE.Vector2() }, range: { value: 1 }, thr: { value: 1 }, ink: { value: 0 },
-    cnear: { value: 1 }, cfar: { value: 2 }, fade: { value: new THREE.Vector2(1e9, 2e9) } },
-  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    cnear: { value: 1 }, cfar: { value: 2 }, fade: { value: new THREE.Vector2(1e9, 2e9) }, tSky: { value: null }, fogCol: { value: new THREE.Color() },
+    zenCol: { value: new THREE.Color() }, domeK: { value: 0 }, projInv: { value: new THREE.Matrix4() }, camWorld: { value: new THREE.Matrix4() } },
+  vertexShader: `varying vec2 vUv;
+    #ifdef SKYFOG
+    uniform mat4 projInv, camWorld; varying vec3 vRay; // the view ray through this pixel, in the world
+    #endif
+    void main() {
+      vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0);
+      #ifdef SKYFOG
+      vec4 v = projInv * vec4(position.xy, 1.0, 1.0); vRay = mat3(camWorld) * (v.xyz / v.w);
+      #endif
+    }`,
   // orthographic: depth is linear, edges are jumps in metres. PERSP (a plugin's perspective camera): 1/distance is
   // linear across a plane, so edges are jumps in 1/distance relative to it, faded out from fade.x to fade.y metres
   fragmentShader: `uniform sampler2D tColor, tDepth; uniform vec2 px; uniform float range, thr, ink, sat, desat; uniform vec3 gain, tint; varying vec2 vUv;
     #ifdef PERSP
     uniform float cnear, cfar; uniform vec2 fade;
+    #ifdef SKYFOG
+    uniform sampler2D tSky; uniform vec3 fogCol, zenCol; uniform float domeK; varying vec3 vRay;
+    #endif
     float d(vec2 o) { return (cfar - texture2D(tDepth, vUv + o * px).x * (cfar - cnear)) / (cnear * cfar); }
     #else
     float d(vec2 o) { return texture2D(tDepth, vUv + o * px).x * range; }
@@ -213,6 +248,16 @@ const ink = new THREE.ShaderMaterial({
     void main() {
       vec4 col = texture2D(tColor, vUv);
       float c = d(vec2(0.0));
+      #ifdef SKYFOG
+      // fog towards the sky behind, not one flat colour: far buildings fade into the sky gradient instead of
+      // standing in it as pale cut-outs that the far plane slices (materials fogged to fogCol; swap it for the sky)
+      // The sky behind is the background texture, or the weather plugin's dome over it (domeK): its gradient from the
+      // fog colour at the horizon up to the zenith, by the height of the view ray (clouds and sun left out)
+      if (texture2D(tDepth, vUv).x < 1.0) {
+        vec3 sky = mix(texture2D(tSky, vec2(0.5, vUv.y)).rgb, mix(fogCol, zenCol, smoothstep(0.0, 0.55, max(normalize(vRay).y, 0.0))), domeK);
+        col.rgb += smoothstep(fade.x, fade.y, 1.0 / c) * (sky - fogCol);
+      }
+      #endif
       float lap = max(abs(d(vec2(1.0, 0.0)) + d(vec2(-1.0, 0.0)) - 2.0 * c), abs(d(vec2(0.0, 1.0)) + d(vec2(0.0, -1.0)) - 2.0 * c));
       #ifdef PERSP
       lap /= c;
@@ -243,6 +288,15 @@ function draw() {
   u.px.value.set(pr / w, pr / h)
   u.range.value = C.far - C.near
   if (!!ink.defines.PERSP !== !!C.isPerspectiveCamera) { if (C.isPerspectiveCamera) ink.defines.PERSP = 1; else delete ink.defines.PERSP; ink.needsUpdate = true }
+  const skyFog = !!(C.isPerspectiveCamera && scene.fog?.isFog && scene.background?.isTexture)
+  if (!!ink.defines.SKYFOG !== skyFog) { if (skyFog) ink.defines.SKYFOG = 1; else delete ink.defines.SKYFOG; ink.needsUpdate = true }
+  if (skyFog) {
+    u.tSky.value = scene.background; u.fogCol.value.copy(scene.fog.color)
+    const zen = city?.weather?.atmosphere?.zenith // the weather plugin's sky dome (it fades in with the fov, as here)
+    u.domeK.value = zen == null ? 0 : THREE.MathUtils.smoothstep(C.fov, 14, 40)
+    if (zen != null) u.zenCol.value.setHex(zen)
+    C.updateMatrixWorld(); u.projInv.value.copy(C.projectionMatrixInverse); u.camWorld.value.copy(C.matrixWorld)
+  }
   if (C.isPerspectiveCamera) {
     const d = v1.copy(own.opts.focus).sub(C.position).dot(C.getWorldDirection(v2)) // metres to the focus
     u.cnear.value = C.near; u.cfar.value = C.far; u.thr.value = Math.min(0.004, Math.max(0.35 / (K * zoom), 0.9) / Math.max(1, d))
@@ -264,11 +318,25 @@ function draw() {
   renderer.autoClear = true
 }
 
+// ---------- a perspective camera's view costs more than the map's (the whole street scene up close, at full
+// resolution): when its frames keep coming late, it is drawn at a lower resolution, a quarter step at a time, down
+// to 0.75 CSS px per pixel; release() puts the map's back
+let ownSince = 0, slowMs = 0
+function setPixelRatio(p) { if (p === renderer.getPixelRatio()) return; renderer.setPixelRatio(p); renderer.setSize(innerWidth, innerHeight); dirty = true }
+function adaptResolution(ms, now) {
+  if (document.hidden || now - ownSince < 3000 || ms > 250) return
+  slowMs = Math.max(0, slowMs + (ms > 24 ? ms : -ms * 0.5)) // late frames add up, good ones pay it back
+  const p = renderer.getPixelRatio()
+  if (slowMs > 1500 && p > 0.75) { setPixelRatio(Math.max(0.75, Math.ceil(p * 4 - 1.01) / 4)); slowMs = 0; ownSince = now }
+}
+
 // ---------- frame loop ----------
 let lastFrame = performance.now()
 function loop(now) {
   requestAnimationFrame(loop)
   if (!own) controls.update()
+  tiles.pump(renderer) // new tiles: made and uploaded a little per frame, drawn or not
+  if (own && city?.animating) adaptResolution(now - lastFrame, now)
   const dt = Math.min(0.1, (now - lastFrame) / 1000 || 0); lastFrame = now
   if (city?.animating) dirty = true
   if (!dirty) return
@@ -287,6 +355,7 @@ function loop(now) {
     if (Math.abs(g - controls.target.y) > 2) { const d = g - controls.target.y; controls.target.y += d; cam.position.y += d }
   }
   city?.emit('frame', dt, now / 1000)
+  if (own?.camera.isPerspectiveCamera) { mats.tree.uniforms.cyl.value = 1; trees3d.update(own.camera) } else if (own) { mats.tree.uniforms.cyl.value = 0; trees3d.off() }
   updateShadows()
   if (shadowStale && now - lastShadow > 500) { shadowStale = false; lastShadow = now; renderer.shadowMap.needsUpdate = true }
   if (shadowStale) dirty = true // come back for it
@@ -310,7 +379,7 @@ city = createCity({
   ownCamera,
 })
 window.city = city
-window.view = { cam, controls, setView, zAt, renderer, tiles }
+window.view = { cam, controls, setView, zAt, renderer, tiles, trees3d }
 
 // ---------- loading screen: until what's on screen has arrived ----------
 await new Promise((ok) => {
@@ -322,6 +391,7 @@ await new Promise((ok) => {
   tick()
 })
 status('Ready', 1)
+tiles.rush = false
 requestAnimationFrame(() => loadingEl.classList.add('done'))
 setTimeout(() => loadingEl.remove(), 800)
 $('#hint').hidden = false

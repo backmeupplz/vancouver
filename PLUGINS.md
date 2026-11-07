@@ -71,7 +71,8 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 ## Map tiles
 
 The map streams in as you look around: 4096 m tiles (`level 1`) for the overview and 1024 m tiles (`level 0`) up
-close. Each tile carries its road graph so traffic, people and games can move on real streets:
+close. New tiles are built and uploaded to the GPU a few MB per frame, so streaming never stalls a frame;
+`'tile:load'` fires once a tile is complete. Each tile carries its road graph so traffic, people and games can move on real streets:
 
 - `tile.graph.pieces`: `{ kind, lanes, oneway, drive, band, crossing, turns, w, a, b, pts, z }` (`band`: the road has sidewalks drawn) per road piece between junctions. `kind`
   indexes `motorway, trunk, primary, secondary, tertiary, residential, service, living, pedestrian, footway,
@@ -104,14 +105,20 @@ the map camera back exactly where it was. `opts` is read every frame, so keep mo
 - `opts.focus` (`Vector3`, required): the ground point the map streams around, usually a little ahead of the player.
 - `opts.radius` (metres, default 900): tiles load within this square around the focus; 1100 or less loads the
   detail tiles (and their `graph`, `footprints`, `water`), more shows the overview tiles.
-- `opts.shadowRadius` (metres, default 300): the sharp sun shadows cover this square around the focus. The shadow
-  map is redrawn only when the focus moves on, so give moving things a blob shadow instead of `castShadow`.
+- `opts.shadowRadius` (metres, default 300): the sharp sun shadows cover this square around the focus. With a
+  perspective camera the square follows the camera instead, reaching from just behind it to 1.5× the radius ahead,
+  and is redrawn each time the camera has moved on a fifth of it, so give moving things a blob shadow instead of
+  `castShadow`.
 
 You own the camera: set its pose, `fov`, `aspect` (on resize), `near` and `far` every frame as you need. With a
 perspective camera the ink outlines are found from depth properly linearised and fade out over `scene.fog` (a
 `THREE.Fog` you set on `city.scene` is used by the map and the trees alike). While your camera is active,
 `city.view.zoom` is the map zoom that shows the focus at the same scale, `center` is the focus and `bounds` the
-streamed square, and `'view'` fires as the focus moves. Nothing changes for the map view when no plugin has a
+streamed square, and `'view'` fires as the focus moves. A perspective camera also gets what street level needs:
+trees within ~190 m are real 3D trees (the billboards beyond stand upright), fog fades into the sky texture you set
+as `scene.background` rather than one flat colour, detail tiles stay up while new ones arrive past the fog, and
+when frames keep coming late the view is drawn at a lower resolution (down to 0.75 CSS px per pixel; `release()`
+restores it). Nothing changes for the map view when no plugin has a
 camera. The drive plugin is the example: it dives from the map into a chase camera behind a van (or a walker) and back.
 
 ## Shared between plugins

@@ -9,6 +9,7 @@ const DETAIL_ZOOM = 0.11 // camera.zoom from which detail tiles load (a 1 km til
 // tiles kept off screen (detail, overview) for coming back: a detail tile is ~4 MB of geometry, held twice (JS and
 // GPU), so phones keep fewer (a 3 GB iPhone's tab is killed somewhere past 1 GB)
 const MAX_CACHED = matchMedia('(pointer: coarse)').matches ? [24, 16] : [80, 48]
+const v0 = new THREE.Vector3()
 const WORKERS = Math.min(4, Math.max(2, (navigator.hardwareConcurrency || 4) - 2))
 
 export class Tiles {
@@ -28,6 +29,9 @@ export class Tiles {
     this.unitMat = new THREE.MeshLambertMaterial()
     this.quad = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0)
     this.balconies = true
+    this.made = [] // worker results waiting to become three.js objects, one tile per frame (pump)
+    this.warming = [] // tiles whose buffers are being uploaded to the GPU, a few MB per frame, before they show
+    this.rush = true // while the loading screen is up: no pacing, everything at once
   }
 
   async init() {
@@ -66,10 +70,24 @@ export class Tiles {
     geo.computeVertexNormals()
     const tex = new THREE.TextureLoader().load(url, () => this.onChange?.())
     tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4
-    const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: tex, polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 16 }))
-    m.renderOrder = -1; m.matrixAutoUpdate = false
-    this.scene.add(m)
-    this.baseMesh = m
+    const mat = new THREE.MeshLambertMaterial({ map: tex, polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 16 })
+    // in chunks sharing one vertex buffer, so the camera culls what it doesn't see (a street-level view sees ~1 of 64)
+    const base = new THREE.Group(), C = 8, cw = Math.ceil((nx - 1) / C), ch = Math.ceil((ny - 1) / C)
+    for (let cj = 0; cj < ny - 1; cj += ch) for (let ci = 0; ci < nx - 1; ci += cw) {
+      const i1 = Math.min(nx - 1, ci + cw), j1 = Math.min(ny - 1, cj + ch), sub = []
+      for (let j = cj; j < j1; j++) for (let i = ci; i < i1; i++) { const a = j * nx + i; sub.push(a, a + nx, a + 1, a + 1, a + nx, a + nx + 1) }
+      const cg = new THREE.BufferGeometry()
+      for (const k of ['position', 'uv', 'normal']) cg.setAttribute(k, geo.attributes[k])
+      cg.setIndex(new THREE.BufferAttribute(new Uint32Array(sub), 1))
+      const bb = new THREE.Box3()
+      for (let j = cj; j <= j1; j++) for (let i = ci; i <= i1; i++) bb.expandByPoint(v0.fromArray(pos, (j * nx + i) * 3))
+      cg.boundingBox = bb; cg.boundingSphere = bb.getBoundingSphere(new THREE.Sphere())
+      const m = new THREE.Mesh(cg, mat)
+      m.renderOrder = -1; m.matrixAutoUpdate = false
+      base.add(m)
+    }
+    this.scene.add(base)
+    this.baseMesh = base
   }
 
   // highest coarse ground in a rectangle (world metres, y north): tall ground stands up into the view from outside it
@@ -116,7 +134,7 @@ export class Tiles {
       const p = this.get(1, i, j)
       p.used = this.frame
       if (p.state === 'new') need.push([p, Math.hypot((i + 0.5) * 4096 - cx, (j + 0.5) * 4096 - cy)])
-      let kidsReady = wantDetail, any = false
+      let kidsReady = wantDetail, any = false, shown = false
       if (wantDetail) {
         for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) {
           const ki = i * 4 + a, kj = j * 4 + b
@@ -126,9 +144,12 @@ export class Tiles {
           k.used = this.frame; any = true
           if (k.state === 'new') need.push([k, Math.hypot((ki + 0.5) * 1024 - cx, (kj + 0.5) * 1024 - cy) - 1e5])
           if (k.state !== 'ready' && k.state !== 'missing') kidsReady = false
+          else if (k.visible && k.state === 'ready') shown = true
         }
       }
-      const fine = wantDetail && any && kidsReady
+      // a perspective camera (city.view.useCamera) keeps the detail tiles it shows while new ones arrive at the far
+      // edge of its square, past the fog: falling back to the overview tile there would flash the whole 4 km of it
+      const fine = wantDetail && any && (kidsReady || (shown && camera.isPerspectiveCamera))
       this.show(p, !fine)
       for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) {
         const k = this.tiles.get(this.key(0, i * 4 + a, j * 4 + b))
@@ -151,7 +172,7 @@ export class Tiles {
   show(t, on) {
     if (t.visible === on) return
     t.visible = on
-    if (t.group) { t.group.visible = on; t.trees && (t.trees.visible = on) }
+    if (t.group && t.state !== 'warming') { t.group.visible = on; t.trees && (t.trees.visible = on) } // else once uploaded
     this.onChange?.()
   }
 
@@ -160,12 +181,64 @@ export class Tiles {
     const res = await this.request({ url: `${this.base}${t.level}/${t.i}_${t.j}.bin?v=${this.index.built || 0}`, level: t.level })
     if (res.missing || res.error) { t.state = 'missing'; if (res.error) console.warn(res.error); this.onChange?.(); return }
     if (t.state !== 'loading') return // evicted while loading
-    await new Promise(requestAnimationFrame) // at most about one new tile per frame, so panning never stutters
-    if (t.state !== 'loading') return
-    this.make(t, res)
-    t.state = 'ready'
-    this.onLoad?.(t)
-    this.onChange?.()
+    t.res = res
+    this.made.push(t)
+  }
+
+  // once per animation frame (main.js), drawn or not: turns at most one worker result into three.js objects, or
+  // uploads up to ~4 MB of a made tile's buffers to the GPU, so neither a new tile nor a tile that has waited
+  // hidden (a detail tile under its overview tile) costs one big upload in the frame it appears. A tile counts
+  // as ready, and shows, only once it is all on the GPU. While the loading screen is up (rush), all at once.
+  pump(renderer) {
+    if (!this.made.length && !this.warming.length) return
+    if (!this.warmScene) { // a 1×1 target and a plain material: drawing a mesh there uploads all its buffers
+      this.warmScene = new THREE.Scene(); this.warmScene.overrideMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, depthTest: false })
+      this.warmTarget = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: false }); this.warmCam = new THREE.Camera()
+    }
+    const alive = (t) => this.tiles.get(this.key(t.level, t.i, t.j)) === t
+    let budget = 4e6
+    do {
+      const t = this.warming[0]
+      if (t) { // upload the next mesh of the first made tile
+        const m = alive(t) && t.warm.pop()
+        if (m) { if (!this.rush) budget -= this.upload(renderer, m); continue }
+        this.warming.shift()
+        if (!alive(t)) continue
+        t.state = 'ready'; t.warm = null
+        t.group.visible = t.visible; if (t.trees) t.trees.visible = t.visible
+        this.onLoad?.(t)
+        this.onChange?.(t.visible) // a tile that shows changes the picture (and the shadows); a hidden one only the plan
+        if (!this.rush) return
+      }
+      const n = this.made.shift() // else make the next tile; its buffers go up from the next frame
+      if (!n) return
+      if (n.state !== 'loading' || !alive(n)) continue
+      this.make(n, n.res); n.res = null
+      n.state = 'warming'; n.warm = []
+      n.group.visible = false; if (n.trees) n.trees.visible = false
+      n.group.traverse((o) => { if (o.isMesh) n.warm.push(o) })
+      if (n.trees) n.warm.push(n.trees)
+      this.warming.push(n)
+      if (!this.rush) return
+    } while (this.rush || budget > 0)
+  }
+
+  upload(renderer, m) { // bytes sent
+    const geo = m.geometry, w = this.warmScene
+    let bytes = 0
+    for (const a of [...Object.values(geo.attributes), geo.index]) if (a?.array) bytes += a.array.byteLength
+    if (m.isInstancedMesh) bytes += m.instanceMatrix.array.byteLength
+    if (!bytes) return 0
+    const proxy = m.isInstancedMesh ? new THREE.InstancedMesh(geo, w.overrideMaterial, 0) : new THREE.Mesh(geo, w.overrideMaterial)
+    if (m.isInstancedMesh) Object.assign(proxy, { instanceMatrix: m.instanceMatrix, instanceColor: m.instanceColor, count: m.count })
+    proxy.frustumCulled = false
+    w.add(proxy)
+    const rt = renderer.getRenderTarget(), info = renderer.info.autoReset
+    renderer.info.autoReset = false
+    renderer.setRenderTarget(this.warmTarget); renderer.render(w, this.warmCam); renderer.setRenderTarget(rt)
+    renderer.info.autoReset = info
+    w.remove(proxy)
+    return bytes
   }
 
   make(t, res) {
@@ -177,15 +250,17 @@ export class Tiles {
     t.footprints = res.footprints || null
     t.water = res.water || null
     // once a geometry is on the GPU its arrays are dropped from memory (bounds are computed first, for culling)
-    const free = (geo) => { geo.computeBoundingSphere(); geo.computeBoundingBox(); for (const a of [...Object.values(geo.attributes), geo.index]) if (a) a.onUpload(function () { this.array = null }) }
-    const add = (geo, mat, opts = {}) => { free(geo); const m = new THREE.Mesh(geo, mat); Object.assign(m, opts); m.matrixAutoUpdate = false; m.updateMatrix(); g.add(m); return m }
+    const free = (geo, b) => {
+      if (b) { geo.boundingBox = new THREE.Box3(v0.fromArray(b), new THREE.Vector3().fromArray(b, 3)); geo.boundingSphere = geo.boundingBox.getBoundingSphere(new THREE.Sphere()) } else { geo.computeBoundingSphere(); geo.computeBoundingBox() }
+      for (const a of [...Object.values(geo.attributes), geo.index]) if (a) a.onUpload(function () { this.array = null }) }
+    const add = (geo, mat, opts = {}, b) => { free(geo, b); const m = new THREE.Mesh(geo, mat); Object.assign(m, opts); m.matrixAutoUpdate = false; m.updateMatrix(); g.add(m); return m }
     if (res.ground) {
       const geo = new THREE.BufferGeometry()
       geo.setAttribute('position', new THREE.BufferAttribute(res.ground.position, 3))
       geo.setAttribute('cls', new THREE.BufferAttribute(res.ground.cls, 1))
       geo.setIndex(new THREE.BufferAttribute(res.ground.index, 1))
       geo.setAttribute('normal', new THREE.BufferAttribute(res.ground.normal, 3, true))
-      add(geo, this.mats.ground, { receiveShadow: true })
+      add(geo, this.mats.ground, { receiveShadow: true }, res.ground.box)
     }
     for (const [r, mat] of [[res.roads, this.mats.road], [res.paint, this.mats.paint]]) { // bridge surfaces; paint on the ground
       if (!r) continue
@@ -195,7 +270,7 @@ export class Tiles {
       geo.setAttribute('aRoad2', new THREE.BufferAttribute(r.aRoad2, 4))
       geo.setIndex(new THREE.BufferAttribute(r.index, 1))
       geo.setAttribute('normal', new THREE.BufferAttribute(r.normal, 3, true))
-      add(geo, mat, { receiveShadow: true, renderOrder: mat === this.mats.paint ? 1 : 0 })
+      add(geo, mat, { receiveShadow: true, renderOrder: mat === this.mats.paint ? 1 : 0 }, r.box)
     }
     const bgeo = (b) => {
       const geo = new THREE.BufferGeometry()
@@ -205,8 +280,8 @@ export class Tiles {
       geo.setAttribute('aWin', new THREE.BufferAttribute(b.aWin, 4))
       return geo
     }
-    if (res.buildings?.position.length) add(bgeo(res.buildings), this.mats.building, { castShadow: true, receiveShadow: true })
-    if (res.balconies) { t.balcony = add(bgeo(res.balconies), this.mats.building, { castShadow: true, receiveShadow: true }); t.balcony.visible = this.balconies }
+    if (res.buildings?.position.length) add(bgeo(res.buildings), this.mats.building, { castShadow: true, receiveShadow: true }, res.buildings.box)
+    if (res.balconies) { t.balcony = add(bgeo(res.balconies), this.mats.building, { castShadow: true, receiveShadow: true }, res.balconies.box); t.balcony.visible = this.balconies }
     if (res.units) {
       const n = res.units.length / 7, m = new THREE.InstancedMesh(this.unitGeo, this.unitMat, n), M = new THREE.Matrix4(), c = new THREE.Color()
       for (let i = 0; i < n; i++) {

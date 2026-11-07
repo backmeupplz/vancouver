@@ -397,17 +397,30 @@ export function treeAtlas() {
 
 export function treeMaterial(atlas) {
   return new THREE.ShaderMaterial({
-    uniforms: { map: { value: atlas }, sat: { value: 1.0 }, gain: { value: new THREE.Vector3(1, 1, 1) }, tint: { value: new THREE.Vector3(1, 1, 1) }, desat: { value: 0 }, ...THREE.UniformsLib.fog },
+    uniforms: { map: { value: atlas }, sat: { value: 1.0 }, gain: { value: new THREE.Vector3(1, 1, 1) }, tint: { value: new THREE.Vector3(1, 1, 1) }, desat: { value: 0 }, ...THREE.UniformsLib.fog,
+      // a perspective camera (city.view.useCamera): upright billboards (cyl = 1), and none within near3d.z metres
+      // of (near3d.x, near3d.y) on the ground, where trees3d.js draws real trees
+      cyl: { value: 0 }, near3d: { value: new THREE.Vector3() } },
     fog: true, // linear fog (a THREE.Fog on the scene) mixed in before the grade, like the rest of the map
     vertexShader: `attribute vec3 iPos; attribute vec2 iSize; attribute vec3 iCol; attribute float iVar;
+      uniform float cyl; uniform vec3 near3d;
       varying vec2 vUv; varying vec3 vCol;
       #include <fog_pars_vertex>
       void main() {
         float row = floor(iVar / 4.0);
         vUv = vec2((mod(iVar, 4.0) + uv.x) / 4.0, (uv.y + 1.0 - row) / 2.0);
         vCol = iCol;
-        vec4 mv = modelViewMatrix * vec4(iPos, 1.0);
-        mv.xy += position.xy * iSize;
+        vec4 mv;
+        if (cyl > 0.5) { // standing up in the world, turned to the camera about the vertical (the map's 0.866 undone)
+          vec3 w = (modelMatrix * vec4(iPos, 1.0)).xyz;
+          if (distance(w.xz, near3d.xy) < near3d.z) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
+          vec2 to = normalize(cameraPosition.xz - w.xz);
+          w += vec3(to.y, 0.0, -to.x) * position.x * iSize.x + vec3(0.0, position.y * iSize.y / 0.866, 0.0);
+          mv = viewMatrix * vec4(w, 1.0);
+        } else {
+          mv = modelViewMatrix * vec4(iPos, 1.0);
+          mv.xy += position.xy * iSize;
+        }
         gl_Position = projectionMatrix * mv;
         #ifdef USE_FOG
           vFogDepth = -mv.z;

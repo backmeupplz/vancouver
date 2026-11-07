@@ -17,8 +17,16 @@ onmessage = async ({ data }) => {
     const buf = await new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer()
     const t = parse(buf)
     const out = build(t, level)
+    for (const g of [out.ground, out.roads, out.paint, out.buildings, out.balconies]) if (g?.position) g.box = box(g.position)
     postMessage({ id, ...out }, transferables(out))
   } catch (e) { postMessage({ id, error: String(e) }) }
+}
+
+// bounds of a position buffer, so the page doesn't loop over it (min x, y, z, max x, y, z)
+function box(p) {
+  const b = new Float32Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity])
+  for (let i = 0; i < p.length; i += 3) for (let k = 0; k < 3; k++) { const v = p[i + k]; if (v < b[k]) b[k] = v; if (v > b[k + 3]) b[k + 3] = v }
+  return b
 }
 
 function transferables(o, list = []) {
