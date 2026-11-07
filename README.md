@@ -26,6 +26,10 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    Bridge decks are profiled once for the whole map (cached in `data/decks.pkl`): the low LiDAR surface across the
    deck, trusses and stay cables dropped, grades clamped to 7%; sidewalks and cycle decks ride on the road deck beside
    them, and a bridge newer than the LiDAR (stal̕əw̓asəm) spans its abutments with a gentle crest.
+   Roofs take their colour from the city's 2022 orthophoto: put its ECW tiles (7.5 cm, 800 x 500 m each) in
+   `data/ortho/`, `tools/ortho.sh` turns them into 0.5 m GeoTIFFs (GDAL with the open libecwj2 3.3 plugin, in podman) and
+   `uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/roofs.py` samples every footprint into
+   `data/roofs.npz` (`tools/roofs.py preview` draws photo vs colours). Only roofs.npz is needed to bake.
 6. `tools/publish.sh` copies the tiles to the server. They are not in git.
 
 ## How it runs
@@ -38,5 +42,6 @@ lo-fi music, live weather and sun, TransLink transit on its timetable, live airc
 bridges, and driving (parcel deliveries too), walking, hiking real trails and sailing through it all. See
 [PLUGINS.md](PLUGINS.md) to write one.
 
-Map data © OpenStreetMap contributors (ODbL). City of Vancouver Open Data. HRDEM and MRDEM © Natural Resources
-Canada (Open Government Licence – Canada). Transit data © TransLink. Live aircraft: adsb.lol.
+Map data © OpenStreetMap contributors (ODbL). City of Vancouver Open Data; 2022 orthophoto © City of Vancouver
+(Open Government Licence – Vancouver). HRDEM and MRDEM © Natural Resources Canada (Open Government Licence – Canada).
+Transit data © TransLink. Live aircraft: adsb.lol.

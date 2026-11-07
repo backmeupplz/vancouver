@@ -14,6 +14,7 @@ from scipy import ndimage
 import mapbox_earcut as earcut
 sys.path.insert(0, os.path.dirname(__file__))
 from world import xy, latlon, extent, L0, L1, KX, KY, LAT_O, LON_O
+from roofs import roof_lookup
 
 OUT = os.environ.get('OUT', 'public/tiles')
 HR = 2.0  # HRDEM cell, metres
@@ -863,7 +864,9 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
         kind = house_kind(info, main)
         style = style_of(info, top, rnd, kind)
         shop = info['shop'] and style not in (HOUSE, CHARACTER, SPECIAL, SHED) and top >= 5
-        roofc = colour(t.get('roof:colour')) or (ROOF_MAT.get((t.get('roof:material') or '').lower(), 0) and ROOF_MAT[t['roof:material'].lower()] | 0x1000000)
+        tagc = colour(t.get('roof:colour'))
+        matc = ROOF_MAT.get((t.get('roof:material') or '').lower(), 0) and ROOF_MAT[t['roof:material'].lower()] | 0x1000000
+        mainc = 0 if tagc else photo_roof(main)
         fh = floor_h(style, top, info['lv'], shop)
         gh = max(p['ridge'] or p['h'] for p in ps)
         wall = colour(t.get('building:colour'))
@@ -873,10 +876,18 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
         d = rnd.uniform(0.03, 0.3)
         if style == CHARACTER and streets is not None and main['roof'] and main['a'] < 300:
             ps.append(porch(main, streets))
-        for p in ps:
+        for p in ps:  # roof colour: the mapper's, else the 2022 photo's (this part's, else the building's), else the material's
+            roofc = tagc or (photo_roof(p) if p is not main else mainc) or mainc or matc
             p.update(style=style, wall=wall, roofc=roofc, fh=fh, shop=shop, res=res, gh=gh, ring=inset(p['ring'], d), h=p['h'] + rnd.random() * 0.1)
             del p['info']
     return out
+
+
+def photo_roof(p):
+    """the roof's colour in the city's 2022 orthophoto (tools/roofs.py, data/roofs.npz), as a tagged colour, or 0"""
+    r = roof_lookup(p['ring'])
+    if not r or (p['roof'] and r[3] & 1): return 0  # green over a pitched roof is the garden's trees, not the roof
+    return r[0] | 0x1000000
 
 
 def porch(main, streets):

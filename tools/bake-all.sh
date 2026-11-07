@@ -14,6 +14,7 @@ osmium extract -b -123.33,48.99,-122.40,49.48 data/bc.osm.pbf -o data/lm.osm.pbf
 python3 tools/hrdem.py "$P"           # resumable: only missing LiDAR tiles are fetched
 python3 tools/osm_split.py
 python3 tools/sea.py
+[ -f data/roofs.npz ] || echo "no data/roofs.npz (tools/roofs.py): roofs keep their palette colours"
 rm -rf out/0 out/1
 OUT=out python3 tools/tiles.py "$P"   # also caches data/mrdem32.npz, which heights.py needs
 OUT=out python3 tools/heights.py
