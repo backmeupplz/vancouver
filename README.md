@@ -23,9 +23,14 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    neighbourhood: Gastown, Chinatown and Yaletown brick, West End concrete towers, downtown glass condos, Granville
    Island tin sheds, character houses (steep roofs, siding, porches) and Vancouver Specials told apart by their roofs.
    Under bridges and SkyTrain guideways the LiDAR sees the deck, so it is not used for roofs or trees there.
-   Bridge decks are profiled once for the whole map (cached in `data/decks.pkl`): the low LiDAR surface across the
+   Bridge decks are profiled once for the whole map (cached in `data/decks3.pkl`): the low LiDAR surface across the
    deck, trusses and stay cables dropped, grades clamped to 7%; sidewalks and cycle decks ride on the road deck beside
-   them, and a bridge newer than the LiDAR (stal̕əw̓asəm) spans its abutments with a gentle crest.
+   them, and a bridge newer than the LiDAR (stal̕əw̓asəm) or a footbridge under the trees (the LiDAR sees their crowns)
+   spans its abutments. Where a street goes on from a raised deck end (OpenStreetMap's bridge tag stops short of the
+   structure, stairs come down off a footbridge) it follows the LiDAR down to the ground at a ramp's grade. The terrain
+   is an 8 m grid in detail tiles, so streets sit on their embankments and in their cuts; piers and seawalls in the sea
+   keep their height. `tools/audit_elev.py public/tiles` checks a bake: streets off the ground, decks through
+   buildings, steps at abutments, steep or buried decks, tunnels on the surface (worst first, with view links).
    Roofs take their colour from the city's 2022 orthophoto: put its ECW tiles (7.5 cm, 800 x 500 m each) in
    `data/ortho/`, `tools/ortho.sh` turns them into 0.5 m GeoTIFFs (GDAL with the open libecwj2 3.3 plugin, in podman) and
    `uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/roofs.py` samples every footprint into
