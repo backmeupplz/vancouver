@@ -370,11 +370,13 @@ def build(ij):
             polys.setdefault('sidewalk', []).append(outer)
             if blvd: polys.setdefault('blvd', []).append(ls.buffer(w / 2 + blvd, quad_segs=3, cap_style='flat'))
 
-    # ---- where no trunk may stand: carriageways (as drawn), rail, pitches, tracks, courts, car parks, beaches, pools
+    # ---- where no trunk may stand: carriageways and paths (as drawn), rail, pitches, tracks, courts, car parks, beaches, pools
+    # (crowns may still hang over a path; only the trunk is kept off it)
     nogo = Image.new('L', (N, N), 0); dn = ImageDraw.Draw(nogo)
     for L in lines:
-        if L['kind'] in ('footway', 'path', 'steps', 'track', 'cycleway') or L['z']: continue
-        dn.line([pix(*c) for c in L['pts']], fill=1, width=max(1, int(round((L['w'] + 0.6) / HR))), joint='curve')
+        if L['z']: continue
+        pad = 0.0 if L['kind'] in ('footway', 'path', 'steps', 'track', 'cycleway') else 0.6
+        dn.line([pix(*c) for c in L['pts']], fill=1, width=max(1, int(round((L['w'] + pad) / HR))), joint='curve')
     for k in ('pitch', 'track', 'parking', 'sand', 'pool', 'apron', 'plaza', 'playground', 'construction'):
         for p in polys.get(k, []):
             for g in (p.geoms if hasattr(p, 'geoms') else [p]):
