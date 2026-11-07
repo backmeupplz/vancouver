@@ -7,7 +7,8 @@
 // The page sends the tiles near the view ('tiles'), the simulated area ('area'), settings ('opts') and a 'tick'
 // per drawn frame; each tick answers with every car and person as 8 floats in a transferable Float32Array.
 // 'obstacles' are things the page drives or walks (city.traffic.setObstacle): cars brake for them, people step
-// around them; 'bump' stops a car the player hit for a moment.
+// around them (and jump out of the way of a fast one); 'bump' stops a car the player hit for a moment, 'knock' sends a
+// person the player bumped into stumbling, or over (they get up again after a moment).
 
 const STEP = 1 / 30 // fixed simulation step, seconds
 const IDM = { a: 1.4, b: 2.2, T: 1.3, s0: 2.2 }
@@ -36,7 +37,7 @@ let dirty = true, walkDirty = true, lastBuild = -1e9
 let net = null, walk = null
 let cars = [], peds = [], bikes = [], statics = []
 let obstacles = new Map(), blocked = [], nextId = 1, lcTotal = 0
-let stuck = 0, simT = 0, acc = 0, stamp = 0, carTarget = 0, pedTarget = 0, bikeTarget = 0
+let stuck = 0, simT = 0, acc = 0, stamp = 0, carTarget = 0, pedTarget = 0, bikeTarget = 0, nextPid = 1
 const tmp = {}, tmp2 = {}
 
 onmessage = ({ data: m }) => {
@@ -58,6 +59,13 @@ onmessage = ({ data: m }) => {
   } else if (m.type === 'bump') {
     const car = cars.find((c) => c.id === m.id)
     if (car) { car.v = 0; car.hold = simT + 2 + Math.random() * 2 }
+  } else if (m.type === 'knock') { // { id, dx, dy (the push, x and north), v (m/s) }: a stumble, or a fall and up again
+    const p = peds.find((q) => q.id === m.id) || statics.find((q) => q.id === m.id)
+    if (p && !p.fall) {
+      const hard = m.v > 2.5
+      p.fall = { t: 0, dur: hard ? 3.4 : 1.0, max: hard ? 1.45 : 0.32 }
+      p.ang = Math.atan2(-m.dy, -m.dx) // facing what hit them, falling back away from it
+    }
   } else if (m.type === 'tick') tick(m)
   else if (m.type === 'debug') postMessage(debug(m))
 }
@@ -1053,7 +1061,7 @@ function makeStatics() {
   if (statics.length > opts.maxPeople / 3) statics.length = Math.floor(opts.maxPeople / 3)
 }
 function person(x, y, h, ang, pose, r = Math.random) {
-  return { x, y, h, ang, pose, shirt: SHIRT[(r() * SHIRT.length) | 0], pants: PANTS[(r() * PANTS.length) | 0], seed: r(), phase: r() * 6.28, v: 1.05 + r() * 0.5, life: 60 + r() * 300 }
+  return { id: nextPid++, x, y, h, ang, pose, shirt: SHIRT[(r() * SHIRT.length) | 0], pants: PANTS[(r() * PANTS.length) | 0], seed: r(), phase: r() * 6.28, v: 1.05 + r() * 0.5, life: 60 + r() * 300 }
 }
 
 // where a person stands at the end of a leg: the corner of the sidewalk (side +1 left of the leg looking out)
@@ -1162,8 +1170,27 @@ function enterX(p, I) {
 function leaveX(p) { hold(p, null); p.xin = null }
 // the crosswalk (a street at a junction) someone is out on: cars about to cross it there wait
 function hold(p, cw) { if (p.xcw === cw) return; if (p.xcw) p.xcw.n--; p.xcw = cw || null; p.xT = simT; if (cw) cw.n++ }
+// how far over someone is (radians back from upright): down quickly, a moment there, then up again
+function fallAngle(f) {
+  const up = Math.min(0.9, f.dur * 0.5), k = f.t < 0.25 ? f.t / 0.25 : f.t > f.dur - up ? (f.dur - f.t) / up : 1
+  return f.max * ease(Math.max(0, Math.min(1, k)))
+}
+// a fast obstacle coming at someone on a path with tangent (tx, ty): which way to jump, as a change of their
+// lateral offset (+1: to the left of the tangent), else 0
+function dodge(p, tx, ty) {
+  for (const o of obstacles.values()) {
+    if (o.speed < 3 || (o.h != null && Math.abs(p.h - o.h) > 3)) continue
+    const px = p.x - o.x, py = p.y - o.y, along = px * o.c + py * o.s, across = -px * o.s + py * o.c
+    if (along < 0 || along > o.len / 2 + o.speed * 1.1 || Math.abs(across) > o.w / 2 + 0.9) continue
+    const away = (across >= 0 ? 1 : -1) * (o.s * ty + o.c * tx) // its left (-s, c) against the path's left (-ty, tx)
+    return away >= 0 ? 1 : -1
+  }
+  return 0
+}
 function stepPeople(dt) {
+  for (const p of statics) if (p.fall && (p.fall.t += dt) >= p.fall.dur) p.fall = null
   for (const p of peds) {
+    if (p.fall) { if ((p.fall.t += dt) >= p.fall.dur) p.fall = null; continue } // down (or stumbling): no walking
     p.life -= dt
     if (p.xcw && simT - p.xT > 30) hold(p, null) // (never hold the cars up for long)
     if (p.mode === 'walk') {
@@ -1183,6 +1210,8 @@ function stepPeople(dt) {
         arrive(p, leg, p.side * (leg.end ? -1 : 1))
       } else {
         pedPos(p)
+        const side = obstacles.size && p.seed < 0.75 && !p.xing ? dodge(p, tmp.tx, tmp.ty) : 0
+        if (side) { p.lat = Math.max(-2.6, Math.min(2.6, p.lat + side * 4 * dt)); pedPos(p) } // a quick hop aside
         const o = obstacles.size && inObstacle(p.x, p.y, p.h, 0.5)
         if (o) { // something in the way: stop and step aside, away from it
           p.u = u0
@@ -1372,12 +1401,13 @@ function tick({ dt, buf }) {
 }
 
 // 8 floats per thing: x, y (up), z (south), yaw, then per kind (cars: pitch, colour, brake, seed;
-// people: walk phase, pose + seed, shirt, trousers); then 2 per car in the same order: id, speed
+// people: walk phase (fallen: how far over), pose + seed, shirt, trousers); then 2 per car in the same order: id,
+// speed; then 1 per person (not cyclists), from pbase: id
 function output(buf) {
   const counts = [0, 0, 0, 0, 0, 0]
   for (const c of cars) counts[c.kind]++
   const nPeople = opts.people ? peds.length + statics.length : 0, nBikes = opts.people ? bikes.length : 0
-  const base = (cars.length + nPeople + nBikes) * 8, need = base + cars.length * 2
+  const base = (cars.length + nPeople + nBikes) * 8, pbase = base + cars.length * 2, need = pbase + nPeople
   let a = buf && buf.length >= need ? buf : new Float32Array(Math.max(need, 1024) * 1.5)
   const off = [0]
   for (let k = 1; k < 6; k++) off[k] = off[k - 1] + counts[k - 1]
@@ -1405,17 +1435,19 @@ function output(buf) {
     a[i + 6] = (car.acc < -1.2 || car.v < 0.5 ? 1 : 0) + 2 * blink; a[i + 7] = car.seed
   }
   let j = cars.length * 8
+  let q = pbase
   const put = (p, pose) => {
-    a[j] = p.x; a[j + 1] = p.h; a[j + 2] = -p.y; a[j + 3] = p.ang
-    a[j + 4] = p.mode === 'wait' ? 0 : p.phase; a[j + 5] = (p.mode === 'wait' ? 1 : pose) + p.seed * 0.9; a[j + 6] = p.shirt; a[j + 7] = p.pants
+    const f = p.fall ? fallAngle(p.fall) : 0
+    a[j] = p.x; a[j + 1] = p.h + Math.sin(f) * 0.13; a[j + 2] = -p.y; a[j + 3] = p.ang
+    a[j + 4] = p.fall ? f : p.mode === 'wait' ? 0 : p.phase; a[j + 5] = (p.fall ? 4 : p.mode === 'wait' ? 1 : pose) + p.seed * 0.9; a[j + 6] = p.shirt; a[j + 7] = p.pants
     j += 8
   }
   if (opts.people) {
-    for (const p of peds) put(p, 0)
-    for (const p of statics) put(p, p.pose)
+    for (const p of peds) { put(p, 0); a[q++] = p.id }
+    for (const p of statics) { put(p, p.pose); a[q++] = p.id }
     for (const b of bikes) put(b, 3)
   }
-  return { type: 'frame', buf: a, counts, nPeople, nBikes, base, simT: simT + rem, cars: cars.length, people: peds.length + statics.length }
+  return { type: 'frame', buf: a, counts, nPeople, nBikes, base, pbase, simT: simT + rem, cars: cars.length, people: peds.length + statics.length }
 }
 // a point s metres along the car's way (behind: its previous segment, ahead: its route)
 function posOn(car, s, o) {

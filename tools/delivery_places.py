@@ -2,14 +2,15 @@
 # map's 4096 m overview cells so the game loads only the few around the player (I = floor(x / 4096),
 # J = floor(north / 4096), world metres as in public/tiles/index.json).
 # Per cell: {"o": [x, north] of the cell's SW corner, "n": street names, "s": [[name, x0, y0, x1, y1, ...]] (named
-# street centrelines, simplified to 2 m, whole metres from "o"), "k": place kinds, "p": [[x, y, name, kind, addr?]]}.
+# street centrelines, simplified to 2 m, whole metres from "o"), "k": place kinds, "p": [[x, y, name, kind, addr?]],
+# "b": bollards, flat [x, y, ...] in decimetres from "o" (the van bumps into them)}.
 # data/index.json lists the cells that exist.
 # Source: OpenStreetMap (© OpenStreetMap contributors, ODbL). Run from the repo root:
 #   osmium tags-filter -O -o /tmp/named.osm.pbf data/lm.osm.pbf \
 #     w/highway=motorway,trunk,primary,secondary,tertiary,residential,unclassified,living_street,service,pedestrian,motorway_link,trunk_link,primary_link,secondary_link,tertiary_link \
 #     nwa/shop nwa/craft \
 #     nwa/amenity=cafe,restaurant,fast_food,bakery,pub,bar,ice_cream,library,pharmacy,community_centre,marketplace,theatre,cinema,arts_centre,clinic,dentist,veterinary,post_office,school,kindergarten,childcare \
-#     nwa/tourism=hotel,museum,gallery,guest_house
+#     nwa/tourism=hotel,museum,gallery,guest_house n/barrier=bollard
 #   uv run --with osmium,shapely python3 tools/delivery_places.py /tmp/named.osm.pbf
 import json, os, shutil, sys
 import osmium
@@ -33,7 +34,7 @@ cells = {}
 
 def cell(I, J):
     c = cells.get((I, J))
-    if c is None: c = cells[(I, J)] = {'o': [I * CELL, J * CELL], 'n': {}, 's': [], 'k': {}, 'p': []}
+    if c is None: c = cells[(I, J)] = {'o': [I * CELL, J * CELL], 'n': {}, 's': [], 'k': {}, 'p': [], 'b': []}
     return c
 
 
@@ -55,7 +56,12 @@ class H(osmium.SimpleHandler):
         c['p'].append(row)
 
     def node(self, n):
-        if n.location.valid(): self.place(n.tags, n.location.lat, n.location.lon)
+        if not n.location.valid(): return
+        if n.tags.get('barrier') == 'bollard':
+            x, y = world(n.location.lat, n.location.lon)
+            c = cell(int(x // CELL), int(y // CELL))
+            c['b'] += [round((x - c['o'][0]) * 10), round((y - c['o'][1]) * 10)]
+        self.place(n.tags, n.location.lat, n.location.lon)
 
     def way(self, w):
         try: pts = [(n.location.lat, n.location.lon) for n in w.nodes]
@@ -98,4 +104,4 @@ for (I, J), c in cells.items():
     with open(f'{OUT}/{I}_{J}.json', 'w') as f: f.write(s)
     total += len(s.encode())
 with open(f'{OUT}/index.json', 'w') as f: json.dump(sorted(f'{I}_{J}' for I, J in cells), f, separators=(',', ':'))  # so the game asks only for cells that exist
-print(len(cells), 'cells,', sum(len(c['s']) for c in cells.values()), 'street runs,', sum(len(c['p']) for c in cells.values()), 'places,', total // 1024, 'KB')
+print(len(cells), 'cells,', sum(len(c['s']) for c in cells.values()), 'street runs,', sum(len(c['p']) for c in cells.values()), 'places,', sum(len(c['b']) // 2 for c in cells.values()), 'bollards,', total // 1024, 'KB')

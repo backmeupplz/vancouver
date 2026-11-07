@@ -47,7 +47,7 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.world.fromLatLon(lat, lon)` | `THREE.Vector3` on the ground at that point |
 | `city.world.toLatLon(x, z)` | `{ lat, lon }` |
 | `city.world.heightAt(x, z)` | ground height in metres (real elevation, from the finest loaded tile; 0 where nothing is loaded yet) |
-| `city.world.eachTile(fn)` | `fn(tile)` for every loaded map tile now and later (`{ level, i, j, ox, oy, size, graph, terrain, footprints, water }`, see below); returns an unsubscribe |
+| `city.world.eachTile(fn)` | `fn(tile)` for every loaded map tile now and later (`{ level, i, j, ox, oy, size, graph, terrain, footprints, water, trees }`, see below); returns an unsubscribe |
 | `city.world.suppressBuildings(ring)` | `[[lat, lon], …]`: the generic building there is removed because your plugin draws its own |
 | `city.view.zoom`, `.center`, `.metresPerPixel`, `.bounds` | what is on screen (`bounds`: `{x0, z0, x1, z1}`) |
 | `city.view.useCamera(camera, opts)` | draw the map through your own camera, e.g. a `PerspectiveCamera` for a game (see below) |
@@ -92,6 +92,11 @@ close. New tiles are built and uploaded to the GPU a few MB per frame, so stream
   them) and buildings a plugin replaced with `suppressBuildings` are left out.
 - `tile.water` (detail tiles with water): `{ n, mask }`, an `n`×`n` `Uint8Array`, 1 where the cell is water; cell
   `(i, j)` counts east and north from the tile's south-west corner (`ox`, `oy`), `size / n` metres each.
+- `tile.trees` (tiles with trees, else `null`): `{ pos, size }`, `Float32Array`s with 3 and 2 numbers a tree: its foot
+  relative to the tile's corner (`x - ox`, ground height, `-(north - oy)`) and its crown's width and height. The trunk
+  of a tree `w` metres wide is about `0.035 w` in radius (the drive plugin bumps into it). Tiles already loaded when
+  you call `eachTile` come as the streamer's own objects, whose `trees` is the billboard mesh: read its geometry's
+  `iPos` and `iSize` attributes the same way.
 
 Detail tiles overlap their parent overview tile, so a plugin that wants each road once should use level 0 tiles
 (and level 1 only where no level 0 tile is loaded).
@@ -135,8 +140,10 @@ camera. The drive plugin is the example: it dives from the map into a chase came
   Both views get wet or snowy ground through `city.surface`.
 - **Traffic** (`plugins/life`): `city.traffic.nearby(x, z, r)` → `[{ id, x, y, z, heading, length, width, speed }]`
   (forward = `(sin heading, 0, cos heading)`), `city.traffic.setObstacle(id, obj | null)` (a player's vehicle or walker
-  `{ x, z, heading, length, width, speed, y }` that cars brake for; see Traffic below), `city.traffic.bump(id, impulse)` (a car was hit).
-- **The player** (`plugins/drive`, `plugins/sail`): while the user drives, walks or sails, `city.player = { mode: 'car' |
+  `{ x, z, heading, length, width, speed, y }` that cars brake for; see Traffic below), `city.traffic.bump(id, impulse)` (a car was hit),
+  `city.traffic.people(x, z, r, out)` and `city.traffic.poles(x, z, r, out)` (the people and the traffic signal poles
+  there), `city.traffic.knock(id, dx, dz, speed)` (a person was bumped into: they stumble, or fall over and get up).
+- **The player** (`plugins/drive`, `plugins/sail`): while the user drives, walks, hikes or sails, `city.player = { mode: 'car' |
   'foot' | 'boat', x, y, z, heading, speed, colour, vehicle: 'van' | 'boat' }` (updated every frame, read it when you
   need it), else `null`; `'player'` is emitted on enter, leave and car ⇄ foot. `city.models.van(colour)`,
   `city.models.person(colour)` and `city.models.boat(colour)` return the same low-poly models (forward −z, origin on the
@@ -168,3 +175,13 @@ being `(sin(heading), 0, cos(heading))`.
   bridge deck leaves the street below alone. Call it as often as you like (it reaches the simulation at most 10
   times a second); `setObstacle(id, null)` removes it.
 - `city.traffic.bump(id)`: the player hit car `id`; it stops for a few seconds, then drives on.
+- `city.traffic.people(x, z, r, out = [])`: the people on foot within `r` metres (walking, waiting, on benches; not the
+  cyclists), `[{ id, x, y, z, heading }]` (they face `(sin heading, 0, cos heading)`). Empty while people are hidden
+  (zoomed out, switched off). The array `out` is cleared and filled with objects that are reused on the next call, so
+  asking every frame makes no garbage: read them right away. The page copies people out of the simulation only while
+  someone has asked in the last two seconds.
+- `city.traffic.poles(x, z, r, out = [])`: the traffic signal poles within `r` metres, `[{ x, y, z, r }]` (`y` the foot,
+  `r` the pole's radius), reused the same way.
+- `city.traffic.knock(id, dx, dz, speed)`: the player bumped into person `id`, pushing towards `(dx, dz)` at `speed` m/s:
+  a stumble at a walk, faster a fall onto their back (facing what hit them); they get up after a few seconds and walk
+  on. People also hop out of the way of an obstacle coming at them faster than 3 m/s, when they can.

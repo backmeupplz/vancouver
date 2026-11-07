@@ -63,3 +63,72 @@ export function makeVan(THREE, colour = 0xf2a07e) { // colour: the body (a hex n
   van.traverse((m) => { if (m.isMesh) { m.receiveShadow = true; m.castShadow = false } }) // the shadow map is static: a blob shadow instead
   return van
 }
+
+// ---------------------------------------------------------------- how it drives
+// A small rear-wheel-drive van of about 1.5 t with a five-speed automatic, one step of `dt` seconds. Units: metres,
+// seconds, radians; `c` is the van's state (newVan()), `I` the driver: { up, down, steer (-1 right .. 1 left), hand },
+// up / down being the W / S keys (gas and brake, swapped in reverse); `grip` 1 on a dry road, less wet or snowy.
+// It moves nothing: the caller moves the van by speed (forward) and lat (sideways, + right) and resolves collisions.
+export const GEARS = [3.6, 2.15, 1.54, 1.15, 0.87], REVERSE = 3.4
+const RPM_PER = 160 // engine rpm per m/s per unit of gear ratio (final drive 6, 0.36 m wheels)
+const IDLE = 850, VMAX = 21, VREV = 6, WB = 2.7, G = 9.8
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
+export function newVan() {
+  return { speed: 0, lat: 0, yaw: 0, steer: 0, kick: 0, yawRate: 0, gear: 1, rpm: IDLE, thr: 0, brk: 0, shiftT: 0, revT: 0, ax: 0,
+    pitch: 0, parked: false, bp: 0, bpv: 0, br: 0, brv: 0, hz: 0, hv: 0 } // pitch: the ground's; bp / br / hz: the body on its springs
+}
+export function stepVan(c, dt, I, grip) {
+  const mu = 0.95 * grip, sp = Math.abs(c.speed), s0 = c.speed
+  // into reverse: hold the brake at a standstill for a moment; back into drive the same way with the gas
+  if (c.gear > 0 ? I.down && c.speed < 0.3 : I.up && c.speed > -0.3) { if ((c.revT += dt) > 0.3) { c.gear = c.gear > 0 ? -1 : 1; c.revT = 0 } } else c.revT = 0
+  const fwd = c.gear > 0, gas = !c.parked && (fwd ? I.up : I.down), brake = fwd ? I.down : I.up
+  c.thr += ((gas ? 1 : 0) - c.thr) * (1 - Math.exp(-(gas ? 4 : 10) * dt))
+  c.brk += ((brake ? 1 : 0) - c.brk) * (1 - Math.exp(-9 * dt))
+  // the gearbox: up early when cruising, late with the foot down; down as the revs sag (and kickdown)
+  if (fwd && c.shiftT <= 0) {
+    const r = sp * RPM_PER * GEARS[c.gear - 1]
+    if (c.gear < 5 && r > 2300 + 2700 * c.thr) { c.gear++; c.shiftT = 0.3 } else if (c.gear > 1 && r < 1100 + 1000 * c.thr) { c.gear--; c.shiftT = 0.22 }
+  }
+  c.shiftT -= dt
+  const ratio = fwd ? GEARS[c.gear - 1] : REVERSE
+  // revs: the wheels' through the gear; at a standstill the torque converter slips and the engine revs with the gas
+  const rpmT = Math.max(IDLE + c.thr * 1500 * Math.max(0, 1 - sp / 4), sp * RPM_PER * ratio) * (c.shiftT > 0 ? 0.9 : 1)
+  c.rpm += (Math.min(6200, rpmT) - c.rpm) * (1 - Math.exp(-14 * dt))
+  // pushing: torque (a flat curve, a little peak mid-range) through the gear, not past the tyres' grip; the limiter
+  const tq = 0.78 + 0.22 * Math.sin(Math.PI * clamp((c.rpm - 1000) / 4800, 0, 1))
+  let push = c.shiftT > 0 ? 0 : c.thr * 4.3 * (ratio / GEARS[0]) * tq
+  push = Math.min(push * clamp(((fwd ? VMAX : VREV) - sp) / 1.5, 0, 1), mu * G * 0.55)
+  c.speed += ((fwd ? push : -push) - G * Math.sin(clamp(c.pitch, -0.2, 0.2)) * (c.parked ? 0 : 0.8)) * dt // (no street is steeper than 20%)
+  // holding back, never past a standstill: the brakes (as hard as the tyres allow), the handbrake, rolling, air, and
+  // the engine off the gas
+  const res = c.brk * Math.min(7.8, mu * G) + (c.parked ? 12 : I.hand ? Math.min(5, mu * G * 0.6) : 0) + 0.15 + 0.00045 * c.speed * c.speed + (gas ? 0 : 0.3 + c.rpm / 9000)
+  c.speed = Math.abs(c.speed) <= res * dt ? 0 : c.speed - Math.sign(c.speed) * res * dt
+  // steering: less lock the faster, eased in
+  const maxSteer = 0.62 / (1 + sp / 7.5)
+  c.steer += (clamp(I.steer, -1, 1) * maxSteer - c.steer) * (1 - Math.exp(-(I.steer ? 6 : 9) * dt))
+  // turning: the bicycle model with understeer growing with speed (more on a slippery road), never more than the
+  // front tyres can hold; pushing against a wall still lets it creep round as if at walking pace
+  const turnV = sp < 1.2 && gas ? (fwd ? 1.2 : -1.2) : c.speed
+  let yr = (turnV * Math.tan(c.steer)) / (WB * (1 + (0.0016 / grip) * c.speed * c.speed))
+  const lim = (mu * G * 1.05) / Math.max(2, sp)
+  yr = clamp(yr, -lim, lim)
+  const hand = I.hand && sp > 3
+  if (hand) yr *= 1.4 // the rear lets go
+  yr += c.kick
+  c.kick *= Math.exp(-5 * dt)
+  // the van turns, its momentum doesn't: the velocity is split anew along the turned body...
+  const d = yr * dt, cs = Math.cos(d), sn = Math.sin(d), s = c.speed, l = c.lat
+  c.yaw += d
+  c.speed = s * cs - l * sn; c.lat = s * sn + l * cs
+  // ...and the tyres pull the sideways part out as hard as their grip allows: a slide where they can't
+  const pull = mu * G * (hand ? 0.3 : 1) * dt
+  c.lat = Math.abs(c.lat) <= pull ? 0 : c.lat - Math.sign(c.lat) * pull
+  c.yawRate = yr
+  // the body on its springs: squats as it pulls away, dives under braking, leans out of turns, bounces over kerbs
+  c.ax += ((c.speed - s0) / dt - c.ax) * (1 - Math.exp(-12 * dt))
+  c.bpv += ((clamp(c.ax * 0.0085, -0.075, 0.05) - c.bp) * 70 - c.bpv * 8) * dt; c.bp += c.bpv * dt
+  c.brv += ((clamp(-s * yr * 0.011, -0.085, 0.085) - c.br) * 55 - c.brv * 6.5) * dt; c.br += c.brv * dt
+  c.hv += (-c.hz * 90 - c.hv * 9) * dt; c.hz += c.hv * dt
+}
+// a kerb or a pothole under the wheels: k 0..1, front first (1) or rear first (-1), side -1 left .. 1 right
+export function jolt(c, k, front = 1, side = 0) { c.hv += 1.1 * k; c.bpv += 2.6 * k * front; c.brv += 1.8 * k * side }

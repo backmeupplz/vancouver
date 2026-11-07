@@ -35,7 +35,8 @@ volume). `public/main.js` sets up the camera, light, shadows, the ink outline pa
 `public/core/` streams tiles for what is on screen, builds their geometry in Web Workers and draws ground, roads,
 facades and trees with procedural shaders, crisp at any zoom. Everything else is a plugin (`public/plugins/`):
 lo-fi music, live weather and sun, TransLink transit on its timetable, live aircraft, ships, landmarks and iconic
-bridges, and driving, walking and sailing through it all. See [PLUGINS.md](PLUGINS.md) to write one.
+bridges, and driving (parcel deliveries too), walking, hiking real trails and sailing through it all. See
+[PLUGINS.md](PLUGINS.md) to write one.
 
 Map data © OpenStreetMap contributors (ODbL). City of Vancouver Open Data. HRDEM and MRDEM © Natural Resources
 Canada (Open Government Licence – Canada). Transit data © TransLink. Live aircraft: adsb.lol.

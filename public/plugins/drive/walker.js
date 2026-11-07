@@ -27,12 +27,12 @@ export function makeWalker(THREE, colour = 0xe8735a) { // colour: the shirt
   return root
 }
 
-export function poseWalker(w, phase, amount, run) {
+export function poseWalker(w, phase, amount, run, carry = false) { // carry: both arms out in front, round a parcel
   const { body, legs, arms, head } = w.userData
   const s = Math.sin(phase), a = amount * (run ? 0.85 : 0.55)
   legs[0].rotation.x = s * a; legs[1].rotation.x = -s * a
-  arms[0].rotation.x = -s * a * 0.9; arms[1].rotation.x = s * a * 0.9
-  for (const [i, arm] of arms.entries()) arm.rotation.z = (i ? -1 : 1) * (0.06 + (run ? 0.12 : 0) * amount)
+  arms[0].rotation.x = carry ? 1.15 : -s * a * 0.9; arms[1].rotation.x = carry ? 1.15 : s * a * 0.9
+  for (const [i, arm] of arms.entries()) arm.rotation.z = (i ? -1 : 1) * (carry ? -0.12 : 0.06 + (run ? 0.12 : 0) * amount)
   body.position.y = Math.abs(Math.cos(phase)) * (run ? 0.09 : 0.035) * amount
   body.rotation.x = -(run ? 0.22 : 0.05) * amount // lean into the stride
   head.rotation.x = (run ? 0.15 : 0.03) * amount

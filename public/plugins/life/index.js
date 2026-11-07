@@ -4,7 +4,8 @@
 // nearby tiles to it, ticks it once per drawn frame and draws what it sends back: one instanced mesh per kind of
 // car, one for people and one for cyclists (positioned in the vertex shader straight from the worker's floats),
 // plus the signal poles and heads at signalled junctions. Nothing runs when zoomed out, switched off or hidden.
-// It publishes city.traffic (see PLUGINS.md): where the cars are, and obstacles (a player's van) they brake for.
+// It publishes city.traffic (see PLUGINS.md): where the cars, people and signal poles are, obstacles (a player's van)
+// they brake for, and bumps (a car hit stops a moment, a person knocked stumbles or falls over and gets up again).
 
 const CAR_ZOOM = 0.08, PEOPLE_ZOOM = 0.25
 const KEY = 'vancouver.life'
@@ -126,10 +127,12 @@ export default function life(city) {
               vec2 piv = vec2(0.0, (leg ? ${kind === 'bike' ? '0.95' : '0.86'} : 1.38) * ${kind === 'bike' ? '1.0' : H.toFixed(3)});
               if (pose < 0.5) a = sin(iB.x) * (leg ? 0.5 : -0.45) * sd;
               else if (pose > 1.5 && pose < 2.5) a = leg ? 1.5708 : 0.3;
+              else if (pose > 3.5) a = leg ? 0.12 * sd : -0.9 * min(1.0, iB.x * 2.0); // knocked over: arms out
               else if (pose > 2.5) a = 0.55 + sin(iB.x + (sd > 0.0 ? 0.0 : 3.1416)) * 0.5;
               P0.xy = rot(P0.xy, piv, a); N0.xy = rot(N0.xy, vec2(0.0), a);
             }
-            if (pose > 1.5 && pose < 2.5) P0.y -= 0.38;`}
+            if (pose > 1.5 && pose < 2.5) P0.y -= 0.38;
+            if (pose > 3.5) pitch = iB.x; // tipping back from the feet`}
           vCol = col; vEmit = em;
           vec3 objectNormal = orient(N0, iA.w, pitch);`)
         .replace('#include <begin_vertex>', 'vec3 transformed = orient(P0, iA.w, pitch) + iA.xyz;')
@@ -308,6 +311,14 @@ export default function life(city) {
       if (snap.pos.length < m.cars * 8) { snap.pos = new Float32Array(m.cars * 12); snap.aux = new Float32Array(m.cars * 3) }
       snap.pos.set(m.buf.subarray(0, m.cars * 8)); snap.aux.set(m.buf.subarray(m.base, m.base + m.cars * 2))
       snap.n = m.cars; snap.counts = m.counts
+      // the people for city.traffic.people, while a game asks for them: x, y, z, yaw and id
+      snap.np = 0
+      if (performance.now() - snap.asked < 2000) {
+        const n = m.nPeople, P = snap.ppos
+        if (P.length < n * 5) snap.ppos = new Float32Array(n * 8)
+        for (let i = 0, o = m.cars * 8; i < n; i++, o += 8) { const q = i * 5; snap.ppos[q] = m.buf[o]; snap.ppos[q + 1] = m.buf[o + 1]; snap.ppos[q + 2] = m.buf[o + 2]; snap.ppos[q + 3] = m.buf[o + 3]; snap.ppos[q + 4] = m.buf[m.pbase + i] }
+        snap.np = n
+      }
       simT = m.simT; simAt = performance.now()
       stats = m
       if (window.lifeDebug) { const a = (window.lifeMs ||= []); a.push(m.ms); if (a.length > 600) a.shift() }
@@ -327,7 +338,9 @@ export default function life(city) {
   }
 
   // ---------------------------------------------------------------- city.traffic, for games
-  const snap = { pos: new Float32Array(0), aux: new Float32Array(0), n: 0, counts: [] }
+  const snap = { pos: new Float32Array(0), aux: new Float32Array(0), n: 0, counts: [], ppos: new Float32Array(0), np: 0, asked: 0 }
+  const pools2 = { people: [], poles: [] } // reused result objects, so a game can ask every frame without garbage
+  const rec = (k, i) => pools2[k][i] || (pools2[k][i] = { id: 0, x: 0, y: 0, z: 0, heading: 0, r: 0 })
   const obstacles = new Map()
   let obsT = 0, obsAt = 0
   function sendObstacles() { // at most 10 times a second
@@ -356,6 +369,40 @@ export default function life(city) {
     },
     // the player hit car `id`: it stops for a few seconds
     bump(id) { worker.postMessage({ type: 'bump', id }) },
+    // people within r metres of (x, z), into `out` (cleared; its objects are reused, read them right away):
+    // { id, x, y, z, heading } (they face (sin, 0, cos) of heading, like the cars). Not the cyclists.
+    people(x, z, r, out = []) {
+      out.length = 0
+      snap.asked = performance.now()
+      if (!active || !peopleOn) return out
+      const P = snap.ppos, r2 = r * r
+      for (let i = 0; i < snap.np; i++) {
+        const q = i * 5, dx = P[q] - x, dz = P[q + 2] - z
+        if (dx * dx + dz * dz > r2) continue
+        const o = rec('people', out.length)
+        o.id = P[q + 4]; o.x = P[q]; o.y = P[q + 1]; o.z = P[q + 2]; o.heading = P[q + 3] + Math.PI / 2; o.r = 0.3
+        out.push(o)
+      }
+      return out
+    },
+    // the traffic signal poles within r metres of (x, z), into `out` like people(): { x, y (foot), z, r (radius) }
+    poles(x, z, r, out = []) {
+      out.length = 0
+      const H = sig.heads
+      if (!active || !H) return out
+      const r2 = r * r
+      for (let i = 0; i < H.length; i += 8) {
+        const dx = H[i] - x, dz = -H[i + 1] - z
+        if (dx * dx + dz * dz > r2) continue
+        const o = rec('poles', out.length)
+        o.id = i / 8; o.x = H[i]; o.y = H[i + 2]; o.z = -H[i + 1]; o.heading = 0; o.r = 0.17
+        out.push(o)
+      }
+      return out
+    },
+    // the player bumped into person `id` at `speed` m/s, pushing towards (dx, dz): a stumble, or (faster than a
+    // brisk walk) a fall; they get up again after a few seconds
+    knock(id, dx, dz, speed) { worker.postMessage({ type: 'knock', id, dx, dy: -dz, v: speed }) },
   }
   city.traffic = traffic
   city.emit('traffic:ready', traffic)
