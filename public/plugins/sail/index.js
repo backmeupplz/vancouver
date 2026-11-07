@@ -6,6 +6,7 @@
 // you steer through the wind. The shore comes from the map tiles' water masks (the coarse base map until they
 // load): the boat bumps and stops there. Ships (city.ships), bridge piers (city.landmarks.piers) and other players
 // (city.multiplayer) are solid too. Published as city.player { mode: 'boat' }, with city.models.boat for others.
+import { kit, shaded } from '../life/kit.js'
 
 const VMAX = 9 // m/s: a small keelboat in a gale (the server allows 12 for boats)
 // share of the best speed by true wind angle (degrees off the bow): nothing in the no-go zone, best on a beam reach
@@ -28,16 +29,17 @@ function polar(deg) {
 export function makeBoat(THREE, colour = COLOUR) {
   const boat = new THREE.Group(), hull = new THREE.Group()
   const M = (color, extra) => new THREE.MeshLambertMaterial({ color, flatShading: true, ...extra })
-  const deck = M(0xe9dcc3), cream = M(0xf3ead8), spar = M(0xd9d9d4), sailM = M(0xfbfaf2, { side: THREE.DoubleSide })
-  const plan = new THREE.Shape([[-0.95, -3.1], [0.95, -3.1], [1.2, -1], [1.15, 0.8], [0.75, 2.3], [0, 3.5], [-0.75, 2.3], [-1.15, 0.8], [-1.2, -1]].map(([x, y]) => new THREE.Vector2(x, y)))
-  const hg = new THREE.ExtrudeGeometry(plan, { depth: 1.1, bevelEnabled: false }).rotateX(-Math.PI / 2).translate(0, -0.45, 0)
-  const p = hg.attributes.position
-  for (let i = 0; i < p.count; i++) if (p.getY(i) < 0) p.setX(i, p.getX(i) * 0.5) // a V bottom
-  hg.computeVertexNormals()
-  hull.add(new THREE.Mesh(hg, [deck, M(new THREE.Color(colour))])) // caps: the deck; sides: the hull colour
-  const box = (w, h, l, m, x, y, z) => { const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), m); b.position.set(x, y, z); hull.add(b); return b }
-  box(1.3, 0.5, 1.9, cream, 0, 0.88, -0.3) // the cabin
-  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.08, 8.6, 6), spar); mast.position.set(0, 4.95, -0.9); hull.add(mast)
+  const spar = M(0xd9d9d4), sailM = M(0xfbfaf2, { side: THREE.DoubleSide })
+  // the hull (its plan extruded, bevelled, a V underneath; the deck on top), the cabin with its windows and the mast,
+  // in one mesh (the life plugin's kit)
+  const k = kit(THREE)
+  k.c(new THREE.Color(colour).getHex()).prism([-0.95, -3.1, 0.95, -3.1, 1.2, -1, 1.15, 0.8, 0.75, 2.3, 0, 3.5, -0.75, 2.3, -1.15, 0.8, -1.2, -1], -0.45, 0.65, { bevel: 0.06, cap: () => k.c(0xe9dcc3) })
+  k.rot(0, 'x', -Math.PI / 2).xf(0, (v) => { if (v.y < 0) v.x *= 0.5 })
+  k.c(0xf3ead8).box(-0.65, 0.65, 0.63, 1.13, -1.25, 0.65, 0.92, 0.95) // the cabin
+  k.c(0x2c3c4e).box(-0.635, 0.635, 0.82, 0.98, -1.05, 0.45, 0.97) // its windows
+  k.c(0xd9d9d4).rod([0, 0.65, -0.9], [0, 9.25, -0.9], 0.08, 0.05) // the mast
+  const g = k.geometry(); g.setAttribute('color', g.attributes.aCol)
+  hull.add(new THREE.Mesh(g, shaded(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), undefined, false)))
   const tri = (a, b, c) => { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute([...a, ...b, ...c], 3)); g.computeVertexNormals(); return new THREE.Mesh(g, sailM) }
   const boom = new THREE.Group(); boom.position.set(0, 1.5, -0.9); hull.add(boom)
   const bm = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, 3).translate(0, 0, 1.5), spar); boom.add(bm)

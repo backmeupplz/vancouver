@@ -123,7 +123,8 @@ streamed square, and `'view'` fires as the focus moves. A perspective camera als
 trees within ~190 m are real 3D trees (the billboards beyond stand upright), fog fades into the sky texture you set
 as `scene.background` rather than one flat colour, detail tiles stay up while new ones arrive past the fog, and
 when frames keep coming late the view is drawn at a lower resolution (down to 0.75 CSS px per pixel; `release()`
-restores it). Nothing changes for the map view when no plugin has a
+restores it). Its ink lines are smoothed by FXAA below 1.5x pixel ratio (`view.setAA('auto' | 'fxaa' | 'msaa' | 'off')`
+in `main.js` picks it, for quality tiers). Nothing changes for the map view when no plugin has a
 camera. The drive plugin is the example: it dives from the map into a chase camera behind a van (or a walker) and back.
 
 ## Shared between plugins
@@ -148,6 +149,9 @@ camera. The drive plugin is the example: it dives from the map into a chase came
   need it), else `null`; `'player'` is emitted on enter, leave and car ⇄ foot. `city.models.van(colour)`,
   `city.models.person(colour)` and `city.models.boat(colour)` return the same low-poly models (forward −z, origin on the
   ground or the waterline; `update(dt, speed)` runs the walk cycle or bobs the boat), so other players look alike.
+  They are built with `plugins/life/kit.js`, a small kit for flat-shaded low-poly models (bevelled profiles, boxes,
+  rods, wheels merged into one geometry with vertex colours) and their shared look (`shaded(material)`: a little
+  darker towards the ground, a cool rim light); the life plugin's street-level cars, people and signals use it too.
   The drive plugin publishes its van and walker with `setObstacle('player-van' | 'player-walker', …)` and collides
   with `city.traffic.nearby` and, when present, `city.multiplayer.nearby(x, z, r)` (same shape).
 - **Ships** (`plugins/ships`): `city.ships.nearby(x, z, r)`, the vessels within `r` metres of their hull, in the

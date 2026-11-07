@@ -1,27 +1,49 @@
-// The courier on foot: a small low-poly person in the Salmonberry Parcel Co. colours, flat-shaded Lambert like the
-// map. Local frame like the van: forward -z, up +y, origin on the ground between the feet; 1.75 m tall.
+// The courier on foot: a small low-poly person in the Salmonberry Parcel Co. colours, built with the life plugin's
+// kit like the people on the sidewalks (bevelled head and torso, sleeves and hands, a cap and a parcel bag).
+// Local frame like the van: forward -z, up +y, origin on the ground between the feet; 1.75 m tall.
 // pose(walker, phase, amount, run) swings the legs and arms (amount 0 standing .. 1 full stride).
+import { kit, shaded } from '../life/kit.js'
+
+const CREAM = 0xf6ead2, PANTS = 0x3b4a5e, SKIN = 0xe2b48c, HAIR = 0x4a3428, SHOE = 0x2b2e33, CAP = 0xf2a07e
+
 export function makeWalker(THREE, colour = 0xe8735a) { // colour: the shirt
-  const root = new THREE.Group(), body = new THREE.Group()
+  const root = new THREE.Group(), body = new THREE.Group(), night = { value: 0 }
   root.add(body)
-  const M = (color) => new THREE.MeshLambertMaterial({ color, flatShading: true })
-  const shirt = M(new THREE.Color(colour)), cream = M(0xf6ead2), pants = M(0x3b4a5e), skin = M(0xe2b48c), hair = M(0x4a3428), shoe = M(0x2b2e33), cap = M(0xf2a07e)
-  const box = (parent, w, h, l, mat, x, y, z) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), mat); m.position.set(x, y, z); parent.add(m); return m }
-  // a limb hangs from a pivot (hip or shoulder) so it can swing
-  const limb = (x, y, parts) => { const g = new THREE.Group(); g.position.set(x, y, 0); for (const [w, h, l, mat, yy, zz = 0] of parts) box(g, w, h, l, mat, 0, yy, zz); body.add(g); return g }
-  const legs = [-1, 1].map((s) => limb(s * 0.11, 0.9, [[0.16, 0.5, 0.19, pants, -0.24], [0.15, 0.42, 0.17, pants, -0.66], [0.16, 0.1, 0.28, shoe, -0.86, -0.05]]))
-  const arms = [-1, 1].map((s) => limb(s * 0.27, 1.43, [[0.12, 0.34, 0.13, shirt, -0.15], [0.11, 0.3, 0.11, skin, -0.46], [0.1, 0.1, 0.1, skin, -0.65]]))
-  box(body, 0.44, 0.58, 0.25, shirt, 0, 1.18, 0) // torso
-  box(body, 0.46, 0.1, 0.27, cream, 0, 0.95, 0) // belt line
-  box(body, 0.3, 0.32, 0.12, cream, 0, 1.2, 0.17) // a little backpack-style parcel bag
-  box(body, 0.12, 0.08, 0.12, skin, 0, 1.51, 0) // neck
-  const head = new THREE.Group(); head.position.set(0, 1.64, 0); body.add(head)
-  box(head, 0.24, 0.26, 0.24, skin, 0, 0, 0)
-  box(head, 0.26, 0.1, 0.26, hair, 0, 0.06, 0.02)
-  box(head, 0.27, 0.07, 0.27, cap, 0, 0.13, 0) // cap
-  box(head, 0.22, 0.03, 0.14, cap, 0, 0.1, -0.18) // peak
+  const mat = shaded(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), night, false)
+  const shirt = new THREE.Color(colour).getHex()
+  // a part built facing +x (the kit's way), turned to face -z, hung at (x, y) in `parent`
+  const part = (parent, x, y, build) => {
+    const k = kit(THREE); build(k)
+    const g = k.geometry().rotateY(Math.PI / 2)
+    g.setAttribute('color', g.attributes.aCol)
+    const o = new THREE.Group(); o.position.set(x, y, 0); o.add(new THREE.Mesh(g, mat)); parent.add(o)
+    return o
+  }
+  const legs = [-1, 1].map((s) => part(body, s * 0.11, 0.9, (k) => {
+    k.c(PANTS).box(-0.08, 0.08, -0.82, 0.02, -0.075, 0.075, 1.2, 1.2)
+    k.c(SHOE).box(-0.07, 0.17, -0.9, -0.8, -0.065, 0.065, 0.85)
+  }))
+  const arms = [-1, 1].map((s) => part(body, s * 0.27, 1.43, (k) => {
+    k.c(shirt).box(-0.062, 0.062, -0.34, 0.02, -0.062, 0.062, 1.15)
+    k.c(SKIN).box(-0.05, 0.05, -0.62, -0.32, -0.05, 0.05, 1.1).box(-0.042, 0.052, -0.73, -0.6, -0.037, 0.037, 1.15)
+  }))
+  part(body, 0, 0, (k) => {
+    k.c(PANTS).box(-0.11, 0.11, 0.84, 1.0, -0.18, 0.18) // hips
+    const t = k.at()
+    k.c(shirt).prism([-0.17, 0.97, 0.17, 0.97, 0.22, 1.34, 0.19, 1.46, -0.19, 1.46, -0.22, 1.34], -0.12, 0.13, { bevel: 0.03 })
+    k.rot(t, 'y', Math.PI / 2)
+    k.c(CREAM).box(-0.125, 0.135, 0.95, 1.03, -0.19, 0.19) // belt line
+    k.c(CREAM).box(-0.29, -0.12, 1.04, 1.38, -0.16, 0.16, 0.95).c(0xd9483b).box(-0.3, -0.29, 1.18, 1.26, -0.04, 0.04) // the parcel bag and its berry
+    k.c(SKIN).box(-0.05, 0.05, 1.45, 1.54, -0.05, 0.05) // neck
+  })
+  const head = part(body, 0, 1.64, (k) => {
+    k.c(SKIN).prism([-0.11, -0.13, 0.1, -0.13, 0.125, -0.04, 0.115, 0.08, -0.1, 0.1, -0.12, -0.01], -0.1, 0.1, { bevel: 0.032 })
+    k.box(0.11, 0.145, -0.05, 0.0, -0.02, 0.02) // nose
+    k.c(HAIR).prism([-0.135, -0.1, -0.125, 0.09, 0.0, 0.1, -0.06, 0.0, -0.08, -0.06], -0.112, 0.112, { bevel: 0.02 })
+    k.c(CAP).prism([-0.13, 0.04, 0.12, 0.04, 0.1, 0.15, -0.1, 0.16], -0.118, 0.118, { bevel: 0.035 }).box(0.08, 0.27, 0.035, 0.06, -0.1, 0.1) // cap and peak
+  })
   root.traverse((m) => { if (m.isMesh) { m.receiveShadow = true; m.castShadow = false } })
-  root.userData = { body, legs, arms, head, phase: 0 }
+  root.userData = { body, legs, arms, head, phase: 0, night }
   // for other plugins (city.models.person): advance the walk cycle at this speed (m/s)
   root.update = (dt, speed) => { const a = Math.abs(speed), run = a > 2.4; root.userData.phase += dt * a * (run ? 2.3 : 3.6); poseWalker(root, root.userData.phase, Math.min(1, a / 1.6), run) }
   return root

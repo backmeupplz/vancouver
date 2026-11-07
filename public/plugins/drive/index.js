@@ -18,6 +18,7 @@
 import { makeVan, newVan, stepVan, jolt } from './van.js'
 import { makeWalker, poseWalker } from './walker.js'
 import { makeProps, LAMP, STOP, YIELD, BUS, BOLLARD, BENCH } from './props.js'
+import { makeKerbs } from './kerbs.js'
 
 const DRIVE_MAX_KIND = 7 // motorway .. living street (graph piece kinds): where a van belongs
 const WALK_MAX_KIND = 13 // .. steps, tracks: where a person can walk (plus the sidewalks of roads)
@@ -186,6 +187,15 @@ export default function drive(city) {
       }
     })
     return best
+  }
+  // fn(seg) for every indexed road segment in the grid cells within r of (x, north)
+  function segsNear(x, y, r, fn) {
+    const mark = ++stamp
+    each(x, y, r, (b) => {
+      for (let cx = Math.floor((x - r) / CELL); cx <= Math.floor((x + r) / CELL); cx++) for (let cy = Math.floor((y - r) / CELL); cy <= Math.floor((y + r) / CELL); cy++) {
+        for (const id of b.rg.get(ckey(cx, cy)) || []) { if (b.segSeen[id] !== mark) { b.segSeen[id] = mark; fn(b.segs[id]) } }
+      }
+    })
   }
   // push a circle out of building footprints: returns the summed push (x, y) or null
   function collide(x, y, rad) {
@@ -362,7 +372,7 @@ export default function drive(city) {
   const ring2Mat = ringMat.clone()
   const ring2 = new THREE.Mesh(new THREE.RingGeometry(3.6, 3.8, 48).rotateX(-Math.PI / 2), ring2Mat)
   const icons = { pickup: parcelIcon(), drop: houseIcon(), summit: flagIcon() }
-  const props = makeProps(THREE)
+  const props = makeProps(THREE), lips = makeKerbs(THREE, segsNear)
   // the parcel in the courier's arms
   const carried = parcelIcon(); carried.scale.setScalar(0.3); carried.position.set(0, 1.08, -0.32); carried.visible = false; walker.add(carried)
   const pool = new THREE.Mesh(new THREE.PlaneGeometry(5, 12).rotateX(-Math.PI / 2).translate(0, 0, -8), new THREE.MeshBasicMaterial({ map: radial('rgba(255,230,170,0.5)'), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }))
@@ -426,13 +436,38 @@ export default function drive(city) {
     bump(k) { if (!audio()) return; const t = ac.currentTime; tone(70, t, 0.25, 0.18 * k); tone(140, t, 0.12, 0.06 * k, 'triangle') },
     door() { if (!audio()) return; const t = ac.currentTime; tone(95, t, 0.14, 0.12, 'triangle'); tone(190, t + 0.01, 0.06, 0.04, 'square') },
     splash() { if (!audio()) return; const t = ac.currentTime; tone(320, t, 0.3, 0.04, 'triangle'); tone(240, t + 0.05, 0.3, 0.03, 'triangle') },
-    horn() { if (!audio()) return; const t = ac.currentTime; tone(523, t, 0.16, 0.05, 'square'); tone(523, t + 0.2, 0.18, 0.05, 'square'); tone(659, t, 0.16, 0.03, 'square'); tone(659, t + 0.2, 0.18, 0.03, 'square') },
     oops() { if (!audio()) return; const t = ac.currentTime; tone(440, t, 0.12, 0.05, 'triangle'); tone(330, t + 0.1, 0.22, 0.05, 'triangle') }, // a startled "oh!"
     kerb(k) { if (!audio()) return; const t = ac.currentTime; tone(55, t, 0.18, 0.12 * k); tone(110, t + 0.01, 0.08, 0.05 * k, 'triangle') },
     clank() { if (!audio()) return; const t = ac.currentTime; tone(620, t, 0.5, 0.05); tone(931, t, 0.35, 0.03); tone(80, t, 0.25, 0.15) }, // a pole rings
     knock() { if (!audio()) return; const t = ac.currentTime; for (const k of [0, 0.16, 0.32]) tone(180, t + k, 0.09, 0.08, 'triangle') },
     shutter() { if (!audio()) return; const t = ac.currentTime; tone(1800, t, 0.03, 0.05, 'square'); tone(900, t + 0.06, 0.05, 0.04, 'square') },
     summit() { if (!audio()) return; const t = ac.currentTime + 0.02; [392, 523.3, 659.3, 784, 1046.5].forEach((f, i) => bell(f, t + i * 0.14, 0.09)); bell(1318.5, t + 0.8, 0.05) },
+  }
+  // the horn, as long as it is held (a tap still gives a short beep): a pair of disc horns a major third apart, like a
+  // van's dual horn: buzzy saws through a soft clip, a brassy resonance near 2 kHz, the pitch settling as the
+  // diaphragms get going
+  let horn = null
+  const clip = new Float32Array(256).map((_, i) => Math.tanh(3 * (i / 127.5 - 1)))
+  function hornOn() {
+    if (horn || !audio()) return
+    const t = ac.currentTime, out = ac.createGain(), sh = ac.createWaveShaper(), pk = ac.createBiquadFilter(), lp = ac.createBiquadFilter()
+    sh.curve = clip; pk.type = 'peaking'; pk.frequency.value = 1900; pk.Q.value = 2.2; pk.gain.value = 8; lp.type = 'lowpass'; lp.frequency.value = 4000
+    sh.connect(pk); pk.connect(lp); lp.connect(out); out.connect(ac.out)
+    out.gain.setValueAtTime(0, t); out.gain.linearRampToValueAtTime(0.06, t + 0.012)
+    const oscs = [418, 526].map((f) => {
+      const o = ac.createOscillator(), g = ac.createGain()
+      o.type = 'sawtooth'; o.frequency.setValueAtTime(f * 0.94, t); o.frequency.exponentialRampToValueAtTime(f, t + 0.05)
+      g.gain.value = 0.45; o.connect(g); g.connect(sh); o.start(t)
+      return o
+    })
+    horn = { out, oscs, t0: t }
+  }
+  function hornOff() {
+    if (!horn) return
+    const h = horn, t = Math.max(ac.currentTime, h.t0 + 0.13)
+    horn = null
+    h.out.gain.setTargetAtTime(0, t, 0.02)
+    for (const o of h.oscs) o.stop(t + 0.15)
   }
   // haptics where the phone has them (Android; iOS Safari has no navigator.vibrate)
   const buzz = (p) => { try { navigator.vibrate?.(p) } catch {} }
@@ -630,7 +665,7 @@ export default function drive(city) {
   const chase = { pos: new THREE.Vector3(), look: new THREE.Vector3(), yaw: 0 }
   let state = 'off', anim = null, offFrame = null, t0 = 0, mapPose = null, fromPose = null, saved = null
   let deliver = false, onFoot = false, hasVan = true, assist = true, run = null, shift = newShift(), hudAt = 0, jobRetry = 0, readAt = 0, street = null, shake = 0, skyAt = 0, fogFar = 850
-  let pickKind = null, down = null, hike = null, errand = null, grip = 1, propsAt = null, vista = 0 // vista: 0 .. 1 the photo's long view
+  let pickKind = null, down = null, hike = null, errand = null, grip = 1, propsAt = null, kerbsAt = null, vista = 0 // vista: 0 .. 1 the photo's long view
   const scratch = { people: [], poles: [], props: new Float32Array(700 * 5), seen: new Map() }
   try { assist = localStorage.getItem('delivery.assist') !== '0' } catch {}
   assistLabel()
@@ -765,10 +800,10 @@ export default function drive(city) {
     mapPose = { look: T.clone(), dir: C.position.clone().sub(T).normalize(), H: (C.top - C.bottom) / C.zoom, fov: 2 }
     chase.yaw = body().yaw
     chasePose(0, true)
-    shift = newShift(); run = null; jobRetry = 0; street = null; propsAt = null
+    shift = newShift(); run = null; jobRetry = 0; street = null; propsAt = kerbsAt = null
     saved = { bg: city.scene.background, fog: city.scene.fog }
     if (hasVan) city.scene.add(van)
-    city.scene.add(walker, icons.pickup, icons.drop, icons.summit, props.group)
+    city.scene.add(walker, icons.pickup, icons.drop, icons.summit, props.group, lips.mesh)
     walker.visible = onFoot
     icons.pickup.visible = icons.drop.visible = icons.summit.visible = false
     city.overlay.add(blob, wblob, beam, ring, ring2, pool)
@@ -801,6 +836,7 @@ export default function drive(city) {
     start('hike', spot, { x, y, hike: { ...h, gx, gy, sx0: spot.x, sy0: spot.y, t0: 0, climb: 0, lastH: null, snapped: !!r, photo: null, done: false } })
   }
   function exit(force) {
+    hornOff()
     if (state === 'pick') return cancelPick()
     if (state !== 'play') return
     if (deliver && !force && (shift.n || shift.km > 0.3)) return summary() // the end-of-shift card first
@@ -819,7 +855,7 @@ export default function drive(city) {
     city.view.release()
     offFrame?.(); offFrame = null
     anim?.(); anim = null
-    city.scene.remove(van, walker, icons.pickup, icons.drop, icons.summit, props.group)
+    city.scene.remove(van, walker, icons.pickup, icons.drop, icons.summit, props.group, lips.mesh)
     city.overlay.remove(blob, wblob, beam, ring, ring2, pool)
     city.scene.background = saved.bg; city.scene.fog = saved.fog
     hike = null; errand = null; run = null; vista = 0
@@ -956,6 +992,7 @@ export default function drive(city) {
     const lights = city.light.night > 0.35 || ['storm', 'fog', 'rain'].includes(w.kind)
     van.userData.lights[0].emissiveIntensity = lights ? 1.6 : 0.5
     van.userData.lights[1].emissiveIntensity = lights ? 1.2 : 0.4
+    van.userData.night.value = walker.userData.night.value = city.light.night
     pool.visible = !!lights && k > 0.9 && hasVan
   }
 
@@ -1595,6 +1632,10 @@ export default function drive(city) {
     opts.focus.set(P.x + fwdX(P.yaw) * ahead, P.h, -(P.y + fwdY(P.yaw) * ahead))
     opts.radius = 900; opts.shadowRadius = 300
     // the street furniture near the player, redrawn every dozen metres
+    if (!kerbsAt || Math.hypot(P.x - kerbsAt.x, P.y - kerbsAt.y) > 15) { // the kerbs within 160 m, every 15 m
+      kerbsAt = { x: P.x, y: P.y }
+      lips.update(infos.values(), P.x, P.y, 160, (x, z) => city.world.heightAt(x, z))
+    }
     if (!propsAt || Math.hypot(P.x - propsAt.x, P.y - propsAt.y) > 12) {
       propsAt = { x: P.x, y: P.y }
       const L = scratch.props
@@ -1713,12 +1754,12 @@ export default function drive(city) {
     if (e.repeat) return
     if (e.code === 'KeyE') { if (errand) hurry(); else toggleFoot() }
     else if (e.code === 'KeyR' && !onFoot) resetToRoad()
-    else if (e.code === 'KeyH' && !onFoot) sfx.horn()
+    else if (e.code === 'KeyH' && !onFoot) hornOn()
     else if (e.code === 'KeyM') setMuted(!muted)
     else if (e.code === 'KeyG') ui.assist.onclick()
   }
-  const onKeyUp = (e) => keys.delete(e.code)
-  const onBlur = () => { keys.clear(); for (const k in touchState) touchState[k] = false }
+  const onKeyUp = (e) => { keys.delete(e.code); if (e.code === 'KeyH') hornOff() }
+  const onBlur = () => { keys.clear(); hornOff(); for (const k in touchState) touchState[k] = false }
   const onResize = () => { fitCamera(); if (state !== 'off') city.requestRender() }
   addEventListener('keydown', onKey)
   addEventListener('keyup', onKeyUp)

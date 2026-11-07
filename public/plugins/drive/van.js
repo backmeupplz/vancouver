@@ -1,65 +1,95 @@
-// The Salmonberry Parcel Co. van: a small low-poly kei-style delivery van, flat-shaded Lambert like the map.
+// The Salmonberry Parcel Co. van: a small low-poly delivery van, flat-shaded Lambert like the map, built with the
+// life plugin's kit (one bevelled side profile with wheel arches and glass, a cream skirt, bumpers, mirrors, wipers,
+// parcels on the roof rack) in one mesh, plus its lamps (userData.lights: the head- and taillight materials) and
+// four wheels (userData.wheels) that spin and steer, and the company's name on the sides.
 // Local frame: forward -z, up +y, origin on the ground between the axles. 4.3 m long, 1.8 m wide.
+import { kit, shaded } from '../life/kit.js'
+
+const CREAM = 0xf6ead2, DARK = 0x2f3338, GLASS = 0x3d5568, TRIM = 0x8a8f96, KRAFT = 0xc9955c, KRAFT2 = 0xb8834e, TAPE = 0xeedfc0
+const ARCHES = [[-1.35, 0.45], [1.35, 0.45]]
+const under = (x0, x1, yb) => { // along the bottom, over the wheel arches (forward +x while building)
+  const out = [x0, yb]
+  for (const [cx, r] of ARCHES) { out.push(cx - r, yb); for (let i = 0; i <= 6; i++) { const t = Math.PI - (Math.PI * i) / 6; out.push(cx + r * Math.cos(t), Math.max(yb, 0.36 + r * Math.sin(t))) } out.push(cx + r, yb) }
+  out.push(x1, yb)
+  return out
+}
+const nar = (y) => 0.025 * (y - 0.32) + Math.max(0, y - 1.2) * 0.05 // tumblehome
+let livery = null // the name on the sides, drawn once (a canvas texture)
+function liveryTexture(THREE) {
+  if (livery) return livery
+  const c = document.createElement('canvas'); c.width = 512; c.height = 192
+  const g = c.getContext('2d')
+  g.fillStyle = '#d9483b'; g.beginPath(); g.arc(86, 104, 58, 0, Math.PI * 2); g.fill() // the salmonberry
+  g.fillStyle = '#f08a70'; for (const [x, y] of [[66, 86], [100, 80], [80, 118], [112, 112], [92, 140]]) { g.beginPath(); g.arc(x, y, 13, 0, Math.PI * 2); g.fill() }
+  g.fillStyle = '#5c9a3e'; g.beginPath(); g.ellipse(112, 40, 34, 14, -0.5, 0, Math.PI * 2); g.fill()
+  g.fillStyle = '#fff8ec'; g.font = 'bold 64px system-ui, sans-serif'; g.textBaseline = 'middle'; g.fillText('Salmonberry', 160, 84)
+  g.font = '600 34px system-ui, sans-serif'; g.fillText('PARCEL CO.  ·  since 1886', 164, 140)
+  livery = new THREE.CanvasTexture(c); livery.colorSpace = THREE.SRGBColorSpace; livery.anisotropy = 4
+  return livery
+}
+
 export function makeVan(THREE, colour = 0xf2a07e) { // colour: the body (a hex number or CSS colour)
-  const van = new THREE.Group()
-  const M = (color, extra) => new THREE.MeshLambertMaterial({ color, flatShading: true, ...extra })
-  const body = M(new THREE.Color(colour)), cream = M(0xf6ead2), dark = M(0x3a3f47), glass = M(0x5d7f96), trim = M(0x8a8f96)
-  const box = (w, h, l, mat, x, y, z) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), mat); m.position.set(x, y, z); van.add(m); return m }
-
-  // cargo box at the back and the cab at the front, its windshield raked back
-  box(1.8, 1.55, 2.55, body, 0, 1.38, 0.72)
-  const cab = new THREE.BoxGeometry(1.76, 1.3, 1.5)
-  const p = cab.attributes.position
-  for (let i = 0; i < p.count; i++) if (p.getY(i) > 0 && p.getZ(i) < 0) p.setZ(i, p.getZ(i) + 0.55) // top front edge back
-  cab.computeVertexNormals()
-  const cabM = new THREE.Mesh(cab, body); cabM.position.set(0, 1.25, -1.28); van.add(cabM)
-  box(1.7, 0.42, 4.1, cream, 0, 0.66, 0) // cream skirt all round
-  box(1.84, 0.12, 2.57, cream, 0, 1.85, 0.72) // a stripe on the box
-  // windows: windshield (tilted like the cab), side windows
-  const ws = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.95, 0.05), glass)
-  ws.position.set(0, 1.5, -1.7); ws.rotation.x = Math.atan2(0.55, 1.3); van.add(ws)
-  for (const s of [-1, 1]) box(0.05, 0.6, 0.75, glass, s * 0.89, 1.52, -1.1)
-  // bumpers, lights, mirrors
-  box(1.86, 0.28, 0.22, dark, 0, 0.46, -2.08)
-  box(1.86, 0.28, 0.2, dark, 0, 0.46, 2.07)
-  const headL = M(0xfff4c8, { emissive: 0xfff0b0, emissiveIntensity: 0.6 }), tailL = M(0xe03a2e, { emissive: 0x801010, emissiveIntensity: 0.5 })
-  for (const s of [-1, 1]) {
-    box(0.34, 0.2, 0.06, headL, s * 0.62, 0.88, -2.03)
-    box(0.22, 0.32, 0.06, tailL, s * 0.75, 1.0, 2.0)
-    box(0.08, 0.2, 0.14, dark, s * 0.98, 1.45, -1.4)
+  const van = new THREE.Group(), night = { value: 0 }
+  const vc = () => shaded(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), night)
+  const bodyHex = new THREE.Color(colour).getHex()
+  const k = kit(THREE)
+  // the body: windscreen and the round of the roof from one profile; glass where it slopes above the belt
+  k.c(bodyHex).prism([...under(-2.1, 2.1, 0.33), 2.15, 0.42, 2.17, 0.62, 2.14, 0.98, 1.62, 1.16, 0.98, 2.02, 0.75, 2.14, -1.98, 2.16, -2.12, 2.1, -2.15, 1.9, -2.15, 0.45], -0.9, 0.9,
+    { bevel: 0.09, narrow: nar, edge: (i, nx, ny, y) => { if (y > 1.2 && Math.abs(nx) > 0.4 && ny > 0.15 && ny < 0.8) k.c(GLASS); else if (ny < -0.3) k.c(DARK) } })
+  k.c(CREAM).prism([...under(-2.11, 2.11, 0.31), 2.16, 0.42, 2.18, 0.62, 2.18, 0.76, -2.16, 0.76, -2.16, 0.42], -0.912, 0.912, { bevel: 0.05, narrow: nar }) // two-tone skirt
+  for (const s of [-1, 1]) { // the cab's side windows (on the leaning sides), door seams and handles, mirrors
+    const z0 = s > 0 ? 0.86 : -0.912, z1 = s > 0 ? 0.912 : -0.86, lean = (y) => -s * nar(y)
+    k.c(GLASS).prism([0.0, 1.28, 1.42, 1.28, 0.93, 1.95, 0.0, 1.96], z0, z1, { bevel: 0.015, lean })
+    k.c(DARK); for (const x of [-0.05, -1.25]) k.prism([x, 0.78, x + 0.025, 0.78, x + 0.025, 1.98, x, 1.98], z0 + s * 0.006, z1 + s * 0.006, { lean })
+    k.prism([0.08, 1.12, 0.24, 1.12, 0.24, 1.17, 0.08, 1.17], z0 + s * 0.01, z1 + s * 0.01, { lean })
+    k.c(DARK).box(1.28, 1.36, 1.5, 1.55, s * 0.86, s * 1.0).box(1.27, 1.37, 1.44, 1.66, s * 0.98, s * 1.06)
   }
+  k.c(DARK).box(2.1, 2.25, 0.28, 0.5, -0.93, 0.93).box(-2.25, -2.1, 0.28, 0.5, -0.93, 0.93) // bumpers
+  k.c(DARK).box(2.15, 2.205, 0.6, 0.76, -0.42, 0.42).c(0xd9483b).box(2.2, 2.215, 0.65, 0.71, -0.04, 0.04) // grille and its berry
+  k.c(0xf3f0e6).box(2.24, 2.26, 0.32, 0.45, -0.22, 0.22).box(-2.26, -2.24, 0.33, 0.46, -0.22, 0.22) // plates
+  k.c(DARK).box(1.5, 1.56, 1.22, 1.25, -0.7, -0.08).box(1.5, 1.56, 1.22, 1.25, 0.08, 0.7) // wipers
+  // the back: two doors with little windows and a handle
+  k.c(DARK).box(-2.17, -2.14, 0.5, 2.0, -0.012, 0.012).c(GLASS).box(-2.17, -2.14, 1.5, 1.92, -0.76, -0.08).box(-2.17, -2.14, 1.5, 1.92, 0.08, 0.76)
+  k.c(TRIM).box(-2.18, -2.15, 1.3, 1.34, 0.06, 0.24)
+  k.c(0xd88a1c); for (const s of [-1, 1]) k.box(2.06, 2.16, 0.8, 0.88, s * 0.82, s * 0.9).box(-2.17, -2.13, 0.76, 0.84, s * 0.74, s * 0.86) // indicators
+  // the roof rack and parcels strapped to it
+  k.c(TRIM); for (const s of [-1, 1]) k.box(-1.8, 0.55, 2.13, 2.2, s * 0.62, s * 0.7)
+  for (const x of [-1.6, -0.6, 0.35]) k.box(x, x + 0.06, 2.18, 2.22, -0.7, 0.7)
+  for (const [x0, x1, y0, y1, z0, z1, c, r] of [[-1.35, -0.75, 2.22, 2.67, -0.7, 0.0, KRAFT, 0], [-0.55, 0.0, 2.22, 2.57, 0.05, 0.6, KRAFT2, 0.2], [-1.25, -0.8, 2.67, 2.97, -0.55, -0.05, KRAFT2, -0.3]]) {
+    const a = k.at(), cx = (x0 + x1) / 2, cz = (z0 + z1) / 2
+    k.c(c).box(x0, x1, y0, y1, z0, z1).c(TAPE).box(x0 - 0.01, x1 + 0.01, y0, y1 + 0.01, cz - 0.05, cz + 0.05)
+    k.move(a, -cx, 0, -cz).rot(a, 'y', r).move(a, cx, 0, cz)
+  }
+  const add = (g, m) => { g.rotateY(Math.PI / 2); g.deleteAttribute('aPart'); g.deleteAttribute('aSwing'); g.setAttribute('color', g.attributes.aCol); g.deleteAttribute('aCol'); const o = new THREE.Mesh(g, m); van.add(o); return o }
+  add(k.geometry(), vc())
+  // lamps: headlights and tail lights, their own materials so the drive plugin can turn them up at night
+  const headL = shaded(new THREE.MeshLambertMaterial({ color: 0xfff4c8, emissive: 0xfff0b0, emissiveIntensity: 0.6, flatShading: true }), night)
+  const tailL = shaded(new THREE.MeshLambertMaterial({ color: 0xe03a2e, emissive: 0x801010, emissiveIntensity: 0.5, flatShading: true }), night)
+  const hl = kit(THREE), tl = kit(THREE)
+  for (const s of [-1, 1]) { hl.c(0xffffff).box(2.08, 2.18, 0.86, 1.0, s * 0.42, s * 0.8, 1, 0.92); tl.c(0xffffff).box(-2.19, -2.13, 0.9, 1.3, s * 0.72, s * 0.87) }
+  add(hl.geometry(), headL); add(tl.geometry(), tailL)
   van.userData.lights = [headL, tailL]
-  // the back: two doors with little windows, a handle and a plate
-  box(0.03, 1.2, 0.02, dark, 0, 1.4, 2.0)
-  for (const s of [-1, 1]) box(0.6, 0.42, 0.04, glass, s * 0.42, 1.78, 2.0)
-  box(0.2, 0.05, 0.05, trim, 0.18, 1.35, 2.01)
-  box(0.5, 0.18, 0.04, cream, 0, 0.5, 2.18)
-  // the logo: a salmonberry (a coral berry with a leaf) on each side of the box
-  const berry = M(0xd9483b), leaf = M(0x5c9a3e)
+  // the name on both sides of the cargo box
+  const decal = new THREE.MeshLambertMaterial({ map: liveryTexture(THREE), transparent: true, alphaTest: 0.3, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })
   for (const s of [-1, 1]) {
-    const b = new THREE.Mesh(new THREE.IcosahedronGeometry(0.26, 0), berry); b.position.set(s * 0.92, 1.35, 0.7); b.scale.set(0.35, 1, 1); van.add(b)
-    const l = box(0.05, 0.1, 0.32, leaf, s * 0.92, 1.66, 0.62); l.rotation.x = 0.4
+    const p = new THREE.Mesh(new THREE.PlaneGeometry(1.75, 0.66), decal)
+    p.rotation.set(0, s > 0 ? Math.PI / 2 : -Math.PI / 2, 0); p.rotateX(-0.06)
+    p.position.set(s * (0.905 - nar(1.42)), 1.42, 1.0); van.add(p)
   }
-  // parcels strapped to the roof rack
-  const kraft = M(0xc9955c), kraft2 = M(0xb8834e)
-  box(1.5, 0.06, 2.2, trim, 0, 2.2, 0.7)
-  box(0.7, 0.45, 0.6, kraft, -0.35, 2.45, 0.3)
-  box(0.55, 0.35, 0.5, kraft2, 0.4, 2.4, 0.9).rotation.y = 0.2
-  box(0.5, 0.3, 0.45, kraft2, -0.3, 2.83, 0.35).rotation.y = -0.3
-
-  // wheels: a tyre and a hub; front pair steer
-  const tyre = new THREE.CylinderGeometry(0.36, 0.36, 0.26, 10).rotateZ(Math.PI / 2)
-  const hub = new THREE.CylinderGeometry(0.2, 0.2, 0.28, 6).rotateZ(Math.PI / 2)
-  const tyreM = M(0x2b2e33), hubM = M(0xd8d8d2)
+  // wheels: a tyre, a hub and a cap; the front pair steer
   const wheels = []
   for (const [x, z] of [[-0.82, -1.35], [0.82, -1.35], [-0.82, 1.35], [0.82, 1.35]]) {
+    const w = kit(THREE), o = Math.sign(x)
+    w.c(0x2b2e33).wheel(0, 0, 0, 0.36, 0.24, 12, 'x').c(0xd8d8d2).wheel(o * 0.125, 0, 0, 0.21, 0.02, 8, 'x').c(0x6b7078).wheel(o * 0.14, 0, 0, 0.07, 0.02, 6, 'x')
+    const g = w.geometry(); g.deleteAttribute('aPart'); g.deleteAttribute('aSwing'); g.setAttribute('color', g.attributes.aCol); g.deleteAttribute('aCol')
     const steer = new THREE.Group(); steer.position.set(x, 0.36, z)
     const spin = new THREE.Group()
-    spin.add(new THREE.Mesh(tyre, tyreM), new THREE.Mesh(hub, hubM))
+    spin.add(new THREE.Mesh(g, vc()))
     steer.add(spin); van.add(steer)
     wheels.push({ steer, spin, front: z < 0 })
   }
   van.userData.wheels = wheels
+  van.userData.night = night // 0 day .. 1 night: the rim light dims
   van.traverse((m) => { if (m.isMesh) { m.receiveShadow = true; m.castShadow = false } }) // the shadow map is static: a blob shadow instead
   return van
 }

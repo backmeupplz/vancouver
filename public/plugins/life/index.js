@@ -7,10 +7,14 @@
 // It publishes city.traffic (see PLUGINS.md): where the cars, people and signal poles are, obstacles (a player's van)
 // they brake for, and bumps (a car hit stops a moment, a person knocked stumbles or falls over and gets up again).
 
+import { carModels, peopleModels, signalModels, DETAIL, ARM_Y, LENSES, POLE_LENSES, PED_LENSES } from './models.js'
+import { SHADE } from './kit.js'
+
 const CAR_ZOOM = 0.08, PEOPLE_ZOOM = 0.25
+const NEAR_CARS = 150, NEAR_PEOPLE = 70, SIG_NEAR = 240, SIG_CAP = 200 // metres: under a perspective camera, the detailed models (models.js) within these
 const KEY = 'vancouver.life'
 const MOBILE = matchMedia('(pointer: coarse)').matches || innerWidth < 700
-const MAX_CARS = MOBILE ? 2000 : 4000, MAX_PEOPLE = MOBILE ? 1500 : 3000, MAX_BIKES = 300
+const MAX_CARS = MOBILE ? 2000 : 4000, MAX_PEOPLE = MOBILE ? 1500 : 3000, MAX_BIKES = 300, MAX_NEAR = 600
 const KINDS = 6 // sedan, suv, van, truck, taxi, police
 
 export default function life(city) {
@@ -20,10 +24,12 @@ export default function life(city) {
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(set)) } catch {} }
 
   // ---------------------------------------------------------------- models
-  const uni = { uNight: { value: 0 }, uTime: { value: 0 } }
+  const uni = { uNight: { value: 0 }, uTime: { value: 0 }, uRain: { value: 0 }, uCam: { value: new THREE.Vector3() } }
+  const nearCars = { value: 0 }, nearPeople = { value: 0 }
   // boxes: [x0, x1, y0, y1, z half-width, colour (null = the instance's colour), part, taper (top scale), swing, z centre]
   // parts: cars 0 body, 1 fixed colour, 2 headlight, 3 taillight, 4/5 police beacons, 6 taxi sign, 7/8 left/right blinkers;
-  // people 0 shirt, 1 trousers, 2 skin, 3 hair, 4 fixed, 5 bike frame. swing: ±1 legs, ±2 arms (left/right)
+  // people 0 shirt, 1 trousers, 2 skin, 3 hair, 4 fixed, 5 bike frame (the shirt a shade darker), 6 umbrella (models.js).
+  // swing: ±1 legs, ±2 arms (left/right)
   function model(boxes) {
     const P = [], C = [], A = [], S = [], col = new THREE.Color()
     for (const [x0, x1, y0, y1, hw, c, part = c == null ? 0 : 1, taper = 1, swing = 0, zc = 0] of boxes) {
@@ -90,14 +96,16 @@ export default function life(city) {
     [-0.2, 0.45, 1.25, 1.33, 0.05, null, 0, 1, 0, 0.24], [-0.2, 0.45, 1.25, 1.33, 0.05, null, 0, 1, 0, -0.24], // arms to the bars
   ])
 
-  function material(kind) {
+  // kind: 'car', 'person' or 'bike'; hide: a { value } uniform, the squared radius around uCam within which these
+  // boxes are not drawn (the detailed models are), or null for the detailed models themselves
+  function material(kind, hide = null) {
     const m = new THREE.MeshLambertMaterial({ color: 0xffffff })
     m.onBeforeCompile = (s) => {
-      Object.assign(s.uniforms, uni)
+      Object.assign(s.uniforms, uni, hide ? { uNear: hide } : {})
       s.vertexShader = s.vertexShader
         .replace('#include <common>', `#include <common>
-          attribute vec4 iA, iB; attribute vec3 aCol; attribute float aPart, aSwing; uniform float uNight, uTime;
-          varying vec3 vCol, vEmit;
+          attribute vec4 iA, iB; attribute vec3 aCol; attribute float aPart, aSwing; uniform float uNight, uTime, uRain${hide ? ', uNear' : ''}; uniform vec3 uCam;
+          varying vec3 vCol, vEmit; ${SHADE.vars}
           vec3 unpack(float c) { float r = floor(c / 65536.0), g = floor((c - r * 65536.0) / 256.0), b = c - r * 65536.0 - g * 256.0; return pow(vec3(r, g, b) / 255.0, vec3(2.2)); }
           vec3 orient(vec3 p, float yaw, float pitch) {
             float cp = cos(pitch), sp = sin(pitch); p = vec3(p.x * cp - p.y * sp, p.x * sp + p.y * cp, p.z);
@@ -119,9 +127,12 @@ export default function life(city) {
             float pose = floor(iB.y + 0.001), seed = fract(iB.y) / 0.9;
             vec3 skin[4] = vec3[](vec3(0.98, 0.80, 0.66), vec3(0.87, 0.65, 0.48), vec3(0.62, 0.43, 0.29), vec3(0.40, 0.27, 0.18));
             vec3 hair[5] = vec3[](vec3(0.12, 0.09, 0.07), vec3(0.35, 0.22, 0.12), vec3(0.85, 0.70, 0.40), vec3(0.55, 0.55, 0.55), vec3(0.05, 0.05, 0.06));
+            vec3 umbs[4] = vec3[](vec3(0.08, 0.1, 0.16), vec3(0.75, 0.12, 0.14), vec3(0.95, 0.75, 0.15), vec3(0.15, 0.4, 0.6));
             vec3 col = aPart < 0.5 ? unpack(iB.z) : aPart < 1.5 ? unpack(iB.w) : aPart < 2.5 ? pow(skin[int(seed * 3.99)], vec3(2.2))
-              : aPart < 3.5 ? pow(hair[int(fract(seed * 7.13) * 4.99)], vec3(2.2)) : aPart > 4.5 ? unpack(iB.z) * 0.8 : aCol;
+              : aPart < 3.5 ? pow(hair[int(fract(seed * 7.13) * 4.99)], vec3(2.2)) : aPart > 5.5 ? pow(umbs[int(fract(seed * 3.7) * 3.99)], vec3(2.2)) : aPart > 4.5 ? unpack(iB.z) * 0.8 : aCol;
             vec3 em = vec3(0.0);
+            bool umb = uRain > 0.5 && fract(seed * 7.31) < 0.6 && pose < 1.5; // an umbrella up, walking or waiting
+            if (aPart > 5.5 && !umb) P0 = vec3(0.0);
             if (aSwing != 0.0) {
               bool leg = abs(aSwing) < 1.5; float sd = sign(aSwing), a = 0.0;
               vec2 piv = vec2(0.0, (leg ? ${kind === 'bike' ? '0.95' : '0.86'} : 1.38) * ${kind === 'bike' ? '1.0' : H.toFixed(3)});
@@ -129,19 +140,21 @@ export default function life(city) {
               else if (pose > 1.5 && pose < 2.5) a = leg ? 1.5708 : 0.3;
               else if (pose > 3.5) a = leg ? 0.12 * sd : -0.9 * min(1.0, iB.x * 2.0); // knocked over: arms out
               else if (pose > 2.5) a = 0.55 + sin(iB.x + (sd > 0.0 ? 0.0 : 3.1416)) * 0.5;
+              if (umb && aSwing > 1.5) a = 0.75; // holding it up
               P0.xy = rot(P0.xy, piv, a); N0.xy = rot(N0.xy, vec2(0.0), a);
             }
             if (pose > 1.5 && pose < 2.5) P0.y -= 0.38;
             if (pose > 3.5) pitch = iB.x; // tipping back from the feet`}
-          vCol = col; vEmit = em;
+          vCol = col; vEmit = em; ${SHADE.vert}
           vec3 objectNormal = orient(N0, iA.w, pitch);`)
-        .replace('#include <begin_vertex>', 'vec3 transformed = orient(P0, iA.w, pitch) + iA.xyz;')
+        .replace('#include <begin_vertex>', `vec3 transformed = orient(P0, iA.w, pitch) + iA.xyz;
+          ${hide ? 'vec2 dc = iA.xz - uCam.xz; if (dot(dc, dc) < uNear) transformed = vec3(0.0, -1e5, 0.0);' : ''}`)
       s.fragmentShader = s.fragmentShader
-        .replace('#include <common>', '#include <common>\nvarying vec3 vCol, vEmit;')
-        .replace('#include <color_fragment>', 'diffuseColor.rgb *= vCol;')
-        .replace('#include <emissivemap_fragment>', 'totalEmissiveRadiance += vEmit;')
+        .replace('#include <common>', `#include <common>\nvarying vec3 vCol, vEmit; ${SHADE.vars} uniform float uNight;`)
+        .replace('#include <color_fragment>', `diffuseColor.rgb *= vCol; ${SHADE.frag}`) // (and the shared look, kit.js)
+        .replace('#include <emissivemap_fragment>', `totalEmissiveRadiance += vEmit; ${SHADE.rim}`)
     }
-    m.customProgramCacheKey = () => 'life-' + kind
+    m.customProgramCacheKey = () => 'life-' + kind + (hide ? '-far' : '')
     return m
   }
   const group = new THREE.Group(), glowGroup = new THREE.Group()
@@ -158,9 +171,16 @@ export default function life(city) {
     parent.add(m)
     return { m, ib, cap }
   }
-  const carMat = material('car'), personMat = material('person'), bikeMat = material('bike')
+  const carMat = material('car', nearCars), personMat = material('person', nearPeople), bikeMat = material('bike')
+  const carNearMat = material('car'), personNearMat = material('person')
   const carMeshes = MODELS.map((g) => instanced(g, carMat, MAX_CARS))
   const people = instanced(person, personMat, MAX_PEOPLE)
+  // the detailed models near a perspective camera, filled from the same buffer (pickNear())
+  const carsNear = carModels(THREE).map((g) => instanced(g, carNearMat, MAX_NEAR))
+  const peopleNear = peopleModels(THREE).map((g) => instanced(g.scale(H, H, H), personNearMat, MAX_NEAR))
+  const allNear = [...carsNear, ...peopleNear]
+  const pickCar = MODELS.map((_, k) => (buf, s) => carsNear[DETAIL(k, buf[s + 7])]) // by kind and seed
+  const pickPerson = (buf, s) => peopleNear[Math.min(2, Math.floor((buf[s + 5] % 1) / 0.3))] // by seed (pose + 0.9 seed)
   const bikes = instanced(bike, bikeMat, MAX_BIKES)
   // light on the road at night (overlay, additive): a headlight pool ahead of each car and a red glow behind,
   // sharing the cars' instance buffers. x is metres out from the bumper; z across; w: 0 ahead, 1 behind
@@ -198,7 +218,9 @@ export default function life(city) {
   })
 
   // ---------------------------------------------------------------- signals and benches (static, per network)
-  const sig = { group: new THREE.Group(), heads: null, ctls: null, state: null, lamps: null, glow: null, meshes: [] }
+  // two sets: big simple heads that read on the map, and Vancouver-sized poles, heads and pedestrian signals
+  // (models.js) under a perspective camera; the meshes of the near set have userData.near
+  const sig = { group: new THREE.Group(), heads: null, ctls: null, state: null, ped: null, lamps: null, glow: null, near: null, meshes: [], d: null }
   group.add(sig.group)
   const poleGeo = new THREE.CylinderGeometry(0.12, 0.15, 6.4, 6).translate(0, 3.2, 0)
   const armGeo = new THREE.BoxGeometry(1, 0.16, 0.16).translate(0.5, 0, 0)
@@ -217,11 +239,15 @@ export default function life(city) {
     return new THREE.CanvasTexture(c)
   })()
   const glowMat = new THREE.PointsMaterial({ size: 8, map: glowTex, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: false })
+  const glowNear = new THREE.PointsMaterial({ size: 1.1, map: glowTex, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })
+  const sigGeo = signalModels(THREE)
+  const discGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.03, 8).rotateX(Math.PI / 2), squareGeo = new THREE.BoxGeometry(0.03, 0.2, 0.24)
+  const WALK = [new THREE.Color(0xff7a1a), new THREE.Color(0xf4f4ff)], WALK_DARK = [new THREE.Color(0x3a2a20), new THREE.Color(0x30323a)]
   const LIT = [0xff2a1a, 0xffa800, 0x2bff70].map((h) => new THREE.Color(h)), DARK = [0x3a2422, 0x3a3222, 0x1e3326].map((h) => new THREE.Color(h))
   const S = 1.5 // signal heads a bit larger than life
   function buildSignals(heads, ctls) {
     for (const m of sig.meshes) { m.removeFromParent(); m.dispose?.() }
-    sig.meshes = []
+    sig.meshes = []; sig.d = sig.lamps = sig.glow = null
     sig.heads = heads; sig.ctls = ctls
     const n = heads.length / 8
     sig.state = new Int8Array(n).fill(-1)
@@ -239,7 +265,7 @@ export default function life(city) {
       for (let k = 0; k < 3; k++) {
         const fx = Math.cos(headYaw) * 0.24 * S, fy = Math.sin(headYaw) * 0.24 * S
         lamps.setMatrixAt(i * 3 + k, M.compose(V.set(hx + fx, hh + (0.36 - k * 0.36) * S, -(hy + fy)), Q.setFromAxisAngle(Y, headYaw), new THREE.Vector3(S, S, S)))
-        lamps.setColorAt(i * 3 + k, DARK[2 - k])
+        lamps.setColorAt(i * 3 + k, DARK[k])
       }
       gpos.set([hx + Math.cos(headYaw) * 0.4 * S, hh, -(hy + Math.sin(headYaw) * 0.4 * S)], i * 3)
     }
@@ -250,6 +276,55 @@ export default function life(city) {
     for (const m of [pole, arm, head, lamps]) { m.computeBoundingSphere(); m.castShadow = false; m.receiveShadow = true; sig.group.add(m); sig.meshes.push(m) }
     glowGroup.add(glow); sig.meshes.push(glow)
     sig.lamps = lamps; sig.glow = glow
+    // the near set, for the heads within SIG_NEAR of the camera (nearSignals() picks them into slots): the pole (in
+    // its arm's frame), the arm, the overhead head; lit discs (3 overhead, 3 on the pole) and pedestrian squares
+    // (hand, person). Their matrices are kept per head (16 floats each, 6 discs, 2 squares) and copied into the slots.
+    const cap = Math.min(n, SIG_CAP)
+    const dPole = new THREE.InstancedMesh(sigGeo.pole, benchMat, cap), dArm = new THREE.InstancedMesh(sigGeo.arm, benchMat, cap), dHead = new THREE.InstancedMesh(sigGeo.head, benchMat, cap)
+    const discs = new THREE.InstancedMesh(discGeo, lampMat, cap * 6), peds = new THREE.InstancedMesh(squareGeo, lampMat, cap * 2)
+    const mats = { pole: new Float32Array(n * 16), arm: new Float32Array(n * 16), head: new Float32Array(n * 16), discs: new Float32Array(n * 96), peds: new Float32Array(n * 32) }
+    const Mp = new THREE.Matrix4(), Mh = new THREE.Matrix4(), T = new THREE.Matrix4(), one = new THREE.Vector3(1, 1, 1), len = new THREE.Vector3()
+    const lens = new Float32Array(n * 9)
+    for (let i = 0; i < n; i++) {
+      const [x, y, h, armYaw, armLen] = heads.subarray(i * 8, i * 8 + 5)
+      Q.setFromAxisAngle(Y, armYaw)
+      Mp.compose(V.set(x, h, -y), Q, one).toArray(mats.pole, i * 16)
+      M.compose(V.set(x, h + ARM_Y, -y), Q, len.set(armLen, 1, 1)).toArray(mats.arm, i * 16)
+      Mh.compose(V.set(x + Math.cos(armYaw) * armLen * 0.9, h + ARM_Y, -(y + Math.sin(armYaw) * armLen * 0.9)), Q, one).toArray(mats.head, i * 16)
+      for (let k = 0; k < 3; k++) {
+        M.multiplyMatrices(Mh, T.makeTranslation(...LENSES[k])).toArray(mats.discs, (i * 6 + k) * 16)
+        M.multiplyMatrices(Mp, T.makeTranslation(...POLE_LENSES[k])).toArray(mats.discs, (i * 6 + 3 + k) * 16)
+        V.set(LENSES[k][0], LENSES[k][1], LENSES[k][2] - 0.1).applyMatrix4(Mh).toArray(lens, i * 9 + k * 3)
+      }
+      for (let k = 0; k < 2; k++) M.multiplyMatrices(Mp, T.makeTranslation(...PED_LENSES[k])).toArray(mats.peds, (i * 2 + k) * 16)
+    }
+    discs.setColorAt(0, DARK[0]); peds.setColorAt(0, WALK_DARK[0]) // (makes their colour buffers)
+    const dGlowGeo = new THREE.BufferGeometry()
+    dGlowGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(cap * 3), 3)); dGlowGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(cap * 3), 3))
+    const dGlow = new THREE.Points(dGlowGeo, glowNear)
+    const meshes = { pole: dPole, arm: dArm, head: dHead, discs, peds }
+    for (const m of Object.values(meshes)) { m.count = 0; m.frustumCulled = false; m.castShadow = false; m.receiveShadow = true; sig.group.add(m) }
+    dGlow.frustumCulled = false; glowGroup.add(dGlow)
+    sig.d = { meshes, mats, cap, discs, peds, glow: dGlow, lens, slot: new Int32Array(n).fill(-1), at: { x: NaN, z: NaN } }
+    sig.ped = new Int8Array(n).fill(-1)
+    for (const m of [...Object.values(meshes), dGlow]) { m.userData.near = true; sig.meshes.push(m) }
+    sig.near = null // set the visibility on the next frame
+  }
+  // the heads within SIG_NEAR of (x, z) into the near set's slots (redone as the camera moves on), recoloured next tick
+  function nearSignals(x, z) {
+    const D = sig.d, H = sig.heads, n = H.length / 8, per = { pole: 1, arm: 1, head: 1, discs: 6, peds: 2 }
+    let c = 0
+    for (let i = 0; i < n; i++) {
+      const dx = H[i * 8] - x, dz = -H[i * 8 + 1] - z
+      if (c >= D.cap || dx * dx + dz * dz > SIG_NEAR * SIG_NEAR) { D.slot[i] = -1; continue }
+      D.slot[i] = c
+      for (const k in per) D.meshes[k].instanceMatrix.array.set(D.mats[k].subarray(i * 16 * per[k], (i + 1) * 16 * per[k]), c * 16 * per[k])
+      c++
+    }
+    for (const k in per) { const m = D.meshes[k]; m.count = c * per[k]; m.instanceMatrix.needsUpdate = true }
+    D.glow.geometry.setDrawRange(0, c)
+    D.at.x = x; D.at.z = z
+    sig.state.fill(-1); sig.ped.fill(-1); sigAt = -1
   }
   let benchMesh = null
   function buildBenches(b) {
@@ -276,18 +351,31 @@ export default function life(city) {
     const n = sig.state.length
     let changed = false
     const gc = sig.glow.geometry.attributes.color
+    const D = sig.d, dp = D.glow.geometry.attributes.position, dc = D.glow.geometry.attributes.color
+    let walked = false
     for (let i = 0; i < n; i++) {
-      const st = light(sig.heads[i * 8 + 6], sig.heads[i * 8 + 7], t)
+      const c = sig.heads[i * 8 + 6], g = sig.heads[i * 8 + 7]
+      // pedestrians cross this approach alongside the other direction's traffic: walk while it has green
+      const walk = light(c, 1 - g, t) === 2 ? 1 : 0
+      const j = D.slot[i]
+      if (walk !== sig.ped[i]) {
+        sig.ped[i] = walk; walked = true
+        if (j >= 0) for (let k = 0; k < 2; k++) D.peds.setColorAt(j * 2 + k, k === walk ? WALK[k] : WALK_DARK[k])
+      }
+      const st = light(c, g, t)
       if (st === sig.state[i]) continue
       sig.state[i] = st; changed = true
-      for (let k = 0; k < 3; k++) sig.lamps.setColorAt(i * 3 + k, 2 - k === st ? LIT[st] : DARK[2 - k])
+      const top = st // lamps from the top: red (0), amber (1), green (2)
+      for (let k = 0; k < 3; k++) { const col = k === top ? LIT[st] : DARK[k]; sig.lamps.setColorAt(i * 3 + k, col); if (j >= 0) { D.discs.setColorAt(j * 6 + k, col); D.discs.setColorAt(j * 6 + 3 + k, col) } }
       const p = sig.glow.geometry.attributes.position
       const hh = sig.heads[i * 8 + 2] + 6.1 - 0.55 * S
-      p.setY(i, hh + (0.36 - (2 - st) * 0.36) * S)
+      p.setY(i, hh + (0.36 - top * 0.36) * S)
       gc.setXYZ(i, LIT[st].r, LIT[st].g, LIT[st].b)
+      if (j >= 0) { dp.setXYZ(j, D.lens[i * 9 + top * 3], D.lens[i * 9 + top * 3 + 1], D.lens[i * 9 + top * 3 + 2]); dc.setXYZ(j, LIT[st].r, LIT[st].g, LIT[st].b) }
       p.needsUpdate = true
     }
-    if (changed) { sig.lamps.instanceColor.needsUpdate = true; gc.needsUpdate = true }
+    if (changed) { sig.lamps.instanceColor.needsUpdate = true; gc.needsUpdate = true; D.discs.instanceColor.needsUpdate = true; dp.needsUpdate = dc.needsUpdate = true }
+    if (walked) D.peds.instanceColor.needsUpdate = true
   }
 
   // ---------------------------------------------------------------- the worker
@@ -300,12 +388,22 @@ export default function life(city) {
       busy = false; spare = m.buf
       if (!active) return
       let off = 0
+      // under a perspective camera the boxes within the near radii are hidden (in their shader, by uCam / uNear)
+      // and those things are copied to the detailed models instead
+      const C = city.view.camera, near = !!C.isPerspectiveCamera
+      uni.uCam.value.copy(C.position); nearCars.value = near ? NEAR_CARS ** 2 : 0; nearPeople.value = near ? NEAR_PEOPLE ** 2 : 0
+      for (const o of allNear) o.n = 0
       for (let k = 0; k < KINDS; k++) {
         const n = Math.min(m.counts[k], carMeshes[k].cap)
         put(carMeshes[k], m.buf, off, n); pools[k].geometry.instanceCount = n
+        if (near) pickNear(m.buf, off, n, NEAR_CARS, pickCar[k])
         off += m.counts[k]
       }
-      put(people, m.buf, off, Math.min(m.nPeople, people.cap)); off += m.nPeople
+      const np = Math.min(m.nPeople, people.cap)
+      put(people, m.buf, off, np)
+      if (near) pickNear(m.buf, off, np, NEAR_PEOPLE, pickPerson)
+      off += m.nPeople
+      for (const o of allNear) show(o, o.n)
       put(bikes, m.buf, off, Math.min(m.nBikes, bikes.cap))
       // the cars for city.traffic.nearby: positions and (id, speed), kept until the next frame
       if (snap.pos.length < m.cars * 8) { snap.pos = new Float32Array(m.cars * 12); snap.aux = new Float32Array(m.cars * 3) }
@@ -331,10 +429,18 @@ export default function life(city) {
       city.requestRender()
     }
   }
-  function put(o, buf, off, n) {
-    o.ib.array.set(buf.subarray(off * 8, (off + n) * 8))
-    o.ib.clearUpdateRanges(); o.ib.addUpdateRange(0, n * 8); o.ib.needsUpdate = true
-    o.m.geometry.instanceCount = n
+  function put(o, buf, off, n) { o.ib.array.set(buf.subarray(off * 8, (off + n) * 8)); show(o, n) }
+  function show(o, n) { o.ib.clearUpdateRanges(); o.ib.addUpdateRange(0, n * 8); o.ib.needsUpdate = true; o.m.geometry.instanceCount = n }
+  // the n things in buf at off within r of the camera (the same test as the boxes' shader) into the detailed model
+  // pick(buf, s) chooses for each
+  function pickNear(buf, off, n, r, pick) {
+    const c = uni.uCam.value, r2 = r * r
+    for (let i = 0; i < n; i++) {
+      const s = (off + i) * 8, dx = buf[s] - c.x, dz = buf[s + 2] - c.z
+      if (dx * dx + dz * dz >= r2) continue
+      const d = pick(buf, s)
+      if (d.n < d.cap) { const A = d.ib.array, j = d.n++ * 8; for (let k = 0; k < 8; k++) A[j + k] = buf[s + k] }
+    }
   }
 
   // ---------------------------------------------------------------- city.traffic, for games
@@ -461,6 +567,7 @@ export default function life(city) {
     if (ppl !== peopleOn) { peopleOn = ppl; if (benchMesh) benchMesh.visible = ppl }
     for (const o of carMeshes) o.m.visible = want && set.cars
     people.m.visible = bikes.m.visible = ppl
+    for (const o of peopleNear) o.m.visible = ppl
     if (want !== active) {
       active = want
       group.visible = glowGroup.visible = want
@@ -476,9 +583,13 @@ export default function life(city) {
   const clock = setInterval(() => active && sendOpts(), 15000)
   const offFrame = city.on('frame', (dt, t) => {
     if (!active) return
-    uni.uNight.value = city.light.night; uni.uTime.value = t
+    uni.uNight.value = city.light.night; uni.uTime.value = t; uni.uRain.value = /rain|storm|drizzle/.test(city.weather?.kind) ? 1 : 0
+    const persp = !!city.view.camera.isPerspectiveCamera
+    if (sig.near !== persp) { sig.near = persp; for (const m of sig.meshes) m.visible = !!m.userData.near === persp }
+    const cp = city.view.camera.position
+    if (persp && sig.d && !(Math.hypot(cp.x - sig.d.at.x, cp.z - sig.d.at.z) <= SIG_NEAR * 0.25)) nearSignals(cp.x, cp.z)
     for (const p of pools) p.visible = city.light.night > 0.08
-    if (sig.glow) { sig.glow.material.size = Math.max(3, 2.6 * 6 * city.view.zoom) * city.renderer.getPixelRatio(); sig.glow.material.opacity = 0.45 + 0.55 * city.light.night }
+    if (sig.glow) { glowMat.size = Math.max(3, 2.6 * 6 * city.view.zoom) * city.renderer.getPixelRatio(); glowMat.opacity = glowNear.opacity = 0.45 + 0.55 * city.light.night }
     accDt += dt
     if (!busy) {
       busy = true
@@ -524,10 +635,11 @@ export default function life(city) {
       stopAnim?.()
       worker.terminate()
       group.removeFromParent(); glowGroup.removeFromParent()
-      for (const o of [...carMeshes, people, bikes]) o.m.geometry.dispose()
+      for (const o of [...carMeshes, people, bikes, ...allNear]) o.m.geometry.dispose()
       for (const m of [...pools, ...sig.meshes]) m.geometry?.dispose()
       benchMesh?.dispose()
-      for (const m of [carMat, personMat, bikeMat, ...pools.map((p) => p.material), greyMat, housingMat, lampMat, benchMat, glowMat]) m.dispose()
+      for (const m of [carMat, personMat, bikeMat, carNearMat, personNearMat, ...pools.map((p) => p.material), greyMat, housingMat, lampMat, benchMat, glowMat, glowNear]) m.dispose()
+      for (const g of [...Object.values(sigGeo), discGeo, squareGeo]) g.dispose()
       glowTex.dispose()
       btn.remove()
       city.requestRender()

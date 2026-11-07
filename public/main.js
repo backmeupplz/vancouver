@@ -282,6 +282,63 @@ const post = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), ink)
 post.frustumCulled = false
 const postScene = new THREE.Scene(), postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
 postScene.add(post)
+// ---------- anti-aliasing: the scene itself is multisampled (rt), but the ink lines are found per pixel in its
+// depth, so they step like any 1 px line. With FXAA the ink pass and what is drawn after it (trees, overlay) go to aa
+// (sRGB, so blending stays linear) and FXAA (NVIDIA's, Jasper Flick's version as in three.js's FXAAShader, MIT)
+// smooths the lines into the canvas. setAA(mode), for quality tiers (window.view.setAA): 'fxaa' (MSAA scene + FXAA),
+// 'msaa' (the MSAA scene only), 'off' (neither), 'auto' (the default: FXAA under a perspective camera below 1.5x
+// pixel ratio, where the steps show; at 2x they are half as big and the pass costs four times as much, and the map
+// view keeps its GPU budget: MSAA only) ----------
+const aa = new THREE.WebGLRenderTarget(1, 1, { colorSpace: THREE.SRGBColorSpace })
+const fxaa = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
+  uniforms: { tDiffuse: { value: aa.texture }, px: { value: new THREE.Vector2() } },
+  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: `uniform sampler2D tDiffuse; uniform vec2 px; varying vec2 vUv;
+    float L(vec2 uv) { return dot(sqrt(texture2D(tDiffuse, uv).rgb), vec3(0.3, 0.59, 0.11)); } // perceptual luma
+    float L(vec2 uv, float u, float v) { return L(uv + px * vec2(u, v)); }
+    const float STEPS[6] = float[6](1.0, 1.5, 2.0, 2.0, 2.0, 4.0);
+    void main() {
+      vec2 uv = vUv;
+      float m = L(uv), n = L(uv, 0.0, 1.0), e = L(uv, 1.0, 0.0), s = L(uv, 0.0, -1.0), w = L(uv, -1.0, 0.0);
+      float hi = max(max(max(max(n, e), s), w), m), lo = min(min(min(min(n, e), s), w), m), con = hi - lo;
+      if (con >= max(0.0312, 0.063 * hi)) {
+        float ne = L(uv, 1.0, 1.0), nw = L(uv, -1.0, 1.0), se = L(uv, 1.0, -1.0), sw = L(uv, -1.0, -1.0);
+        float f = clamp(abs((2.0 * (n + e + s + w) + ne + nw + se + sw) / 12.0 - m) / con, 0.0, 1.0);
+        f = smoothstep(0.0, 1.0, f); f *= f;
+        bool hor = abs(n + s - 2.0 * m) * 2.0 + abs(ne + se - 2.0 * e) + abs(nw + sw - 2.0 * w) >= abs(e + w - 2.0 * m) * 2.0 + abs(ne + nw - 2.0 * n) + abs(se + sw - 2.0 * s);
+        float pl = hor ? n : e, nl = hor ? s : w, pg = abs(pl - m), ng = abs(nl - m), stp = hor ? px.y : px.x, opp = pl, grad = pg;
+        if (pg < ng) { stp = -stp; opp = nl; grad = ng; }
+        vec2 ue = uv, es = hor ? vec2(px.x, 0.0) : vec2(0.0, px.y);
+        if (hor) ue.y += stp * 0.5; else ue.x += stp * 0.5;
+        float el = (m + opp) * 0.5, gt = grad * 0.25;
+        vec2 pu = ue + es, nu = ue - es;
+        float pd = L(pu) - el, nd = L(nu) - el;
+        bool pe = abs(pd) >= gt, ne2 = abs(nd) >= gt;
+        for (int i = 1; i < 6 && !pe; i++) { pu += es * STEPS[i]; pd = L(pu) - el; pe = abs(pd) >= gt; }
+        if (!pe) pu += es * 8.0;
+        for (int i = 1; i < 6 && !ne2; i++) { nu -= es * STEPS[i]; nd = L(nu) - el; ne2 = abs(nd) >= gt; }
+        if (!ne2) nu -= es * 8.0;
+        float pD = hor ? pu.x - uv.x : pu.y - uv.y, nD = hor ? uv.x - nu.x : uv.y - nu.y;
+        bool sg = pD <= nD ? pd >= 0.0 : nd >= 0.0;
+        float eb = sg == (m - el >= 0.0) ? 0.0 : 0.5 - min(pD, nD) / (pD + nD);
+        float b = max(f, eb);
+        if (hor) uv.y += stp * b; else uv.x += stp * b;
+      }
+      gl_FragColor = texture2D(tDiffuse, uv);
+      #include <colorspace_fragment>
+    }`,
+  depthTest: false, depthWrite: false,
+}))
+fxaa.frustumCulled = false
+const fxaaScene = new THREE.Scene()
+fxaaScene.add(fxaa)
+let aaMode = 'auto'
+function setAA(mode) {
+  aaMode = mode
+  const samples = mode === 'off' ? 0 : 4
+  if (rt.samples !== samples) { rt.samples = samples; rt.dispose() }
+  dirty = true
+}
 function draw() {
   const w = renderer.domElement.width, h = renderer.domElement.height, pr = renderer.getPixelRatio()
   if (rt.width !== w || rt.height !== h) rt.setSize(w, h)
@@ -309,14 +366,17 @@ function draw() {
   u.gain.value.set(1 + 0.1 * near, 1 + 0.17 * near, 1 + 0.38 * near)
   treeScene.fog = scene.fog
   renderer.info.autoReset = false; renderer.info.reset()
+  const smooth = aaMode === 'fxaa' || (aaMode === 'auto' && C.isPerspectiveCamera && pr < 1.5)
+  if (smooth && (aa.width !== w || aa.height !== h)) aa.setSize(w, h)
   renderer.setRenderTarget(rt); renderer.render(scene, C)
-  renderer.setRenderTarget(null); renderer.render(postScene, postCam)
+  renderer.setRenderTarget(smooth ? aa : null); renderer.render(postScene, postCam)
   const tm = mats.tree.uniforms
   tm.sat.value = ink.uniforms.sat.value * 0.88; tm.gain.value.copy(ink.uniforms.gain.value); tm.tint.value.copy(ink.uniforms.tint.value); tm.desat.value = ink.uniforms.desat.value
   renderer.autoClear = false
   renderer.render(treeScene, C)
   if (overlay.children.length) renderer.render(overlay, C)
   renderer.autoClear = true
+  if (smooth) { fxaa.material.uniforms.px.value.set(1 / w, 1 / h); renderer.setRenderTarget(null); renderer.render(fxaaScene, postCam) }
 }
 
 // ---------- a perspective camera's view costs more than the map's (the whole street scene up close, at full
@@ -380,7 +440,7 @@ city = createCity({
   ownCamera,
 })
 window.city = city
-window.view = { cam, controls, setView, zAt, renderer, tiles, trees3d }
+window.view = { cam, controls, setView, zAt, renderer, tiles, trees3d, setAA }
 
 // ---------- loading screen: until what's on screen has arrived ----------
 await new Promise((ok) => {
