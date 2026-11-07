@@ -4,6 +4,7 @@
 // nearby tiles to it, ticks it once per drawn frame and draws what it sends back: one instanced mesh per kind of
 // car, one for people and one for cyclists (positioned in the vertex shader straight from the worker's floats),
 // plus the signal poles and heads at signalled junctions. Nothing runs when zoomed out, switched off or hidden.
+// It publishes city.traffic (see PLUGINS.md): where the cars are, and obstacles (a player's van) they brake for.
 
 const CAR_ZOOM = 0.08, PEOPLE_ZOOM = 0.25
 const KEY = 'vancouver.life'
@@ -20,7 +21,7 @@ export default function life(city) {
   // ---------------------------------------------------------------- models
   const uni = { uNight: { value: 0 }, uTime: { value: 0 } }
   // boxes: [x0, x1, y0, y1, z half-width, colour (null = the instance's colour), part, taper (top scale), swing, z centre]
-  // parts: cars 0 body, 1 fixed colour, 2 headlight, 3 taillight, 4/5 police beacons, 6 taxi sign;
+  // parts: cars 0 body, 1 fixed colour, 2 headlight, 3 taillight, 4/5 police beacons, 6 taxi sign, 7/8 left/right blinkers;
   // people 0 shirt, 1 trousers, 2 skin, 3 hair, 4 fixed, 5 bike frame. swing: ±1 legs, ±2 arms (left/right)
   function model(boxes) {
     const P = [], C = [], A = [], S = [], col = new THREE.Color()
@@ -41,28 +42,31 @@ export default function life(city) {
     return g
   }
   const TYRE = 0x1d1f22, GLASS = 0x2c3c4e, HEAD = 0xfff2d0, TAIL = 0xb3121a
+  const AMBER = 0xd88a1c
+  // blinker lamps at the four corners: drawn only while that side blinks (collapsed in the shader otherwise)
+  const blinkers = (f, r, y0, y1, z) => [7, 8].flatMap((part) => [f - 0.06, r - 0.04].map((x) => [x, x + 0.1, y0 - 0.02, y1 + 0.02, 0.2, AMBER, part, 1, 0, (part === 7 ? -1 : 1) * (z - 0.18)]))
   const wheels = (xs, r, side) => xs.flatMap((x) => [-side, side].map((z) => [x - r, x + r, 0, 2 * r, 0.13, TYRE, 1, 1, 0, z]))
   const sedan = (extra = []) => model([
     [-2.25, 2.25, 0.3, 0.95, 0.9, null], // body
     [-1.15, 0.85, 0.95, 1.45, 0.8, GLASS, 1, 0.82], // cabin glass
     [-1.0, 0.6, 1.45, 1.5, 0.66, null], // roof
     [2.2, 2.27, 0.62, 0.8, 0.75, HEAD, 2], [-2.27, -2.2, 0.66, 0.84, 0.78, TAIL, 3],
-    ...wheels([-1.38, 1.38], 0.33, 0.8), ...extra,
+    ...wheels([-1.38, 1.38], 0.33, 0.8), ...blinkers(2.25, -2.25, 0.62, 0.8, 0.9), ...extra,
   ])
   const MODELS = [
     sedan(),
     model([ // suv
       [-2.4, 2.4, 0.38, 1.15, 0.95, null], [-1.95, 1.0, 1.15, 1.78, 0.88, GLASS, 1, 0.9], [-1.85, 0.8, 1.78, 1.84, 0.8, null],
-      [2.35, 2.42, 0.78, 0.98, 0.8, HEAD, 2], [-2.42, -2.35, 0.82, 1.02, 0.82, TAIL, 3], ...wheels([-1.5, 1.5], 0.38, 0.85),
+      [2.35, 2.42, 0.78, 0.98, 0.8, HEAD, 2], [-2.42, -2.35, 0.82, 1.02, 0.82, TAIL, 3], ...wheels([-1.5, 1.5], 0.38, 0.85), ...blinkers(2.4, -2.4, 0.8, 0.98, 0.95),
     ]),
     model([ // van
       [-2.7, 2.7, 0.36, 1.15, 1.0, null], [-2.7, 1.25, 1.15, 2.35, 1.0, null], [1.25, 1.95, 1.15, 2.05, 0.96, GLASS, 1, 0.9],
-      [2.65, 2.72, 0.7, 0.92, 0.85, HEAD, 2], [-2.72, -2.65, 0.8, 1.05, 0.88, TAIL, 3], ...wheels([-1.85, 1.75], 0.36, 0.9),
+      [2.65, 2.72, 0.7, 0.92, 0.85, HEAD, 2], [-2.72, -2.65, 0.8, 1.05, 0.88, TAIL, 3], ...wheels([-1.85, 1.75], 0.36, 0.9), ...blinkers(2.7, -2.7, 0.72, 0.92, 1.0),
     ]),
     model([ // truck: cab and a box
       [-4.3, 4.3, 0.42, 0.9, 1.05, 0x2a2c30, 1], [2.55, 4.3, 0.9, 2.85, 1.2, null], [4.27, 4.33, 1.75, 2.6, 1.05, GLASS, 1],
       [-4.3, 2.4, 0.9, 3.7, 1.25, 0xeeeee8, 1],
-      [4.28, 4.35, 0.95, 1.2, 0.9, HEAD, 2], [-4.35, -4.28, 1.0, 1.25, 1.0, TAIL, 3], ...wheels([-3.2, -2.1, 3.3], 0.45, 1.0),
+      [4.28, 4.35, 0.95, 1.2, 0.9, HEAD, 2], [-4.35, -4.28, 1.0, 1.25, 1.0, TAIL, 3], ...wheels([-3.2, -2.1, 3.3], 0.45, 1.0), ...blinkers(4.3, -4.3, 1.0, 1.22, 1.15),
     ]),
     sedan([[-0.45, 0.05, 1.5, 1.74, 0.32, 0xfaf6e8, 6]]), // taxi: roof sign
     sedan([[-1.25, 1.25, 0.36, 0.86, 0.91, 0x15171a, 1], [-0.3, 0.0, 1.5, 1.64, 0.3, 0xff2020, 4, 1, 0, -0.32], [-0.3, 0.0, 1.5, 1.64, 0.3, 0x2050ff, 5, 1, 0, 0.32]]), // police
@@ -103,7 +107,11 @@ export default function life(city) {
             vec3 col = aPart < 0.5 ? unpack(iB.y) : aCol;
             vec3 em = vec3(0.0);
             if (aPart > 1.5 && aPart < 2.5) em = vec3(1.0, 0.85, 0.6) * uNight * 3.0;
-            else if (aPart > 2.5 && aPart < 3.5) em = vec3(1.0, 0.04, 0.02) * (uNight * 1.5 + iB.z * 1.2);
+            else if (aPart > 2.5 && aPart < 3.5) em = vec3(1.0, 0.04, 0.02) * (uNight * 1.5 + mod(iB.z, 2.0) * 1.2);
+            else if (aPart > 6.5) {
+              if (abs(floor(iB.z * 0.5 + 0.01) - (aPart - 6.0)) > 0.5) P0 = vec3(0.0);
+              em = vec3(1.0, 0.42, 0.0) * 1.3 * step(0.5, fract(uTime * 1.5 + iB.w * 5.0));
+            }
             else if (aPart > 3.5 && aPart < 5.5) em = aCol * 2.0 * step(0.5, fract(uTime * 2.2 + iB.w * 7.0 + (aPart > 4.5 ? 0.5 : 0.0)));
             else if (aPart > 5.5) em = vec3(0.9, 0.75, 0.3) * uNight;` : `
             float pose = floor(iB.y + 0.001), seed = fract(iB.y) / 0.9;
@@ -156,6 +164,7 @@ export default function life(city) {
   const quad = (x0, x1, z0, z1, w) => [x0, -z0, w, x1, -z1, w, x1, z1, w, x0, -z0, w, x1, z1, w, x0, z0, w]
   poolGeo.setAttribute('position', new THREE.Float32BufferAttribute([...quad(0, 10, 0.9, 3.4, 0), ...quad(0, 3, 0.9, 1.4, 1)], 3))
   const HALF = MODELS.map((g) => { g.computeBoundingBox(); return g.boundingBox.max.x })
+  const WIDE = MODELS.map((g) => g.boundingBox.max.z * 2)
   const pools = carMeshes.map(({ ib }, k) => {
     const g = new THREE.InstancedBufferGeometry().copy(poolGeo)
     g.setAttribute('iA', new THREE.InterleavedBufferAttribute(ib, 4, 0)); g.setAttribute('iB', new THREE.InterleavedBufferAttribute(ib, 4, 4))
@@ -164,7 +173,7 @@ export default function life(city) {
       uniforms: { ...uni, uHalf: { value: HALF[k] } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
       vertexShader: `attribute vec4 iA, iB; uniform float uHalf; varying float vF, vRear, vBrake;
         void main() {
-          vRear = position.z; vBrake = iB.z;
+          vRear = position.z; vBrake = mod(iB.z, 2.0);
           float x = position.x, len = vRear > 0.5 ? 3.0 : 10.0;
           vF = 1.0 - x / len;
           x = vRear > 0.5 ? -(uHalf + x) : uHalf + x;
@@ -294,6 +303,10 @@ export default function life(city) {
       }
       put(people, m.buf, off, Math.min(m.nPeople, people.cap)); off += m.nPeople
       put(bikes, m.buf, off, Math.min(m.nBikes, bikes.cap))
+      // the cars for city.traffic.nearby: positions and (id, speed), kept until the next frame
+      if (snap.pos.length < m.cars * 8) { snap.pos = new Float32Array(m.cars * 12); snap.aux = new Float32Array(m.cars * 3) }
+      snap.pos.set(m.buf.subarray(0, m.cars * 8)); snap.aux.set(m.buf.subarray(m.base, m.base + m.cars * 2))
+      snap.n = m.cars; snap.counts = m.counts
       simT = m.simT; simAt = performance.now()
       stats = m
       if (window.lifeDebug) { const a = (window.lifeMs ||= []); a.push(m.ms); if (a.length > 600) a.shift() }
@@ -311,6 +324,40 @@ export default function life(city) {
     o.ib.clearUpdateRanges(); o.ib.addUpdateRange(0, n * 8); o.ib.needsUpdate = true
     o.m.geometry.instanceCount = n
   }
+
+  // ---------------------------------------------------------------- city.traffic, for games
+  const snap = { pos: new Float32Array(0), aux: new Float32Array(0), n: 0, counts: [] }
+  const obstacles = new Map()
+  let obsT = 0, obsAt = 0
+  function sendObstacles() { // at most 10 times a second
+    obsT = 0; obsAt = performance.now()
+    worker.postMessage({ type: 'obstacles', list: [...obstacles].map(([id, o]) => ({ id, x: o.x, y: -o.z, ang: (o.heading || 0) - Math.PI / 2, len: o.length || 4.6, w: o.width || 1.9, speed: o.speed || 0, h: Number.isFinite(o.y) ? o.y : null })) })
+  }
+  const traffic = {
+    // cars within r metres of (x, z): { id, x, y, z, heading, length, width, speed } (heading: forward is (sin, 0, cos))
+    nearby(x, z, r) {
+      const out = [], r2 = r * r, p = snap.pos
+      if (!active) return out
+      let k = 0, end = snap.counts[0] || 0
+      for (let i = 0; i < snap.n; i++) {
+        while (i >= end && k < KINDS - 1) end += snap.counts[++k]
+        const o = i * 8, dx = p[o] - x, dz = p[o + 2] - z
+        if (dx * dx + dz * dz > r2) continue
+        out.push({ id: snap.aux[i * 2], x: p[o], y: p[o + 1], z: p[o + 2], heading: p[o + 3] + Math.PI / 2, length: HALF[k] * 2, width: WIDE[k], speed: snap.aux[i * 2 + 1] })
+      }
+      return out
+    },
+    // a player's vehicle or walker { x, z, heading, length, width, speed, y? } (null removes it): cars brake for it;
+    // with y (its height) only lanes at that level, so a van on a bridge leaves the street below alone
+    setObstacle(id, o) {
+      if (o) obstacles.set(id, o); else obstacles.delete(id)
+      if (!obsT) obsT = setTimeout(sendObstacles, Math.max(0, 100 - (performance.now() - obsAt)))
+    },
+    // the player hit car `id`: it stops for a few seconds
+    bump(id) { worker.postMessage({ type: 'bump', id }) },
+  }
+  city.traffic = traffic
+  city.emit('traffic:ready', traffic)
 
   // ---------------------------------------------------------------- tiles near the view -> worker
   const tiles = new Map(), sent = new Set()
@@ -424,7 +471,8 @@ export default function life(city) {
     dispose() {
       offTiles(); offUnload(); offView(); offWeather(); offFrame()
       document.removeEventListener('visibilitychange', onVis)
-      clearInterval(clock); clearInterval(statT); clearTimeout(syncT)
+      clearInterval(clock); clearInterval(statT); clearTimeout(syncT); clearTimeout(obsT)
+      if (city.traffic === traffic) delete city.traffic
       stopAnim?.()
       worker.terminate()
       group.removeFromParent(); glowGroup.removeFromParent()

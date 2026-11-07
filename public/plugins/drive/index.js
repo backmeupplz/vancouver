@@ -743,7 +743,7 @@ export default function drive(city) {
     publishPlayer(false)
     const T = traffic()
     if (!T?.setObstacle) return
-    if (hasVan) T.setObstacle('player-van', { x: car.x, z: -car.y, heading: wrap(car.yaw + Math.PI), length: 4.3, width: 1.8, speed: onFoot ? 0 : Math.abs(car.speed) })
+    if (hasVan) T.setObstacle('player-van', { x: car.x, y: car.h, z: -car.y, heading: wrap(car.yaw + Math.PI), length: 4.3, width: 1.8, speed: onFoot ? 0 : Math.abs(car.speed) })
     T.setObstacle('player-walker', onFoot ? { x: man.x, z: -man.y, heading: wrap(man.yaw + Math.PI), length: 0.6, width: 0.6, speed: Math.abs(man.speed) } : null)
   }
 

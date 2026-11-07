@@ -62,6 +62,7 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.requestRender()`, `city.animate()` | see above |
 | `city.ui.addButton({ label, title, icon, onClick, panel })` | a toolbar button at the top right; with `panel: true`, `.panel` is a popover element you fill |
 | `city.ui.toast(text)` | a short message |
+| `city.traffic` | the simulated cars, from the life plugin (see below); `undefined` without it |
 
 `window.city` is the same object, handy from the browser console.
 
@@ -116,10 +117,28 @@ camera. The drive plugin is the example: it dives from the map into a chase came
   (with splashes) and lights the scene in lightning; the map view keeps its screen-space layer.
 - **Traffic** (`plugins/life`): `city.traffic.nearby(x, z, r)` → `[{ id, x, y, z, heading, length, width, speed }]`
   (forward = `(sin heading, 0, cos heading)`), `city.traffic.setObstacle(id, obj | null)` (a player's vehicle or walker
-  `{ x, z, heading, length, width, speed }` that cars brake for), `city.traffic.bump(id, impulse)` (a car was hit).
+  `{ x, z, heading, length, width, speed, y }` that cars brake for; see Traffic below), `city.traffic.bump(id, impulse)` (a car was hit).
 - **The player** (`plugins/drive`): while the user drives or walks, `city.player = { mode: 'car' | 'foot', x, y, z,
   heading, speed, colour, vehicle: 'van' }` (updated every frame, read it when you need it), else `null`; `'player'` is
   emitted on enter, leave and car ⇄ foot. `city.models.van(colour)` and `city.models.person(colour)` return the same
   low-poly models (forward −z, origin on the ground; `person.update(dt, speed)` runs the walk cycle), so other players
   look alike. The drive plugin publishes its van and walker with `setObstacle('player-van' | 'player-walker', …)` and
   collides with `city.traffic.nearby` and, when present, `city.multiplayer.nearby(x, z, r)` (same shape).
+
+## Traffic
+
+The life plugin publishes `city.traffic` when it starts and emits `'traffic:ready'` with it, so a game can bump
+into the simulated cars and have them brake for the player. Check it exists (or listen for the event): without
+the life plugin there is none. Positions are three.js world coordinates; `heading` is the yaw, the forward vector
+being `(sin(heading), 0, cos(heading))`.
+
+- `city.traffic.nearby(x, z, r)`: the cars within `r` metres, `[{ id, x, y, z, heading, length, width, speed }]`
+  (metres, m/s), from the latest frame. Cheap enough to call every frame; empty while traffic is hidden (zoomed
+  out, switched off, tab hidden).
+- `city.traffic.setObstacle(id, { x, z, heading, length, width, speed, y })`: something the player drives or
+  walks. Cars treat it as a car they must never drive into: they follow it in the lane it is in (every lane or
+  junction path that passes within 1.5 m of its outline), pass it by changing lanes and don't enter a junction it
+  blocks; people step around it. `y` (optional, its height) limits it to lanes at that level, so a van on a
+  bridge deck leaves the street below alone. Call it as often as you like (it reaches the simulation at most 10
+  times a second); `setObstacle(id, null)` removes it.
+- `city.traffic.bump(id)`: the player hit car `id`; it stops for a few seconds, then drives on.
