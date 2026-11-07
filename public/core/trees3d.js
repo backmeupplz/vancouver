@@ -7,7 +7,7 @@
 import * as THREE from 'three'
 
 const PHONE = matchMedia('(pointer: coarse)').matches
-const RADIUS = PHONE ? 140 : 190 // metres around the camera
+const R0 = PHONE ? 140 : 190 // metres around the camera (times the quality tier's trees3d share)
 const MAX = PHONE ? 1200 : 3000 // trees drawn in 3D at most (the nearest; the circle shrinks in dense parks)
 const STEP = 8 // the camera moves this far before the set is rebuilt
 const CELL = 64 // per-tile grid of trees, metres
@@ -98,6 +98,7 @@ export class Trees3D {
     this.group.add(...this.meshes)
     this.at = new THREE.Vector3(Infinity, 0, 0)
     this.grids = new WeakMap()
+    this.share = 1 // of the radius (main.js, from the quality tier)
     this.near = [] // scratch: [distance², tile, index]
     this.M = new THREE.Matrix4(); this.q = new THREE.Quaternion(); this.s = new THREE.Vector3(); this.p = new THREE.Vector3(); this.c = new THREE.Color()
   }
@@ -137,7 +138,7 @@ export class Trees3D {
   cell(P, i, k) { return Math.min(k - 1, Math.max(0, Math.floor(-P[i * 3 + 2] / CELL))) * k + Math.min(k - 1, Math.max(0, Math.floor(P[i * 3] / CELL))) }
 
   rebuild(cx, cz) {
-    const near = this.near, R2 = RADIUS * RADIUS
+    const RADIUS = R0 * this.share, near = this.near, R2 = RADIUS * RADIUS
     let n = 0
     for (const t of this.tiles.tiles.values()) {
       if (t.state !== 'ready' || !t.trees?.visible) continue

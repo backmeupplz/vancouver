@@ -40,6 +40,10 @@
   #about p:first-child { color: var(--text); }
   #about h2 { margin: 12px 0 6px; font-size: 10.5px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
   #about ul { margin: 0; padding-left: 16px; color: var(--muted); }
+  #gfx { display: flex; align-items: center; gap: 4px; }
+  #gfx button { font: inherit; color: var(--text); background: rgba(255, 255, 255, 0.05); border: 1px solid var(--line); border-radius: 7px; padding: 4px 10px; cursor: pointer; }
+  #gfx button[aria-pressed="true"] { background: rgba(127, 196, 232, 0.22); border-color: var(--accent); }
+  #gfx span { margin-left: 6px; color: var(--muted); font-size: 12px; }
   #hint { right: var(--sr); bottom: var(--sb); padding: 7px 11px; color: var(--muted); }
   /* loading: a centred card with a progress bar, then fades out */
   #loading { position: fixed; inset: 0; display: grid; place-items: center; z-index: 30; background: #0b1016; transition: opacity .5s; }
@@ -108,6 +112,8 @@
     <li>Facades: 2022 LiDAR, property tax report (year built) and heritage register, City of Vancouver (<a href="https://opendata.vancouver.ca/pages/licence/">Open Government Licence – Vancouver</a>); wall colours from street photos on <a href="https://www.mapillary.com/">Mapillary</a> (<a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>)</li>
     <li>Terrain: MRDEM, Natural Resources Canada (<a href="https://open.canada.ca/en/open-government-licence-canada">OGL-Canada</a>)</li>
   </ul>
+  <h2>Graphics</h2>
+  <div id="gfx" role="group" aria-label="Graphics quality"><button type="button" data-q="auto" aria-pressed="true">Auto</button><button type="button" data-q="high" aria-pressed="false">High</button><button type="button" data-q="low" aria-pressed="false">Low</button><span></span></div>
   <h2>Code</h2>
   <p><a href="https://git.borodutch.com/backmeupplz/vancouver">Source code</a> · <a href="https://git.borodutch.com/backmeupplz/vancouver/src/branch/main/PLUGINS.md">Write a plugin</a></p>
 </div>

@@ -50,7 +50,8 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
 `public/` is the site (nginx, `Dockerfile`; Tugport `borodutch/vancouver` auto-deploys `main`, with the tiles on a
 volume). `public/main.js` sets up the camera, light, shadows, the ink outline pass and render-on-demand;
 `public/core/` streams tiles for what is on screen, builds their geometry in Web Workers and draws ground, roads,
-facades and trees with procedural shaders, crisp at any zoom. Everything else is a plugin (`public/plugins/`):
+facades and trees with procedural shaders, crisp at any zoom. `public/core/quality.js` picks High or Low graphics
+(About → Graphics: Auto, High, Low) and the frame loop lowers the resolution while frames run late. Everything else is a plugin (`public/plugins/`):
 lo-fi music, live weather and sun, TransLink transit on its timetable, live aircraft, ships, landmarks and iconic
 bridges, and driving (parcel deliveries too), walking, hiking real trails and sailing through it all. See
 [PLUGINS.md](PLUGINS.md) to write one.

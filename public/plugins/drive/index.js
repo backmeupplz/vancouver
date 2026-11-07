@@ -372,7 +372,7 @@ export default function drive(city) {
   const ring2Mat = ringMat.clone()
   const ring2 = new THREE.Mesh(new THREE.RingGeometry(3.6, 3.8, 48).rotateX(-Math.PI / 2), ring2Mat)
   const icons = { pickup: parcelIcon(), drop: houseIcon(), summit: flagIcon() }
-  const props = makeProps(THREE), lips = makeKerbs(THREE, segsNear)
+  const props = makeProps(THREE), lips = makeKerbs(THREE, segsNear), heightAt = (x, z) => city.world.heightAt(x, z)
   // the parcel in the courier's arms
   const carried = parcelIcon(); carried.scale.setScalar(0.3); carried.position.set(0, 1.08, -0.32); carried.visible = false; walker.add(carried)
   const pool = new THREE.Mesh(new THREE.PlaneGeometry(5, 12).rotateX(-Math.PI / 2).translate(0, 0, -8), new THREE.MeshBasicMaterial({ map: radial('rgba(255,230,170,0.5)'), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }))
@@ -1632,9 +1632,9 @@ export default function drive(city) {
     opts.focus.set(P.x + fwdX(P.yaw) * ahead, P.h, -(P.y + fwdY(P.yaw) * ahead))
     opts.radius = 900; opts.shadowRadius = 300
     // the street furniture near the player, redrawn every dozen metres
-    if (!kerbsAt || Math.hypot(P.x - kerbsAt.x, P.y - kerbsAt.y) > 15) { // the kerbs within 160 m, every 15 m
+    if (!kerbsAt || kerbsAt.more || Math.hypot(P.x - kerbsAt.x, P.y - kerbsAt.y) > 15) { // the kerbs within 160 m, every 15 m (built a little a frame)
       kerbsAt = { x: P.x, y: P.y }
-      lips.update(infos.values(), P.x, P.y, 160, (x, z) => city.world.heightAt(x, z))
+      kerbsAt.more = lips.update(infos.values(), P.x, P.y, 160, heightAt)
     }
     if (!propsAt || Math.hypot(P.x - propsAt.x, P.y - propsAt.y) > 12) {
       propsAt = { x: P.x, y: P.y }

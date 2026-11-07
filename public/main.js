@@ -4,6 +4,7 @@ import { createCity, loadPlugins } from './city.js'
 import { Tiles } from './core/tiles.js'
 import { groundMaterial, roadMaterial, buildingMaterial, treeAtlas, treeMaterial, night, surface } from './core/materials.js'
 import { Trees3D } from './core/trees3d.js'
+import { createQuality } from './core/quality.js'
 
 // World: metres east (x) and north of an origin downtown (tools/world.py); three.js x = east, y = up, z = south.
 // Heights are real elevations. The camera is orthographic, looking north, 30° down; the view lives in the URL
@@ -39,11 +40,11 @@ function noWebGL(detail) {
 }
 let renderer
 try { renderer = new THREE.WebGLRenderer({ antialias: false, canvas: $('canvas'), powerPreference: 'high-performance' }) } catch (e) { noWebGL(e.message) }
-const PR = Math.min(devicePixelRatio, 2)
+const quality = createQuality(renderer.getContext(), (t) => applyQuality(t)) // Auto / High / Low (core/quality.js)
+let PR = Math.min(devicePixelRatio, quality.tier.pixelRatio)
 renderer.setPixelRatio(PR)
 renderer.setSize(innerWidth, innerHeight)
 renderer.shadowMap.enabled = true
-renderer.shadowMap.type = mobile ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap
 renderer.shadowMap.autoUpdate = false
 renderer.outputColorSpace = THREE.SRGBColorSpace
 const scene = new THREE.Scene()
@@ -56,8 +57,16 @@ const hemi = new THREE.HemisphereLight(0xe8eef8, 0x8a8070, 2.0)
 scene.add(hemi)
 const sun = new THREE.DirectionalLight(0xfff1dc, 2.3)
 const SUN = new THREE.Vector3(-0.55, 0.62, 0.56).normalize() // afternoon, from the south-west (plugins may move it)
-sun.castShadow = true
-sun.shadow.mapSize.setScalar(mobile ? 2048 : 4096)
+// shadows by quality tier: 'high' a 4096 px map with soft edges, 'low' (and phones) 2048 px with plain PCF, or 'off'
+function shadowQuality(t) {
+  const hi = t.shadows === 'high' && !mobile, size = hi ? 4096 : 2048, type = hi ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap
+  if (sun.castShadow === (t.shadows !== 'off') && renderer.shadowMap.type === type && sun.shadow.mapSize.x === size) return
+  sun.castShadow = t.shadows !== 'off'; renderer.shadowMap.type = type
+  if (sun.shadow.mapSize.x !== size) { sun.shadow.mapSize.setScalar(size); sun.shadow.map?.dispose(); sun.shadow.map = null }
+  for (const s of [scene, treeScene]) s.traverse((o) => { if (o.material) for (const m of [o.material].flat()) m.needsUpdate = true }) // shaders follow the shadow type
+  renderer.shadowMap.needsUpdate = true
+}
+shadowQuality(quality.tier)
 sun.shadow.bias = -0.0005
 scene.add(sun, sun.target)
 
@@ -71,6 +80,7 @@ const tiles = new Tiles({
   onUnload: (t) => { trees3d?.changed(); city?.emit('tile:unload', tileInfo(t)) },
 })
 const trees3d = new Trees3D({ scene, tiles, treeMaterial: mats.tree }) // real trees near a perspective camera
+tiles.cached = quality.tier.cached; trees3d.share = quality.tier.trees3d
 const tileInfo = (t) => ({ level: t.level, i: t.i, j: t.j, ox: t.ox, oy: t.oy, size: t.level ? 4096 : 1024, graph: t.graph, terrain: t.terrain, footprints: t.footprints, water: t.water,
   trees: t.trees ? { pos: t.trees.geometry.attributes.iPos.array, size: t.trees.geometry.attributes.iSize.array } : null })
 status('Loading the map…', 0.05)
@@ -141,7 +151,7 @@ let hashT = 0
 function onView() {
   clearTimeout(hashT)
   hashT = setTimeout(() => {
-    const t = controls.target
+    const r = cam.position.clone().sub(controls.target), t = controls.target.clone().addScaledVector(r, -controls.target.y / r.y) // the centre's view ray at sea level
     history.replaceState(null, '', `#${Math.round(t.x * K + BX)},${Math.round(BY + t.z * K * VIEW.y)},${cam.zoom.toFixed(4)}`)
   }, 150)
 }
@@ -163,11 +173,11 @@ let own = null // { camera, opts: { focus, radius, shadowRadius } }
 const ownSeen = new THREE.Vector3(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3()
 let shMap = null // the map view's shadow fit, put back exactly on release
 const ownCamera = {
-  use(camera, opts) { own = { camera, opts }; ownSince = performance.now(); controls.enabled = false; shMap = { ...sh, persp: false }; sh.x = NaN; dirty = true; ownSeen.copy(opts.focus); city.emit('view', city.view) },
+  use(camera, opts) { own = { camera, opts }; settle(); controls.enabled = false; shMap = { ...sh, persp: false }; sh.x = NaN; dirty = true; ownSeen.copy(opts.focus); city.emit('view', city.view) },
   release() {
     own = null; controls.enabled = true; dirty = true
     trees3d.off(); mats.tree.uniforms.cyl.value = 0
-    setPixelRatio(PR)
+    settle()
     if (Number.isFinite(shMap?.x)) { Object.assign(sh, shMap); fitShadows() } else Object.assign(sh, { x: NaN, persp: false })
     city.emit('view', city.view)
   },
@@ -221,7 +231,7 @@ const rt = new THREE.WebGLRenderTarget(1, 1, { samples: 4, type: THREE.HalfFloat
 rt.depthTexture = new THREE.DepthTexture(1, 1)
 const ink = new THREE.ShaderMaterial({
   uniforms: { tColor: { value: rt.texture }, tDepth: { value: rt.depthTexture }, sat: { value: 1.2 }, gain: { value: new THREE.Vector3(1, 1, 1) }, tint: { value: new THREE.Vector3(1, 1, 1) },
-    desat: { value: 0 }, px: { value: new THREE.Vector2() }, range: { value: 1 }, thr: { value: 1 }, ink: { value: 0 },
+    desat: { value: 0 }, px: { value: new THREE.Vector2() }, uvs: { value: new THREE.Vector2(1, 1) }, off: { value: new THREE.Vector2() }, lim: { value: new THREE.Vector2(1, 1) }, range: { value: 1 }, thr: { value: 1 }, ink: { value: 0 },
     cnear: { value: 1 }, cfar: { value: 2 }, fade: { value: new THREE.Vector2(1e9, 2e9) }, tSky: { value: null }, fogCol: { value: new THREE.Color() },
     zenCol: { value: new THREE.Color() }, domeK: { value: 0 }, projInv: { value: new THREE.Matrix4() }, camWorld: { value: new THREE.Matrix4() } },
   vertexShader: `varying vec2 vUv;
@@ -236,29 +246,37 @@ const ink = new THREE.ShaderMaterial({
     }`,
   // orthographic: depth is linear, edges are jumps in metres. PERSP (a plugin's perspective camera): 1/distance is
   // linear across a plane, so edges are jumps in 1/distance relative to it, faded out from fade.x to fade.y metres
-  fragmentShader: `uniform sampler2D tColor, tDepth; uniform vec2 px; uniform float range, thr, ink, sat, desat; uniform vec3 gain, tint; varying vec2 vUv;
+  // The scene may fill only part of the target (adaptive resolution): uvs is that part, lim its last texel centre,
+  // off the sub-texel shift of a map camera snapped to the texel grid.
+  // NOINK (quality tier ink: 'off'): the grade only, no depth taps.
+  fragmentShader: `uniform sampler2D tColor, tDepth; uniform vec2 px, uvs, off, lim; uniform float range, thr, ink, sat, desat; uniform vec3 gain, tint; varying vec2 vUv;
+    vec2 uv;
     #ifdef PERSP
     uniform float cnear, cfar; uniform vec2 fade;
     #ifdef SKYFOG
     uniform sampler2D tSky; uniform vec3 fogCol, zenCol; uniform float domeK; varying vec3 vRay;
     #endif
-    float d(vec2 o) { return (cfar - texture2D(tDepth, vUv + o * px).x * (cfar - cnear)) / (cnear * cfar); }
+    float d(vec2 o) { return (cfar - texture2D(tDepth, min(uv + o * px, lim)).x * (cfar - cnear)) / (cnear * cfar); }
     #else
-    float d(vec2 o) { return texture2D(tDepth, vUv + o * px).x * range; }
+    float d(vec2 o) { return texture2D(tDepth, min(uv + o * px, lim)).x * range; }
     #endif
     void main() {
-      vec4 col = texture2D(tColor, vUv);
+      uv = vUv * uvs + off;
+      vec4 col = texture2D(tColor, uv);
       float c = d(vec2(0.0));
       #ifdef SKYFOG
       // fog towards the sky behind, not one flat colour: far buildings fade into the sky gradient instead of
       // standing in it as pale cut-outs that the far plane slices (materials fogged to fogCol; swap it for the sky)
       // The sky behind is the background texture, or the weather plugin's dome over it (domeK): its gradient from the
       // fog colour at the horizon up to the zenith, by the height of the view ray (clouds and sun left out)
-      if (texture2D(tDepth, vUv).x < 1.0) {
+      if (texture2D(tDepth, uv).x < 1.0) {
         vec3 sky = mix(texture2D(tSky, vec2(0.5, vUv.y)).rgb, mix(fogCol, zenCol, smoothstep(0.0, 0.55, max(normalize(vRay).y, 0.0))), domeK);
         col.rgb += smoothstep(fade.x, fade.y, 1.0 / c) * (sky - fogCol);
       }
       #endif
+      #ifdef NOINK
+      float e = 0.0;
+      #else
       float lap = max(abs(d(vec2(1.0, 0.0)) + d(vec2(-1.0, 0.0)) - 2.0 * c), abs(d(vec2(0.0, 1.0)) + d(vec2(0.0, -1.0)) - 2.0 * c));
       #ifdef PERSP
       lap /= c;
@@ -267,6 +285,7 @@ const ink = new THREE.ShaderMaterial({
       #ifdef PERSP
       e *= 1.0 - smoothstep(fade.x, fade.y, 1.0 / c);
       #endif
+      #endif
       vec3 cc = mix(col.rgb, col.rgb * vec3(0.16, 0.18, 0.22), e);
       cc = max(mix(vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), cc, sat), 0.0);
       cc *= gain;
@@ -274,10 +293,12 @@ const ink = new THREE.ShaderMaterial({
       cc = mix(cc, col.rgb, 1.0 - col.a); // lit windows (alpha < 1) skip the grade
       gl_FragColor = vec4(cc, 1.0);
       #include <colorspace_fragment>
-      gl_FragDepth = texture2D(tDepth, vUv).x;
+      gl_FragDepth = texture2D(tDepth, uv).x;
     }`,
   depthTest: true, depthWrite: true, depthFunc: THREE.AlwaysDepth,
 })
+const define = (k, on) => { if (!!ink.defines[k] === on) return; if (on) ink.defines[k] = 1; else delete ink.defines[k]; ink.needsUpdate = true }
+define('NOINK', quality.tier.ink === 'off')
 const post = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), ink)
 post.frustumCulled = false
 const postScene = new THREE.Scene(), postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
@@ -288,7 +309,7 @@ postScene.add(post)
 // smooths the lines into the canvas. setAA(mode), for quality tiers (window.view.setAA): 'fxaa' (MSAA scene + FXAA),
 // 'msaa' (the MSAA scene only), 'off' (neither), 'auto' (the default: FXAA under a perspective camera below 1.5x
 // pixel ratio, where the steps show; at 2x they are half as big and the pass costs four times as much, and the map
-// view keeps its GPU budget: MSAA only) ----------
+// view keeps its GPU budget: MSAA only, and none at 1.75x and up, see msaa below) ----------
 const aa = new THREE.WebGLRenderTarget(1, 1, { colorSpace: THREE.SRGBColorSpace })
 const fxaa = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
   uniforms: { tDiffuse: { value: aa.texture }, px: { value: new THREE.Vector2() } },
@@ -332,22 +353,27 @@ const fxaa = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMater
 fxaa.frustumCulled = false
 const fxaaScene = new THREE.Scene()
 fxaaScene.add(fxaa)
-let aaMode = 'auto'
-function setAA(mode) {
-  aaMode = mode
-  const samples = mode === 'off' ? 0 : 4
-  if (rt.samples !== samples) { rt.samples = samples; rt.dispose() }
-  dirty = true
-}
-function draw() {
+let aaMode = quality.tier.aa
+function setAA(mode) { aaMode = mode; dirty = true } // the quality tier's aa
+// MSAA samples for camera C: 'auto' skips them for the map on a screen of 1.75+ device px per CSS px, where its
+// pixels are finer than the ink lines that draw the edges anyway (4x MSAA was ~40% of the map's frame at 2x).
+// A change reallocates rt: only when a plugin's camera comes or goes or the tier changes.
+const msaa = (C, pr) => aaMode === 'off' || (aaMode === 'auto' && !C.isPerspectiveCamera && pr >= 1.75) ? 0 : 4
+// the scene is drawn into the corner `scale` of rt (adaptive resolution, below), the ink pass stretches it over the
+// canvas; the trees and the overlay are drawn at full resolution
+function draw(scale = res) {
   const w = renderer.domElement.width, h = renderer.domElement.height, pr = renderer.getPixelRatio()
   if (rt.width !== w || rt.height !== h) rt.setSize(w, h)
+  const rw = Math.max(1, Math.round(w * scale)), rh = Math.max(1, Math.round(h * scale))
+  rt.viewport.set(0, 0, rw, rh); rt.scissor.set(0, 0, rw, rh); rt.scissorTest = rw < w
   const C = own ? own.camera : cam, zoom = own ? ownCamera.zoom : cam.zoom, u = ink.uniforms
-  u.px.value.set(pr / w, pr / h)
+  if (rt.samples !== msaa(C, pr)) { rt.samples = msaa(C, pr); rt.dispose() }
+  const step = Math.max(1, Math.round(pr * scale)) // the outline's width: a CSS px, in whole texels (else slopes read as edges)
+  u.px.value.set(step / w, step / h); u.uvs.value.set(rw / w, rh / h); u.lim.value.set((rw - 0.5) / w, (rh - 0.5) / h)
   u.range.value = C.far - C.near
-  if (!!ink.defines.PERSP !== !!C.isPerspectiveCamera) { if (C.isPerspectiveCamera) ink.defines.PERSP = 1; else delete ink.defines.PERSP; ink.needsUpdate = true }
+  define('PERSP', !!C.isPerspectiveCamera)
   const skyFog = !!(C.isPerspectiveCamera && scene.fog?.isFog && scene.background?.isTexture)
-  if (!!ink.defines.SKYFOG !== skyFog) { if (skyFog) ink.defines.SKYFOG = 1; else delete ink.defines.SKYFOG; ink.needsUpdate = true }
+  define('SKYFOG', skyFog)
   if (skyFog) {
     u.tSky.value = scene.background; u.fogCol.value.copy(scene.fog.color)
     const zen = city?.weather?.atmosphere?.zenith // the weather plugin's sky dome (it fades in with the fov, as here)
@@ -368,7 +394,21 @@ function draw() {
   renderer.info.autoReset = false; renderer.info.reset()
   const smooth = aaMode === 'fxaa' || (aaMode === 'auto' && C.isPerspectiveCamera && pr < 1.5)
   if (smooth && (aa.width !== w || aa.height !== h)) aa.setSize(w, h)
+  // below full resolution the map camera renders from a spot snapped to the target's texel grid and the ink pass
+  // shifts the picture back by the remainder: the coarse pixels move with the map instead of resampling a crawl
+  // over the fine facade lines with every pan
+  const snap = scale < 1 && !C.isPerspectiveCamera
+  u.off.value.set(0, 0)
+  if (snap) {
+    C.updateMatrixWorld()
+    const e = C.matrixWorld.elements, tx = (C.right - C.left) / C.zoom / rw, ty = (C.top - C.bottom) / C.zoom / rh
+    const a = (C.position.x * e[0] + C.position.y * e[1] + C.position.z * e[2]) / tx, b = (C.position.x * e[4] + C.position.y * e[5] + C.position.z * e[6]) / ty
+    const fa = a - Math.round(a), fb = b - Math.round(b)
+    v2.copy(C.position); C.position.addScaledVector(v1.set(e[0], e[1], e[2]), -fa * tx).addScaledVector(v1.set(e[4], e[5], e[6]), -fb * ty); C.updateMatrixWorld()
+    u.off.value.set(fa / w, fb / h)
+  }
   renderer.setRenderTarget(rt); renderer.render(scene, C)
+  if (snap) { C.position.copy(v2); C.updateMatrixWorld() }
   renderer.setRenderTarget(smooth ? aa : null); renderer.render(postScene, postCam)
   const tm = mats.tree.uniforms
   tm.sat.value = ink.uniforms.sat.value * 0.88; tm.gain.value.copy(ink.uniforms.gain.value); tm.tint.value.copy(ink.uniforms.tint.value); tm.desat.value = ink.uniforms.desat.value
@@ -379,41 +419,62 @@ function draw() {
   if (smooth) { fxaa.material.uniforms.px.value.set(1 / w, 1 / h); renderer.setRenderTarget(null); renderer.render(fxaaScene, postCam) }
 }
 
-// ---------- a perspective camera's view costs more than the map's (the whole street scene up close, at full
-// resolution): when its frames keep coming late, it is drawn at a lower resolution, a quarter step at a time, down
-// to 0.75 CSS px per pixel; release() puts the map's back
-let ownSince = 0, slowMs = 0
-function setPixelRatio(p) { if (p === renderer.getPixelRatio()) return; renderer.setPixelRatio(p); renderer.setSize(innerWidth, innerHeight); dirty = true }
-function adaptResolution(ms, now) {
-  if (document.hidden || now - ownSince < 3000 || ms > 250) return
-  slowMs = Math.max(0, slowMs + (ms > 24 ? ms : -ms * 0.5)) // late frames add up, good ones pay it back
-  const p = renderer.getPixelRatio()
-  if (slowMs > 1500 && p > 0.75) { setPixelRatio(Math.max(0.75, Math.ceil(p * 4 - 1.01) / 4)); slowMs = 0; ownSince = now }
+// ---------- adaptive resolution: when frames drawn back to back keep coming late (over 20 ms: 60 fps or better is
+// on time), the scene is drawn at a lower share `res` of the canvas resolution, a step at a time down to the quality
+// tier's floor; after a while of on-time frames it probes a step back up (and waits twice as long after a probe that
+// was too much). Auto drops to the low tier when even the floor is late. When the view stops and nothing animates,
+// one last frame is drawn at full resolution, so a still map is sharp.
+let res = 1, lateMs = 0, onTimeMs = 0, probeMs = 3000, probedAt = -1e9, settleAt = Infinity, floorLate = 0
+function settle() { settleAt = performance.now() + 2500; lateMs = onTimeMs = 0; dirty = true } // a new camera or tier compiles shaders: no measure
+// ms: since the last frame; cpu: the main thread's own work in it (a frame late from building a tile is not one a
+// lower resolution would help)
+function adaptResolution(ms, cpu, now) {
+  if (document.hidden || now < settleAt || ms > 250 || cpu > 10) return // nor is a stall (a hidden tab, a long task)
+  if (ms > 20) { lateMs += ms; onTimeMs = 0 } else { lateMs = Math.max(0, lateMs - ms * 0.1); onTimeMs += ms } // more than 1 in ~20 late adds up
+  if (lateMs > 600) {
+    lateMs = 0
+    if (now - probedAt < 3000) probeMs = Math.min(60000, probeMs * 2)
+    if (res > quality.tier.minRes + 0.01) res = Math.max(quality.tier.minRes, Math.round(res * 10 - 1) / 10)
+    else if (++floorLate >= 3) { floorLate = 0; quality.demote() }
+  } else if (res < 1 && onTimeMs > probeMs) { res = Math.min(1, Math.round(res * 10 + 1) / 10); onTimeMs = 0; probedAt = now; floorLate = 0 }
+}
+function applyQuality(t) { // a new tier (core/quality.js)
+  PR = Math.min(devicePixelRatio, t.pixelRatio)
+  renderer.setPixelRatio(PR); renderer.setSize(innerWidth, innerHeight)
+  shadowQuality(t)
+  setAA(t.aa)
+  define('NOINK', t.ink === 'off')
+  tiles.cached = t.cached; trees3d.share = t.trees3d; trees3d.changed()
+  res = 1; settle()
+  city?.emit('quality', t)
 }
 
 // ---------- frame loop ----------
-let lastFrame = performance.now()
+let lastFrame = performance.now(), drew = false, cpu = 0
 function loop(now) {
   requestAnimationFrame(loop)
+  const t0 = performance.now()
   if (!own) controls.update()
   tiles.pump(renderer) // new tiles: made and uploaded a little per frame, drawn or not
-  if (own && city?.animating) adaptResolution(now - lastFrame, now)
-  const dt = Math.min(0.1, (now - lastFrame) / 1000 || 0); lastFrame = now
+  const ms = now - lastFrame, dt = Math.min(0.1, ms / 1000 || 0); lastFrame = now
   if (city?.animating) dirty = true
-  if (!dirty) return
+  if (!dirty) { if (drew && res < 1) draw(1); drew = false; return } // still: once more, sharp
+  if (drew) adaptResolution(ms, cpu, now)
+  drew = true
   dirty = false
   if (own) {
     tiles.update(own.camera, own.opts.focus, own.opts.radius)
-    tiles.setBalconies(true)
+    tiles.setBalconies(quality.tier.detail)
     if (own.opts.focus.distanceTo(ownSeen) > 20) { ownSeen.copy(own.opts.focus); city?.emit('view', city.view) }
   } else {
     tiles.update(cam, controls.target)
-    tiles.setBalconies(cam.zoom >= 0.3)
+    tiles.setBalconies(quality.tier.detail && cam.zoom >= 0.3)
   }
   if (!own && now - lastGroundCheck > 300) { // keep the orbit target on the ground
     lastGroundCheck = now
     const g = zAt(controls.target.x, -controls.target.z)
-    if (Math.abs(g - controls.target.y) > 2) { const d = g - controls.target.y; controls.target.y += d; cam.position.y += d }
+    // moved along the view ray, so the picture stays put (orthographic): straight up, it jumped a few pixels on every hill
+    if (Math.abs(g - controls.target.y) > 2) { v1.subVectors(cam.position, controls.target); v1.multiplyScalar((g - controls.target.y) / v1.y); controls.target.add(v1); cam.position.add(v1) }
   }
   city?.emit('frame', dt, now / 1000)
   if (own?.camera.isPerspectiveCamera) { mats.tree.uniforms.cyl.value = 1; trees3d.update(own.camera) } else if (own) { mats.tree.uniforms.cyl.value = 0; trees3d.off() }
@@ -421,6 +482,7 @@ function loop(now) {
   if (shadowStale && now - lastShadow > 500) { shadowStale = false; lastShadow = now; renderer.shadowMap.needsUpdate = true }
   if (shadowStale) dirty = true // come back for it
   draw()
+  cpu = performance.now() - t0
 }
 requestAnimationFrame(loop)
 document.addEventListener('visibilitychange', () => { dirty = true })
@@ -438,8 +500,16 @@ city = createCity({
   surface,
   suppressBuildings: (ring) => tiles.addMask(ring.map(([lat, lon]) => ll(lat, lon))),
   ownCamera,
+  quality,
 })
 window.city = city
+// About → Graphics: Auto / High / Low
+function showQuality() {
+  for (const b of document.querySelectorAll('#gfx [data-q]')) b.setAttribute('aria-pressed', String(b.dataset.q === quality.setting))
+  $('#gfx span').textContent = quality.setting === 'auto' ? `(${quality.tier.name})` : ''
+}
+for (const b of document.querySelectorAll('#gfx [data-q]')) b.onclick = () => { quality.set(b.dataset.q); showQuality() }
+city.on('quality', showQuality); showQuality()
 window.view = { cam, controls, setView, zAt, renderer, tiles, trees3d, setAA }
 
 // ---------- loading screen: until what's on screen has arrived ----------
@@ -453,6 +523,7 @@ await new Promise((ok) => {
 })
 status('Ready', 1)
 tiles.rush = false
+settle() // from now on frame times measure the GPU (adaptive resolution)
 requestAnimationFrame(() => loadingEl.classList.add('done'))
 setTimeout(() => loadingEl.remove(), 800)
 $('#hint').hidden = false

@@ -85,7 +85,7 @@ export default function sail(city) {
   const tkey = (i, j) => i * 8192 + j
   let shoreDirty = 0 // when a detail tile near the boat came in: rebuild the shore field (water.js) soon
   const offTiles = [
-    city.world.eachTile((t) => { if (t.level === 0) { masks.set(tkey(t.i, t.j), t); if (state !== 'off') shoreDirty = shoreDirty || performance.now() + 400 } }),
+    city.world.eachTile((t) => { if (t.level === 0) { masks.set(tkey(t.i, t.j), t); shoreDirty = shoreDirty || performance.now() + 400 } }), // (not `state`: eachTile calls back at once for tiles already in, before it exists)
     city.on('tile:unload', (t) => { if (t.level === 0) masks.delete(tkey(t.i, t.j)) }),
   ]
   let base = null // the core's base map (1 px = 64 m; water is (40, 98, 150)) for where no detail tile is loaded

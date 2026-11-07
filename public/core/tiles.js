@@ -6,10 +6,15 @@ import { FAMILY } from './materials.js'
 
 const SIZES = [1024, 4096]
 const DETAIL_ZOOM = 0.11 // camera.zoom from which detail tiles load (a 1 km tile is ~700 px wide)
-// tiles kept off screen (detail, overview) for coming back: a detail tile is ~4 MB of geometry, held twice (JS and
-// GPU), so phones keep fewer (a 3 GB iPhone's tab is killed somewhere past 1 GB)
+// tiles kept off screen (detail, overview) for coming back, at most: a detail tile is ~4 MB of geometry, held twice
+// (JS and GPU), so phones keep fewer (a 3 GB iPhone's tab is killed somewhere past 1 GB); the quality tier may keep fewer
 const MAX_CACHED = matchMedia('(pointer: coarse)').matches ? [24, 16] : [80, 48]
 const v0 = new THREE.Vector3()
+const bytes = (m) => { // a mesh's buffers not on the GPU yet
+  let n = m.isInstancedMesh && m.instanceMatrix.array ? m.instanceMatrix.array.byteLength : 0
+  for (const a of Object.values(m.geometry.attributes)) n += a.array?.byteLength || 0
+  return n + (m.geometry.index?.array?.byteLength || 0)
+}
 const WORKERS = Math.min(4, Math.max(2, (navigator.hardwareConcurrency || 4) - 2))
 
 export class Tiles {
@@ -32,6 +37,7 @@ export class Tiles {
     this.made = [] // worker results waiting to become three.js objects, one tile per frame (pump)
     this.warming = [] // tiles whose buffers are being uploaded to the GPU, a few MB per frame, before they show
     this.rush = true // while the loading screen is up: no pacing, everything at once
+    this.cached = MAX_CACHED
   }
 
   async init() {
@@ -83,7 +89,7 @@ export class Tiles {
       for (let j = cj; j <= j1; j++) for (let i = ci; i <= i1; i++) bb.expandByPoint(v0.fromArray(pos, (j * nx + i) * 3))
       cg.boundingBox = bb; cg.boundingSphere = bb.getBoundingSphere(new THREE.Sphere())
       const m = new THREE.Mesh(cg, mat)
-      m.renderOrder = -1; m.matrixAutoUpdate = false
+      m.renderOrder = 1; m.matrixAutoUpdate = false // after the tiles: where they cover it, the depth test skips its pixels
       base.add(m)
     }
     this.scene.add(base)
@@ -124,6 +130,15 @@ export class Tiles {
     if (!this.index) return
     this.frame++
     const r = this.viewRect(camera, target, radius)
+    // the map camera loads ahead of a pan: the rectangle reaches 0.8 s further the way the view moves (at most
+    // 1.5 km), so the next detail tiles are in before they come on screen (a tile that isn't yet leaves a gap)
+    const now = performance.now(), m = this.motion ||= { x: target.x, y: -target.z, t: now, vx: 0, vy: 0 }, dt = (now - m.t) / 1000
+    if (dt > 0.5 || camera.isPerspectiveCamera) m.vx = m.vy = 0
+    else if (dt > 0.004) { const k = Math.min(1, dt * 6); m.vx += ((target.x - m.x) / dt - m.vx) * k; m.vy += ((-target.z - m.y) / dt - m.vy) * k }
+    if (dt > 0.004) Object.assign(m, { x: target.x, y: -target.z, t: now })
+    const lx = Math.max(-1500, Math.min(1500, m.vx * 0.8)), ly = Math.max(-1500, Math.min(1500, m.vy * 0.8))
+    if (lx > 0) r.x1 += lx; else r.x0 += lx
+    if (ly > 0) r.y1 += ly; else r.y0 += ly
     const wantDetail = camera.isPerspectiveCamera ? radius <= 1100 : camera.zoom >= DETAIL_ZOOM
     const need = []
     const range = (lvl) => { const s = SIZES[lvl]; return [Math.floor(r.x0 / s), Math.floor(r.x1 / s), Math.floor(r.y0 / s), Math.floor(r.y1 / s)] }
@@ -147,13 +162,16 @@ export class Tiles {
           else if (k.visible && k.state === 'ready') shown = true
         }
       }
-      // a perspective camera (city.view.useCamera) keeps the detail tiles it shows while new ones arrive at the far
-      // edge of its square, past the fog: falling back to the overview tile there would flash the whole 4 km of it
-      const fine = wantDetail && any && (kidsReady || (shown && camera.isPerspectiveCamera))
+      // detail tiles that show stay while new ones arrive at the edge (the base layer fills the gap for a moment):
+      // falling back to the overview tile there would flash the whole 4 km of it, every time a pan reaches a new
+      // row of detail tiles. Zooming out, they stay until the overview tile has arrived.
+      const fine = wantDetail && any && (kidsReady || shown), up = p.state === 'ready' || p.state === 'missing'
       this.show(p, !fine)
       for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) {
         const k = this.tiles.get(this.key(0, i * 4 + a, j * 4 + b))
-        if (k) this.show(k, fine && k.used === this.frame)
+        if (!k) continue
+        if (!fine && !up && k.visible && k.state === 'ready') k.used = this.frame
+        this.show(k, k.used === this.frame && (fine || !up))
       }
     }
     for (const t of this.tiles.values()) if (t.used < this.frame && t.visible) this.show(t, false)
@@ -186,7 +204,7 @@ export class Tiles {
   }
 
   // once per animation frame (main.js), drawn or not: turns at most one worker result into three.js objects, or
-  // uploads up to ~4 MB of a made tile's buffers to the GPU, so neither a new tile nor a tile that has waited
+  // uploads up to ~3 MB of a made tile's buffers to the GPU (a bigger mesh alone), so neither a new tile nor a tile that has waited
   // hidden (a detail tile under its overview tile) costs one big upload in the frame it appears. A tile counts
   // as ready, and shows, only once it is all on the GPU. While the loading screen is up (rush), all at once.
   pump(renderer) {
@@ -196,12 +214,16 @@ export class Tiles {
       this.warmTarget = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: false }); this.warmCam = new THREE.Camera()
     }
     const alive = (t) => this.tiles.get(this.key(t.level, t.i, t.j)) === t
-    let budget = 4e6
+    let spent = 0
     do {
       const t = this.warming[0]
       if (t) { // upload the next mesh of the first made tile
-        const m = alive(t) && t.warm.pop()
-        if (m) { if (!this.rush) budget -= this.upload(renderer, m); continue }
+        const m = alive(t) && t.warm.at(-1)
+        if (m) {
+          const b = this.rush ? 0 : bytes(m)
+          if (spent && spent + b > 3e6) return
+          t.warm.pop(); spent += b; this.upload(renderer, m); continue
+        }
         this.warming.shift()
         if (!alive(t)) continue
         t.state = 'ready'; t.warm = null
@@ -220,15 +242,12 @@ export class Tiles {
       if (n.trees) n.warm.push(n.trees)
       this.warming.push(n)
       if (!this.rush) return
-    } while (this.rush || budget > 0)
+    } while (this.rush || spent < 3e6)
   }
 
-  upload(renderer, m) { // bytes sent
+  upload(renderer, m) {
     const geo = m.geometry, w = this.warmScene
-    let bytes = 0
-    for (const a of [...Object.values(geo.attributes), geo.index]) if (a?.array) bytes += a.array.byteLength
-    if (m.isInstancedMesh) bytes += m.instanceMatrix.array.byteLength
-    if (!bytes) return 0
+    if (!bytes(m)) return
     const proxy = m.isInstancedMesh ? new THREE.InstancedMesh(geo, w.overrideMaterial, 0) : new THREE.Mesh(geo, w.overrideMaterial)
     if (m.isInstancedMesh) Object.assign(proxy, { instanceMatrix: m.instanceMatrix, instanceColor: m.instanceColor, count: m.count })
     proxy.frustumCulled = false
@@ -238,7 +257,6 @@ export class Tiles {
     renderer.setRenderTarget(this.warmTarget); renderer.render(w, this.warmCam); renderer.setRenderTarget(rt)
     renderer.info.autoReset = info
     w.remove(proxy)
-    return bytes
   }
 
   make(t, res) {
@@ -280,7 +298,16 @@ export class Tiles {
       geo.setAttribute('aWin', new THREE.BufferAttribute(b.aWin, 4))
       return geo
     }
-    if (res.buildings?.position.length) add(bgeo(res.buildings), this.mats.building, { castShadow: true, receiveShadow: true }, res.buildings.box)
+    // in pieces of ~1.5 MB: pump() uploads a few MB a frame, and an overview tile's buildings (20+ MB) in one piece
+    // cost a 70 ms frame (each piece keeps the tile's bounds)
+    if (res.buildings?.position.length) {
+      const B = res.buildings, nv = B.position.length / 3, arrays = Object.entries(B).filter(([k, a]) => k !== 'box' && ArrayBuffer.isView(a))
+      const step = Math.ceil(1.5e6 / (arrays.reduce((s, [, a]) => s + a.byteLength, 0) / nv) / 3) * 3 // whole triangles
+      for (let v = 0; v < nv; v += step) {
+        const e = Math.min(nv, v + step), part = Object.fromEntries(arrays.map(([k, a]) => [k, a.subarray(v * a.length / nv, e * a.length / nv)]))
+        add(bgeo(part), this.mats.building, { castShadow: true, receiveShadow: true }, B.box)
+      }
+    }
     if (res.balconies) { t.balcony = add(bgeo(res.balconies), this.mats.building, { castShadow: true, receiveShadow: true }, res.balconies.box); t.balcony.visible = this.balconies }
     if (res.units) {
       const n = res.units.length / 7, m = new THREE.InstancedMesh(this.unitGeo, this.unitMat, n), M = new THREE.Matrix4(), c = new THREE.Color()
@@ -357,9 +384,10 @@ export class Tiles {
   evict() {
     for (const level of [0, 1]) {
       const list = [...this.tiles.values()].filter((t) => t.level === level && t.state === 'ready' && t.used < this.frame)
-      if (list.length <= MAX_CACHED[level]) continue
+      const max = Math.min(MAX_CACHED[level], this.cached[level])
+      if (list.length <= max) continue
       list.sort((a, b) => a.used - b.used)
-      for (const t of list.slice(0, list.length - MAX_CACHED[level])) this.drop(t)
+      for (const t of list.slice(0, list.length - max)) this.drop(t)
     }
   }
 

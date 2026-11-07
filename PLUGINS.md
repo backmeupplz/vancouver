@@ -60,12 +60,13 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.surface.seaHole` | a `Vector4` (x, sea level, z, radius): the map's sea is left out within radius of (x, z), up to 3 m above sea level, where a plugin draws its own water (the sail plugin's waves); radius 0 (the default) turns it off |
 | `city.post.uniforms.tint` / `.desat` | grade of the final image: multiply (`Vector3`, 1 = none) and desaturate (0–1) |
 | `city.tiles` | the tile streamer (advanced) |
-| `city.on(event, fn)` | `'frame'` `(dt, t)`, `'view'` `(view)`, `'tile:load'` / `'tile:unload'` `(tile)`, `'weather'` `(weather)`, `'player'` `(player)`; returns an unsubscribe function |
+| `city.on(event, fn)` | `'frame'` `(dt, t)`, `'view'` `(view)`, `'quality'` `(tier)`, `'tile:load'` / `'tile:unload'` `(tile)`, `'weather'` `(weather)`, `'player'` `(player)`; returns an unsubscribe function |
 | `city.requestRender()`, `city.animate()` | see above |
 | `city.ui.addButton({ label, title, icon, onClick, panel })` | a toolbar button at the top right (a dock at the bottom on phones); with `panel: true`, `.panel` is a popover element you fill (a bottom sheet on phones); `.set({ icon, label })` relabels it |
 | `city.ui.sheet(el, close)`, `.closeAll()`, `.onCloseAll(fn)`, `.compact` | your own panel behaving like the toolbar's (close button, drag down to close on phones; only one open at a time); `compact` is true in the phone layout (`html.compact` in CSS) |
 | `city.ui.toast(text)` | a short message |
 | `city.traffic` | the simulated cars, from the life plugin (see below); `undefined` without it |
+| `city.quality.tier` | graphics quality (`core/quality.js`): `name` `'high'` or `'low'` and its knobs, e.g. `life` and `weather` (the share of agents / particles to draw) and `detail`; `city.on('quality', tier)` fires when it changes (the viewer's About → Graphics, or Auto dropping to low on a slow GPU). Scale your counts by it |
 
 `window.city` is the same object, handy from the browser console.
 

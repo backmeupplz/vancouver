@@ -132,6 +132,7 @@ export default function weather(city) {
   city.overlay.add(atmo)
 
   // ---------- rain and snow: one instanced quad mesh in screen space, anchored to the ground as the view pans
+  const share = () => city.quality?.tier.weather ?? 1 // of the drops, by graphics quality
   const MAXP = 12000, MINZ = matchMedia('(pointer: coarse)').matches ? 0.06 : 0.025 // particles from this zoom in (phones: closer)
   const pg = new THREE.InstancedBufferGeometry()
   pg.setAttribute('position', new THREE.Float32BufferAttribute([0, -1, 0, 1, -1, 0, 1, 1, 0, 0, 1, 0], 3))
@@ -421,7 +422,7 @@ export default function weather(city) {
     const b = Math.min(1, lightLevel * 1.4)
     u.uCol.value.set(...(fx.snow ? [0.97, 0.98, 1].map((x) => x * Math.max(0.45, b)) : [0.86, 0.9, 1].map((x) => x * Math.max(0.4, b))), fx.snow ? 0.95 : 0.2 + 0.25 * f)
     const per = fx.snow ? 380 : 320 // CSS px² per particle at full intensity
-    pg.instanceCount = Math.min(MAXP, Math.round((area / per) * (0.15 + 0.85 * fx.precip) * (0.55 + 0.45 * f)))
+    pg.instanceCount = Math.min(MAXP, Math.round((area / per) * (0.15 + 0.85 * fx.precip) * (0.55 + 0.45 * f) * share()))
   }
 
   // what is on screen decides what runs
@@ -447,14 +448,14 @@ export default function weather(city) {
     u.uLen.value = 1.0 + 0.8 * fx.precip
     u.uWid.value = snow ? 0.045 : 0.011
     if (snow) u.uCol.value.set(0.97 * b, 0.98 * b, b, 1); else u.uCol.value.set(0.78 * b, 0.84 * b, 0.94 * b, 0.55)
-    g3.instanceCount = Math.round(MAXP * (0.25 + 0.75 * fx.precip) * (coarse ? 0.5 : 1))
-    gs.instanceCount = snow ? 0 : Math.round(SPL * (0.25 + 0.75 * fx.precip))
+    g3.instanceCount = Math.round(MAXP * (0.25 + 0.75 * fx.precip) * (coarse ? 0.5 : 1) * share())
+    gs.instanceCount = snow ? 0 : Math.round(SPL * (0.25 + 0.75 * fx.precip) * share())
     splash.material.uniforms.uCol.value.set(u.uCol.value.x, u.uCol.value.y, u.uCol.value.z, 0.55)
   }
 
   // per frame: camera-dependent uniforms, the clock, lightning
-  const ndc = new THREE.Vector3(), g = (x, y, out) => { // ground (y = 0) under an NDC point
-    ndc.set(x, y, -1).unproject(city.camera); const o = ndc.clone()
+  const ndc = new THREE.Vector3(), o = new THREE.Vector3(), g = (x, y, out) => { // ground (y = 0) under an NDC point
+    o.set(x, y, -1).unproject(city.camera)
     ndc.set(x, y, 1).unproject(city.camera); const t = o.y / (o.y - ndc.y)
     return out.set(o.x + (ndc.x - o.x) * t, o.z + (ndc.z - o.z) * t)
   }
@@ -513,6 +514,7 @@ export default function weather(city) {
     }
   })
   let wasPersp = false
+  const offQuality = city.on('quality', () => { if (fall3.visible) size3(); city.requestRender() }) // drops.visible: sized per frame
   const offView = city.on('view', () => { if (wasPersp !== persp() || drops.visible !== (dropsWanted() && !persp())) { wasPersp = persp(); effects() } })
   const onVis = () => { effects(); if (!document.hidden && Date.now() - fetchedAt > 15 * 60e3) refresh() }
   document.addEventListener('visibilitychange', onVis)
@@ -598,7 +600,7 @@ export default function weather(city) {
   return {
     dispose() {
       clearTimeout(timer); clearInterval(tick)
-      offFrame(); offView(); document.removeEventListener('visibilitychange', onVis)
+      offFrame(); offView(); offQuality(); document.removeEventListener('visibilitychange', onVis)
       anim?.(); btn.remove(); style.remove()
       for (const m of [atmo, drops, fall3, splash]) { city.overlay.remove(m); m.geometry.dispose(); m.material.dispose() }
       city.scene.remove(dome); dome.geometry.dispose(); dome.material.dispose()

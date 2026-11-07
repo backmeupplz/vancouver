@@ -11,7 +11,7 @@ import { carModels, peopleModels, signalModels, DETAIL, ARM_Y, LENSES, POLE_LENS
 import { SHADE } from './kit.js'
 
 const CAR_ZOOM = 0.08, PEOPLE_ZOOM = 0.25
-const NEAR_CARS = 150, NEAR_PEOPLE = 70, SIG_NEAR = 240, SIG_CAP = 200 // metres: under a perspective camera, the detailed models (models.js) within these
+const NEAR = [150, 70, 240], SIG_CAP = 200 // metres (cars, people, signals): under a perspective camera, the detailed models (models.js) within these, times the quality tier's `near`
 const KEY = 'vancouver.life'
 const MOBILE = matchMedia('(pointer: coarse)').matches || innerWidth < 700
 const MAX_CARS = MOBILE ? 2000 : 4000, MAX_PEOPLE = MOBILE ? 1500 : 3000, MAX_BIKES = 300, MAX_NEAR = 600
@@ -25,6 +25,9 @@ export default function life(city) {
 
   // ---------------------------------------------------------------- models
   const uni = { uNight: { value: 0 }, uTime: { value: 0 }, uRain: { value: 0 }, uCam: { value: new THREE.Vector3() } }
+  let NEAR_CARS, NEAR_PEOPLE, SIG_NEAR
+  const nearRadii = () => { [NEAR_CARS, NEAR_PEOPLE, SIG_NEAR] = NEAR.map((r) => r * (city.quality?.tier.near ?? 1)) }
+  nearRadii()
   const nearCars = { value: 0 }, nearPeople = { value: 0 }
   // boxes: [x0, x1, y0, y1, z half-width, colour (null = the instance's colour), part, taper (top scale), swing, z centre]
   // parts: cars 0 body, 1 fixed colour, 2 headlight, 3 taillight, 4/5 police beacons, 6 taxi sign, 7/8 left/right blinkers;
@@ -556,7 +559,8 @@ export default function life(city) {
   const vanHour = () => { const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Vancouver', hourCycle: 'h23', hour: 'numeric', minute: 'numeric' }).formatToParts(new Date()).map((x) => [x.type, x.value])); return +p.hour + p.minute / 60 }
   let active = false, peopleOn = false, stopAnim = null, lastOpts = ''
   function sendOpts() {
-    const o = { cars: set.cars, people: peopleOn, bikes: set.bikes, density: set.density, hour: +(city.weather?.hour ?? vanHour()).toFixed(1), maxCars: MAX_CARS, maxPeople: MAX_PEOPLE }
+    const k = city.quality?.tier.life ?? 1 // graphics quality: fewer cars and people on a weaker GPU
+    const o = { cars: set.cars, people: peopleOn, bikes: set.bikes, density: set.density * k, hour: +(city.weather?.hour ?? vanHour()).toFixed(1), maxCars: Math.round(MAX_CARS * k), maxPeople: Math.round(MAX_PEOPLE * k) }
     const s = JSON.stringify(o)
     if (s !== lastOpts) { lastOpts = s; worker.postMessage({ type: 'opts', opts: o }) }
   }
@@ -577,7 +581,7 @@ export default function life(city) {
     if (active) { sendOpts(); schedule() }
   }
   const offView = city.on('view', check)
-  const offWeather = city.on('weather', () => sendOpts())
+  const offWeather = city.on('weather', () => sendOpts()), offQuality = city.on('quality', () => { nearRadii(); if (sig.d) sig.d.at.x = NaN; sendOpts() }) // NaN: the signals' near set is picked again
   const onVis = () => check()
   document.addEventListener('visibilitychange', onVis)
   const clock = setInterval(() => active && sendOpts(), 15000)
@@ -628,7 +632,7 @@ export default function life(city) {
   check()
   return {
     dispose() {
-      offTiles(); offUnload(); offView(); offWeather(); offFrame()
+      offTiles(); offUnload(); offView(); offWeather(); offQuality(); offFrame()
       document.removeEventListener('visibilitychange', onVis)
       clearInterval(clock); clearInterval(statT); clearTimeout(syncT); clearTimeout(obsT)
       if (city.traffic === traffic) delete city.traffic

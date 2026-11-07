@@ -3,7 +3,7 @@
 // sidewalks drawn (graph piece `band`), or along a side where a sidewalk is mapped as a footway of its own (as
 // downtown), cut where it would cross another carriageway (junctions, side streets). Built per road piece (a few
 // a call, cached) from the drive plugin's road index and gathered around the player; one merged mesh.
-const H = 0.13, W = 0.25, STEP = 2, PER_CALL = 24
+const H = 0.13, W = 0.25, STEP = 2, BUDGET = 1.5 // ms of building a call (a slow phone or a jump to a new street spreads it over frames)
 
 // segs(x, y, r, fn): fn(seg) for the indexed road segments near (x, north) ({ p, x0, y0, x1, y1, drv, wlk, z0 })
 export function makeKerbs(THREE, segs) {
@@ -67,10 +67,11 @@ export function makeKerbs(THREE, segs) {
     return { pos: new Float32Array(pos), nor: new Float32Array(nor) }
   }
 
-  // the kerbs within r of (x, north) from these detail tiles' graphs (a few new pieces a call: call it again)
+  // the kerbs within r of (x, north) from these detail tiles' graphs, building new pieces for at most BUDGET ms;
+  // returns true while some are still to build (call it again next frame)
   function update(tiles, x, y, r, heightAt) {
-    const want = []
-    let todo = PER_CALL, n = 0, key = ''
+    const want = [], until = performance.now() + BUDGET
+    let pending = false, n = 0, key = ''
     for (const t of tiles) {
       if (t.ox > x + r || t.ox + 1024 < x - r || t.oy > y + r || t.oy + 1024 < y - r || !t.graph) continue
       for (const p of t.graph.pieces) {
@@ -80,11 +81,11 @@ export function makeKerbs(THREE, segs) {
         for (let i = 0; i < P.length && !near; i += 2) near = Math.abs(P[i] - x) < r && Math.abs(P[i + 1] - y) < r
         if (!near) continue
         let a = cache.get(p)
-        if (!a && todo-- > 0) cache.set(p, (a = build(p, heightAt)))
+        if (!a) { if (performance.now() < until) cache.set(p, (a = build(p, heightAt))); else pending = true }
         if (a) { want.push(a); n += a.pos.length; key += a.pos.length + ',' }
       }
     }
-    if (key === shown) return // nothing new
+    if (key === shown) return pending // nothing new
     shown = key
     if (n > cap) {
       cap = Math.ceil(n * 1.5)
@@ -95,6 +96,7 @@ export function makeKerbs(THREE, segs) {
     geo.attributes.position.needsUpdate = geo.attributes.normal.needsUpdate = true
     geo.setDrawRange(0, n / 3)
     if (cache.size > 6000) cache.clear() // ponytail: crude bound on the cache; per-tile eviction if it ever matters
+    return pending
   }
   return { mesh, update }
 }

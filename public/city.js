@@ -2,7 +2,7 @@
 // A plugin is an ES module whose default export is `(city) => ({ dispose() })` (dispose optional).
 import * as THREE from 'three'
 
-export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll, toLatLon, sun, hemi, setSun, post, requestRender, data, tiles, night, surface, suppressBuildings, ownCamera }) {
+export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll, toLatLon, sun, hemi, setSun, post, requestRender, data, tiles, night, surface, suppressBuildings, ownCamera, quality }) {
   const handlers = new Map()
   const own = () => ownCamera?.active
   let animators = 0
@@ -10,6 +10,9 @@ export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll
     version: 1,
     THREE,
     scene, // everything in here gets the ink outlines and shadows
+    // graphics quality (core/quality.js): tier.name 'high' | 'low' and its knobs (life, weather: shares of the
+    // particles / agents to draw, detail, …); city.on('quality', tier) when it changes
+    quality,
     overlay, // drawn last, without outlines (particles, labels, effects)
     camera, renderer, controls,
     canvas: renderer.domElement,
