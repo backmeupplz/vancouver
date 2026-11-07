@@ -5,9 +5,31 @@
 <title>Lo-fi player demo</title>
 <link rel="icon" href="data:,">
 <style>html, body { margin: 0; height: 100%; background: #44525e; color: #cfd8e0; font: 13px/1.4 system-ui, sans-serif }</style>
-<p style="padding: 12px">Procedural lo-fi player, standalone.</p>
+<p style="padding: 12px">Procedural lo-fi player, standalone. Pick a vibe from the button next to ⏭.
+  <label style="display: block; margin-top: 8px">Fake weather for the Auto vibe:
+    <select id="weather">
+      <option value="">none (time of day in Vancouver)</option>
+      <option>clear</option><option value="clear night">clear, night</option><option>cloudy</option>
+      <option>overcast</option><option>fog</option><option>drizzle</option><option>rain</option>
+      <option>storm</option><option>snow</option>
+    </select>
+  </label>
+</p>
 <script type="module">
   import lofi from './lofi.js'
-  window.player = lofi()
+  // A stand-in for the `city` object with just the event bits the weather plugin uses.
+  // Open with ?nocity to run the player with no city at all, as before.
+  const handlers = new Set()
+  const city = {
+    weather: undefined,
+    on(e, fn) { if (e === 'weather') handlers.add(fn); return () => handlers.delete(fn) },
+    emit(e, w) { if (e === 'weather') for (const fn of handlers) fn(w) },
+  }
+  document.getElementById('weather').onchange = (e) => {
+    const [kind, night] = e.target.value.split(' ')
+    city.weather = kind ? { kind, intensity: 0.6, isNight: !!night, hour: night ? 23 : 14, live: false } : undefined
+    city.emit('weather', city.weather)
+  }
+  window.player = lofi(new URLSearchParams(location.search).has('nocity') ? undefined : city)
 </script>
 </html>
