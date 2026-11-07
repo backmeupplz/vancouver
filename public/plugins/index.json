@@ -6,6 +6,7 @@
 "plugins/planes/index.js",
 "plugins/landmarks/index.js",
 "plugins/drive/index.js",
+"plugins/sail/index.js",
 "plugins/life/index.js",
 "plugins/multiplayer/index.js"
 ]

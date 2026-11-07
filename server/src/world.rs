@@ -19,7 +19,7 @@
 //!   text   {"t":"check","name"}                          is this username free? (debounce it: ≤ 4/s)
 //!   text   {"t":"chat","ch":"g"|"n","text"}              global, or players within 1.5 km
 //!   text   {"t":"block","id"} / {"t":"unblock","id"}
-//!   binary [1][mode u8: 0 stopped, 1 car, 2 foot][x f32][y f32][z f32][heading i16 ×1e4][speed i16 ×100]   ≤ 10 Hz while playing
+//!   binary [1][mode u8: 0 stopped, 1 car, 2 foot, 3 boat][x f32][y f32][z f32][heading i16 ×1e4][speed i16 ×100]   ≤ 10 Hz while playing
 //! server → client
 //!   text   {"t":"welcome","s","id","token","name","chosen","colour","blocks":[id],"players":[{s,id,name,chosen,colour}],"chat":[…],"stats"}
 //!   text   {"t":"join","s","id","name","chosen","colour"} / {"t":"leave","s"}   players starting / stopping (or renamed)
@@ -80,7 +80,7 @@ pub struct State {
 
 /// Parses a binary state message; None when malformed.
 pub fn parse_state(b: &[u8]) -> Option<State> {
-    if b.len() != 18 || b[0] != 1 || b[1] > 2 {
+    if b.len() != 18 || b[0] != 1 || b[1] > 3 {
         return None;
     }
     let f = |i: usize| f32::from_le_bytes(b[i..i + 4].try_into().unwrap());
@@ -571,7 +571,11 @@ impl World {
         if let Some(p) = c.state {
             // faster than a car (or a runner) can go: a respawn now and then is fine, else ignore it
             let dt = now.duration_since(c.state_at).as_secs_f32().max(0.05);
-            let vmax = if s.mode == 2 && p.mode == 2 { 15.0 } else { 70.0 }; // m/s on foot, else by van
+            let vmax = match (p.mode, s.mode) {
+                (2, 2) => 15.0, // on foot
+                (3, 3) => 12.0, // sailing
+                _ => 70.0,      // by van, or getting in or out
+            };
             if (s.x - p.x).hypot(s.z - p.z) > vmax * 1.5 * dt + 5.0 && !c.teleports.take(now) {
                 return Ok(());
             }
@@ -1105,6 +1109,29 @@ mod tests {
         t.later(1000);
         t.at(&a, 1030.0, 0.0);
         assert_eq!(t.w.clients[&a.slot].state.unwrap().x, 1030.0);
+    }
+
+    #[test]
+    fn boats() {
+        let mut t = T::new();
+        let a = t.join("Ann");
+        let sail = |t: &mut T, x: f32| t.w.binary(a.slot, &encode_state(&State { mode: 3, x, y: 1.0, z: 0.0, heading: 0.0, speed: 5.0 }), t.now).unwrap();
+        sail(&mut t, 0.0);
+        assert_eq!(t.w.clients[&a.slot].state.unwrap().mode, 3);
+        // a brisk 10 m/s sail is fine
+        t.later(1000);
+        sail(&mut t, 10.0);
+        assert_eq!(t.w.clients[&a.slot].state.unwrap().x, 10.0);
+        // 40 m/s is no boat: after the respawns allowed, ignored
+        for i in 1..=4 {
+            t.later(1000);
+            sail(&mut t, 10.0 + 40.0 * i as f32);
+        }
+        assert_eq!(t.w.clients[&a.slot].state.unwrap().x, 90.0, "two teleports allowed, then ignored");
+        // modes past 3 are refused
+        t.later(1000);
+        t.w.binary(a.slot, &encode_state(&State { mode: 4, x: 91.0, y: 1.0, z: 0.0, heading: 0.0, speed: 0.0 }), t.now).unwrap();
+        assert_eq!(t.w.clients[&a.slot].state.unwrap().mode, 3);
     }
 
     #[test]

@@ -45,8 +45,12 @@ export default function landmarks(city) {
       for (let j = 0; j < 9; j += 3) { _v.set(a[i + j], a[i + j + 1], a[i + j + 2]).applyMatrix4(m); vert(_v.x, _v.y, _v.z, c) }
     }
   }
-  const box = (x, y, z, sx, sy, sz, rot, hex) => // y = bottom
+  const piers = [] // bridge piers and towers standing in the water: x, z, half length, half width, rot (city.landmarks)
+  let pierWater = null // the water level while a bridge is drawn
+  const box = (x, y, z, sx, sy, sz, rot, hex) => { // y = bottom
+    if (pierWater !== null && y <= pierWater + 0.5) piers.push(x, z, sx / 2, sz / 2, rot)
     geo(prim('box', () => new THREE.BoxGeometry(1, 1, 1)), _m.compose(_p.set(x, y + sy / 2, z), _q.setFromAxisAngle(Y, rot), _s.set(sx, sy, sz)), hex)
+  }
   const cyl = (x, y, z, r, h, hex, n = 12, rTop = r) =>
     geo(prim(`c${n}${rTop / r}`, () => new THREE.CylinderGeometry(rTop / r, 1, 1, n)), _m.compose(_p.set(x, y + h / 2, z), _q.identity(), _s.set(r, h, r)), hex)
   function beam(a, b, w, hex, h = w) { // a square bar from a to b
@@ -656,7 +660,9 @@ export default function landmarks(city) {
       for (const sd of [-1, 1]) { const p = Q(s, sd * w * 0.62, 0); box(p.x, gy, p.z, 3.4, y - gy, 3.4, rot, hex) }
       box(o.x, y - 2, o.z, 3.6, 2.4, 2 * w + 2, rot, hex)
     }
+    pierWater = water
     T[b.type]?.()
+    pierWater = null
   }
   function fill(a) { // fill gaps (null) in an array by linear interpolation, ends by the nearest value
     const idx = a.map((v, i) => (v === null ? -1 : i)).filter((i) => i >= 0)
@@ -769,10 +775,12 @@ export default function landmarks(city) {
   showYards()
   for (const o of objs) { o.userData.landmarks = true; city.scene.add(o) }
   for (const r of masks) city.world.suppressBuildings?.(r)
+  city.landmarks = { piers }
   city.requestRender()
   return {
     dispose() {
       offView()
+      delete city.landmarks
       for (const o of objs) { city.scene.remove(o); o.geometry !== cbox && o.geometry.dispose() }
       cbox.dispose(); mat.dispose(); cmat.dispose()
       city.requestRender()

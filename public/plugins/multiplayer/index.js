@@ -546,7 +546,7 @@ export default function multiplayer(city) {
   function sendState(force) {
     const P = city.player
     if (!ws || ws.readyState !== 1 || !me.id || ws.bufferedAmount > 32e3) return
-    const mode = P ? (P.mode === 'foot' ? 2 : 1) : 0
+    const mode = P ? MODES[P.mode] || 1 : 0
     const now = performance.now()
     const cur = P ? [mode, P.x, P.y, P.z, P.heading, P.speed] : [0, 0, 0, 0, 0, 0]
     const same = lastSent && cur.every((v, i) => Math.abs(v - lastSent[i]) < (i === 4 ? 0.01 : 0.05))
@@ -566,7 +566,9 @@ export default function multiplayer(city) {
   }
   const offPlayer = city.on('player', onPlayer)
 
-  // ---------------------------------------------------------------- 3D: vans and people near me while I play
+  // ---------------------------------------------------------------- 3D: vans, people and boats near me while I play
+  const MODES = { car: 1, foot: 2, boat: 3 } // city.player.mode → the wire's mode (0: stopped)
+  const size = (mode) => (mode === 2 ? { length: 0.6, width: 0.6 } : mode === 3 ? { length: 6.6, width: 2.4 } : { length: 4.3, width: 1.8 })
   const fallback = {
     van(colour) { // a simple low-poly van (forward -z), when the drive plugin's models aren't there
       const g = new THREE.Group(), M = (c) => new THREE.MeshLambertMaterial({ color: c, flatShading: true })
@@ -585,7 +587,7 @@ export default function multiplayer(city) {
     },
   }
   function make(mode, colour) {
-    const f = mode === 2 ? (city.models?.person || fallback.person) : (city.models?.van || fallback.van)
+    const f = mode === 2 ? (city.models?.person || fallback.person) : mode === 3 && city.models?.boat ? city.models.boat : (city.models?.van || fallback.van)
     let o
     try { o = f(colour) } catch (e) { console.warn('live: model', e); o = (mode === 2 ? fallback.person : fallback.van)(colour) }
     o.userData.mode = mode
@@ -601,7 +603,7 @@ export default function multiplayer(city) {
   function obstacle(p, st) {
     const T = city.traffic
     if (!T?.setObstacle) return
-    try { T.setObstacle('mp:' + p.slot, { x: st.x, z: st.z, heading: st.h, length: st.mode === 2 ? 0.6 : 4.3, width: st.mode === 2 ? 0.6 : 1.8, speed: Math.abs(st.s) }); p.obstacle = true } catch (e) { console.warn('live: setObstacle', e) }
+    try { T.setObstacle('mp:' + p.slot, { x: st.x, z: st.z, heading: st.h, ...size(st.mode), speed: Math.abs(st.s) }); p.obstacle = true } catch (e) { console.warn('live: setObstacle', e) }
   }
   // where p is at time t (ms), between snapshots, a little extrapolated past the last one
   function sample(p, t) {
@@ -651,7 +653,7 @@ export default function multiplayer(city) {
       if (!p.obj) { p.obj = make(c.mode, p.colour); city.scene.add(p.obj) }
       p.obj.position.set(c.x, c.y, c.z)
       p.obj.rotation.set(0, c.h + Math.PI, 0) // the models face -z; heading 0 faces +z
-      if (c.mode === 2) p.obj.update?.(dt, c.s)
+      if (c.mode !== 1) p.obj.update?.(dt, c.s)
       else for (const w of p.obj.userData.wheels || []) w.spin.rotation.x -= (c.s * dt) / 0.36
       // name tag (and what they last said) above them
       if (!p.tag) {
@@ -660,7 +662,7 @@ export default function multiplayer(city) {
         layer.append(p.tag)
       }
       if (p.saidUntil && p.saidUntil < now) { p.saidUntil = 0; p.tag.firstChild.textContent = '' }
-      const xy = p.d < TAG_RANGE && project(c.x, c.y + (c.mode === 2 ? 2.25 : 3.4), c.z)
+      const xy = p.d < TAG_RANGE && project(c.x, c.y + (c.mode === 2 ? 2.25 : c.mode === 3 ? 10 : 3.4), c.z)
       p.tag.hidden = !xy
       if (xy) p.tag.style.transform = `translate(${xy[0]}px, ${xy[1]}px) translate(-50%, -100%)`
     }
@@ -708,7 +710,7 @@ export default function multiplayer(city) {
       const out = []
       for (const p of roster.values()) {
         const c = p.obj && p.cur
-        if (c && Math.hypot(c.x - x, c.z - z) <= r) out.push({ id: 'mp:' + p.slot, x: c.x, y: c.y, z: c.z, heading: c.h, length: c.mode === 2 ? 0.6 : 4.3, width: c.mode === 2 ? 0.6 : 1.8, speed: c.s, name: p.name })
+        if (c && Math.hypot(c.x - x, c.z - z) <= r) out.push({ id: 'mp:' + p.slot, x: c.x, y: c.y, z: c.z, heading: c.h, ...size(c.mode), speed: c.s, name: p.name })
       }
       return out
     },

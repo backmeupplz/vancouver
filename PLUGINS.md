@@ -125,12 +125,20 @@ camera. The drive plugin is the example: it dives from the map into a chase came
 - **Traffic** (`plugins/life`): `city.traffic.nearby(x, z, r)` → `[{ id, x, y, z, heading, length, width, speed }]`
   (forward = `(sin heading, 0, cos heading)`), `city.traffic.setObstacle(id, obj | null)` (a player's vehicle or walker
   `{ x, z, heading, length, width, speed, y }` that cars brake for; see Traffic below), `city.traffic.bump(id, impulse)` (a car was hit).
-- **The player** (`plugins/drive`): while the user drives or walks, `city.player = { mode: 'car' | 'foot', x, y, z,
-  heading, speed, colour, vehicle: 'van' }` (updated every frame, read it when you need it), else `null`; `'player'` is
-  emitted on enter, leave and car ⇄ foot. `city.models.van(colour)` and `city.models.person(colour)` return the same
-  low-poly models (forward −z, origin on the ground; `person.update(dt, speed)` runs the walk cycle), so other players
-  look alike. The drive plugin publishes its van and walker with `setObstacle('player-van' | 'player-walker', …)` and
-  collides with `city.traffic.nearby` and, when present, `city.multiplayer.nearby(x, z, r)` (same shape).
+- **The player** (`plugins/drive`, `plugins/sail`): while the user drives, walks or sails, `city.player = { mode: 'car' |
+  'foot' | 'boat', x, y, z, heading, speed, colour, vehicle: 'van' | 'boat' }` (updated every frame, read it when you
+  need it), else `null`; `'player'` is emitted on enter, leave and car ⇄ foot. `city.models.van(colour)`,
+  `city.models.person(colour)` and `city.models.boat(colour)` return the same low-poly models (forward −z, origin on the
+  ground or the waterline; `update(dt, speed)` runs the walk cycle or bobs the boat), so other players look alike.
+  The drive plugin publishes its van and walker with `setObstacle('player-van' | 'player-walker', …)` and collides
+  with `city.traffic.nearby` and, when present, `city.multiplayer.nearby(x, z, r)` (same shape).
+- **Ships** (`plugins/ships`): `city.ships.nearby(x, z, r)`, the vessels within `r` metres of their hull, in the
+  shape of `city.traffic.nearby` (anchored ones with speed 0). The sail plugin bumps into them.
+- **Bridge piers** (`plugins/landmarks`): `city.landmarks.piers`, a flat array of boxes standing in the water,
+  `x, z, half length, half width, rot` each (the long axis is `(cos rot, −sin rot)` in x / z).
+- **A game on screen**: a plugin that takes over the screen with its own camera and controls adds the classes
+  `dlv-on` (and `dlv-touchy` with on-screen touch controls) to `document.body`: the toolbar steps aside and the chat
+  button, the music player and toasts make room for the controls.
 
 ## Traffic
 
