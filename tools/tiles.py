@@ -17,7 +17,7 @@ from common import digest, file_digest, files_digest, code_key, code_data, cpu_s
 from roofs import roof_lookup, valid_poly
 from facades import facade_lookup, NONE as B_NONE, GLASS as B_GLASS, SOLID as B_SOLID
 from lidar_massing import massing_lookup, walls_near
-from geom_rules import apply_rules
+from geom_rules import apply_rules, selftest as rules_selftest
 
 OUT = os.environ.get('OUT', 'public/tiles')
 
@@ -426,9 +426,9 @@ def build(ij):
     # ---- write the 16 detail tiles and the medium tile
     n = 0
     ground8 = road_ground(dtm, road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0, own=False), X0, Y0, lines)  # 8 m, fitted to the streets
-    # the geometry rules (tools/geom_rules.py): their fixes on this cell's buildings, then what is left
+    # the geometry rules (tools/geom_rules.py): their fixes on this cell's buildings and road pieces, then what is left
     g8 = lambda x, y: ndimage.map_coordinates(ground8, [(Y0 + L1 - np.asarray(y)) / 8, (np.asarray(x) - X0) / 8], order=1, mode='nearest')
-    rules = apply_rules(dict(builds=builds, ground=g8, decks=[(np.asarray(L['pts'], float), np.asarray(L['z']), L['w']) for L in lines if L['z'] and not L.get('tube')]))
+    rules = apply_rules(dict(builds=builds, lines=lines, ground=g8, decks=[(np.asarray(L['pts'], float), np.asarray(L['z']), L['w']) for L in lines if L['z'] and not L.get('tube')]))
     rules = {k: (n, len(left)) for k, (n, left) in rules.items()}
     for a in range(4):
         for b in range(4):
@@ -1449,7 +1449,7 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
         for a, b in zip(cut, cut[1:]):
             pts = coords[a:b + 1]
             mid = pts[len(pts) // 2]
-            long_ = own and sum(math.dist(p, q) for p, q in zip(pts, pts[1:])) > LONG
+            long_ = own and (sum(math.dist(p, q) for p, q in zip(pts, pts[1:])) > LONG or reaches_out(pts))
             if own and not long_ and not (X0 <= mid[0] < X0 + L1 and Y0 <= mid[1] < Y0 + L1): continue
             z, tube, kind = None, None, k
             raised = any(lo <= a and b <= hi for lo, hi, *_ in ap)
@@ -1467,7 +1467,7 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
                 z = approach_heights(ap, a, b, pts)
                 if k in FOOT and z and max(abs(z1 - z0) / max(1e-6, math.dist(p0, p1)) for p0, p1, z0, z1 in zip(pts, pts[1:], z, z[1:])) > 0.3:
                     kind = 'steps'  # stairs off a footbridge
-            d = dict(turns=turns, own=mid, kind=kind, pts=pts, z=z, tube=tube, roof=wid in ROOFS, lanes=lanes, w=w, ow=ow, band=band and tube is None, layer=int(hnum(t.get('layer')) or 0), a=refs[a], b=refs[b],
+            d = dict(turns=turns, own=mid, kind=kind, pts=pts, z=z, tube=tube, src='tunnel' if wid in TUNNELS else 'deck' if bridge or wid in DECKS else 'approach', roof=wid in ROOFS, lanes=lanes, w=w, ow=ow, band=band and tube is None, layer=int(hnum(t.get('layer')) or 0), a=refs[a], b=refs[b],
                      name=t.get('name', ''), drive=k in DRIVE and t.get('access') not in ('private', 'no') and t.get('highway') != 'busway',
                      crossing=k in ('footway', 'cycleway', 'path') and (t.get('footway') == 'crossing' or t.get('cycleway') == 'crossing') and t.get('crossing') not in ('unmarked', 'no'))
             for e in split_long(d, wid * 1024 + a) if long_ else [d]:
@@ -1475,7 +1475,15 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
     return out
 
 
-LONG = 500  # metres: a piece longer than this is cut at the detail tiles' edges
+LONG = 500  # metres: a piece longer than this is cut at the detail tiles' edges, as is one reaching out of its tile
+
+
+def reaches_out(pts, m=2.0):
+    """does a piece reach more than m metres out of the detail tile of its middle? The page drapes a piece's paint and
+    traffic on its own tile's terrain, held at the tile's edge past it (paint metres off the ground on a hillside)"""
+    mid = pts[len(pts) // 2]
+    x0, y0 = math.floor(mid[0] / L0) * L0, math.floor(mid[1] / L0) * L0
+    return any(x < x0 - m or x > x0 + L0 + m or y < y0 - m or y > y0 + L0 + m for x, y in pts)
 
 
 def split_long(d, key):
@@ -2330,6 +2338,7 @@ def selftest():
             finally: os.close(fd)
         with cpu_slot(2): assert busy()
         assert not busy() and common.spare_cores(0) <= common.cpus() + 1e-9
+    rules_selftest()
     print('selftest ok')
 
 
@@ -2351,6 +2360,7 @@ if __name__ == '__main__':
         for r in p.imap_unordered(safe_build, jobs):
             n[r[1]] += 1
             if r[1] == 'ok':
+                man.setdefault('issues', {})['%d_%d' % r[0]] = {k: v[1] for k, v in r[-2].items() if v[1]}  # what each rule left in the cell (not blocking yet)
                 for k, v in r[-2].items(): rules[k] = [a + b for a, b in zip(rules.get(k, [0, 0]), v)]
             if r[1] != 'FAILED': cells['%d_%d' % r[0]] = r[-1]; save_manifest(OUT, man)
             if r[1] != 'same': print(r[:-1] if r[1] != 'FAILED' else r, round(time.time() - t0), 's', flush=True)

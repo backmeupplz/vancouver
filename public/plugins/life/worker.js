@@ -108,7 +108,7 @@ const endHeading = (p) => { const n = p.x.length - 1; return Math.atan2(p.y[n] -
 const startHeading = (p) => Math.atan2(p.y[1] - p.y[0], p.x[1] - p.x[0])
 const turn = (a, b) => Math.atan2(Math.sin(b - a), Math.cos(b - a))
 
-// ground height from one tile's terrain grid (world x, y north), as the tile worker drapes that tile's roads
+// ground height from one tile's terrain grid (world x, y north): clamped at the tile's edge, so only for points in it
 function tileH(t, x, y) {
   const { n, h } = t.terrain, size = t.size, c = size / (n - 1)
   const fx = Math.min(n - 1.0001, Math.max(0, (x - t.ox) / c)), fy = Math.min(n - 1.0001, Math.max(0, (size - (y - t.oy)) / c))
@@ -120,26 +120,28 @@ function groundH(x, y) {
   return t ? tileH(t, x, y) : 0
 }
 
-// a piece's centre line, densified like the tile worker's road strips (every <= 8 m, deck heights on bridges)
+// a piece's centre line, densified like the tile worker's road strips (every <= 8 m, deck heights on bridges), on the
+// ground of the tile each point is in (a piece lives in the tile of its middle and may reach into the next one)
 function centre(p) {
   if (p._c) return p._c
-  const pts = p.pts, n = pts.length >> 1, zs = p.z, t = p.tile
+  const pts = p.pts, n = pts.length >> 1, zs = p.z
   const X = [], Y = [], H = []
   for (let i = 0; i < n - 1; i++) {
     const x0 = pts[i * 2], y0 = pts[i * 2 + 1], x1 = pts[i * 2 + 2], y1 = pts[i * 2 + 3]
     const m = zs ? 1 : Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 8))
     for (let k = 0; k < m; k++) {
       const f = k / m, x = x0 + (x1 - x0) * f, y = y0 + (y1 - y0) * f
-      X.push(x); Y.push(y); H.push(zs ? zs[i] + (zs[i + 1] - zs[i]) * f : tileH(t, x, y))
+      X.push(x); Y.push(y); H.push(zs ? zs[i] + (zs[i + 1] - zs[i]) * f : groundH(x, y))
     }
   }
   const x = pts[n * 2 - 2], y = pts[n * 2 - 1]
-  X.push(x); Y.push(y); H.push(zs ? zs[n - 1] : tileH(t, x, y))
+  X.push(x); Y.push(y); H.push(zs ? zs[n - 1] : groundH(x, y))
   const c = poly(Float32Array.from(X), Float32Array.from(Y), Float32Array.from(H))
   c.deck = !!zs
   return (p._c = c)
 }
-// a parallel line `off` metres to the right (mitred like the road strips), optionally reversed, lifted
+// a parallel line `off` metres to the right (mitred like the road strips), optionally reversed, lifted: on a deck over
+// its centre line's height (the deck is level across), on the ground over the ground there (as the paint is drawn)
 function offsetLine(c, off, rev, lift) {
   const n = c.x.length, X = new Float32Array(n), Y = new Float32Array(n), H = new Float32Array(n)
   for (let k = 0; k < n; k++) {
@@ -151,7 +153,7 @@ function offsetLine(c, off, rev, lift) {
       let ax = c.x[i] - c.x[i - 1], ay = c.y[i] - c.y[i - 1]; const al = Math.hypot(ax, ay) || 1; ax /= al; ay /= al
       m = 1 / Math.max(0.5, Math.abs(-ay * -ty + ax * tx))
     }
-    X[k] = c.x[i] + ty * off * m; Y[k] = c.y[i] - tx * off * m; H[k] = c.h[i] + lift
+    X[k] = c.x[i] + ty * off * m; Y[k] = c.y[i] - tx * off * m; H[k] = (c.deck ? c.h[i] : groundH(X[k], Y[k])) + lift
   }
   return poly(X, Y, H)
 }
@@ -350,6 +352,10 @@ function connector(L, M, type, nd, ends) {
     X[i] = b0 * x0 + b1 * (x0 + Math.cos(a0) * k) + b2 * (x3 - Math.cos(a3) * k) + b3 * x3
     Y[i] = b0 * y0 + b1 * (y0 + Math.sin(a0) * k) + b2 * (y3 - Math.sin(a3) * k) + b3 * y3
     H[i] = h0 + (h3 - h0) * s
+  }
+  if (!L.p.z && !M.p.z) { // at grade: over the ground across the junction, not on a straight line from end to end
+    const g0 = groundH(x0, y0), g3 = groundH(x3, y3)
+    for (let i = 1; i < n; i++) H[i] += groundH(X[i], Y[i]) - (g0 + ((g3 - g0) * i) / n)
   }
   // mv: the way on (which road, which way); ends: this lane ends here and merges into the next lane over
   const c = Object.assign(poly(X, Y, H), { conn: true, node: nd, from: L, to: M, type, cars: [], conflicts: [], yields: [], reserved: 0, group: 0,

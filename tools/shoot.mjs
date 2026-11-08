@@ -1,6 +1,6 @@
 // node tools/shoot.mjs --out DIR [--port P] [--dpr 1|2] [--size 1400x900|phone|phone-land] [--tier auto|high|low]
 //   [--weather clear|rain|snow|fog|storm|cloudy] [--hour H] [--season spring] [--turn AZ,POLAR] [--cycles N] [--res R] SPEC...
-// SPEC: name=#X,Y,zoom (map) | name=drive:lat,lon[,yaw rad, 0 north, + west] | walk:lat,lon[,yaw] | taxi:lat,lon | sail:lat,lon | bus:ROUTE:DIR
+// SPEC: name=#X,Y,zoom (map) | name=drive:lat,lon[,yaw rad, 0 north, + west] (on the deck there, if any) | walk:lat,lon[,yaw] | taxi:lat,lon | sail:lat,lon | bus:ROUTE:DIR
 // Map shots: --turn turns and tilts the view as a right-drag does (degrees: azimuth from north, polar from straight
 // down; the default view is 0,60), --cycles wheel-zooms out to 0.05 and in to 0.3 N times and back, as a viewer does,
 // then shoots 1.5 s later (tiles still arriving), --res pins the adaptive resolution (main.js) for the shot.
@@ -29,6 +29,10 @@ try {
       await page.evaluate(([r, d]) => driveDebug.startBus(r, +d || 0), [a, b])
     } else if (game) {
       await page.evaluate(([k, la, lo, yaw]) => { const p = city.world.fromLatLon(la, lo), y = -p.z; k === 'taxi' ? driveDebug.startTaxi(p.x, y) : driveDebug.start(k === 'walk' ? 'foot' : 'car', p.x, y, yaw) }, [kind, +a, +b, +c || 0])
+      if (kind === 'drive') { // on the deck there if there is one (a bridge, not the water under it), once its tile is in
+        const on = () => page.evaluate(([la, lo]) => { const p = city.world.fromLatLon(la, lo), c = driveDebug.car, r = driveDebug.nearestRoad(p.x, -p.z, 3, true); if (r && r.d < 1.2) Object.assign(c, { x: p.x, y: -p.z, h: r.z + 0.58 }); return !!r }, [+a, +b])
+        for (let i = 0; i < 40 && !(await on()); i++) await page.waitForTimeout(250)
+      }
     }
     if (map && o.turn) {
       await page.evaluate(([az, po]) => {
