@@ -14,14 +14,13 @@ import csv, glob, json, math, os, struct, sys, time
 from multiprocessing import Pool
 import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
-from common import xy, latlon, L1, save_rings, load_feat
+from common import xy, latlon, L1, save_rings, load_feat, all_tiles
 from roofs import ring_db, ring_match
 
 OUT = 'data/facades.npz'
 SRC = 'data/facades'
 LAS = 'data/lidar2022/las'
 MLY = 'data/mapillary/walls.npz'  # tools/mapillary.py
-CITY = (-3, 1, -3, 0)  # the 4 km feature buckets (i0, i1, j0, j1) that cover the City of Vancouver and UBC
 NONE, GLASS, SOLID = 1, 2, 3  # balcony kinds (0: tiles.py's rules decide)
 
 # Well-known buildings: OSM ways (buildings or parts) -> wall colour (as seen), facade pattern (public/core/tile-worker.js:
@@ -47,15 +46,14 @@ FIELDS = ('year', 'units', 'heritage', 'wall', 'wsrc', 'storey', 'balc', 'facing
 
 # ---------------------------------------------------------------- footprints, era, heritage
 def footprints():
-    """every OSM building and part in the city's buckets: (osm id, world-xy ring, name)"""
+    """every OSM building and part on the map: (osm id, world-xy ring, name)"""
     out = []
-    for i in range(CITY[0], CITY[1] + 1):
-        for j in range(CITY[2], CITY[3] + 1):
-            for oid, prs, t in load_feat(i, j).get('buildings', []):
-                for outer, inners in prs:
-                    r = outer[:-1] if outer[0] == outer[-1] else outer
-                    c = np.mean(r, axis=0)
-                    if len(r) >= 3 and i * L1 <= c[0] < (i + 1) * L1 and j * L1 <= c[1] < (j + 1) * L1: out.append((oid, r, t.get('name', '')))
+    for i, j in all_tiles():
+        for oid, prs, t in load_feat(i, j).get('buildings', []):
+            for outer, inners in prs:
+                r = outer[:-1] if outer[0] == outer[-1] else outer
+                c = np.mean(r, axis=0)
+                if len(r) >= 3 and i * L1 <= c[0] < (i + 1) * L1 and j * L1 <= c[1] < (j + 1) * L1: out.append((oid, r, t.get('name', '')))
     return out
 
 
@@ -253,9 +251,11 @@ def bake(procs):
             if L.get('wall'): wall[k], wsrc[k] = L['wall'], 2
             balc[k], pattern[k] = L.get('balc', 0), L.get('pattern', 0)
             if L.get('storey'): storey[k] = round(L['storey'] * 20)
-    save_rings(OUT, [r for _, r, _ in fps], year=year, units=units, heritage=her, wall=wall, wsrc=wsrc, storey=storey,
-                        balc=balc, facing=facing, pattern=pattern, mly=mly)
-    print(n, 'facades ->', OUT, f'{os.path.getsize(OUT) / 1e6:.1f} MB', f'{time.time() - t0:.0f}s', flush=True)
+    has = np.flatnonzero((year > 0) | (her > 0) | (wsrc > 0) | (storey > 0) | (balc > 0) | (pattern > 0))  # the rest knows nothing
+    save_rings(OUT, [fps[k][1] for k in has], year=year[has], units=units[has], heritage=her[has], wall=wall[has], wsrc=wsrc[has],
+               storey=storey[has], balc=balc[has], facing=facing[has], pattern=pattern[has], mly=mly[has])
+    print(f'{len(has)} of {n} footprints ->', OUT, f'{os.path.getsize(OUT) / 1e6:.1f} MB,', f'{(wsrc == 1).sum()} Mapillary walls,',
+          f'{time.time() - t0:.0f}s', flush=True)
 
 
 _DB = None
