@@ -294,7 +294,18 @@ const ink = new THREE.ShaderMaterial({
     // the depth taps on whole texels, step texels apart from the centre's: below full resolution (0.8) every 5th row and
     // column falls on a texel edge, where the centre and its neighbours rounded to texels on their own, so a flat road
     // read as a ladder of edges in front of the van
+    #ifdef LOWRES
+    // below full resolution (adaptive): a texel is more than half a CSS px, and whole-texel lines were that many CSS px
+    // wide and blocky. Here the depth is read bilinearly (exact on any plane, so no ladders either) at the output's own
+    // pixels, the taps half a CSS px (px) apart: a line a CSS px wide, smooth at its ends, at any scale
+    float z(vec2 o) {
+      vec2 n = vec2(textureSize(tDepth, 0)), q = uv * n + o * px * n - 0.5, f = fract(q), m = lim * n;
+      ivec2 a = ivec2(clamp(floor(q), vec2(0.0), m)), b = ivec2(clamp(floor(q) + 1.0, vec2(0.0), m));
+      return mix(mix(texelFetch(tDepth, a, 0).x, texelFetch(tDepth, ivec2(b.x, a.y), 0).x, f.x), mix(texelFetch(tDepth, ivec2(a.x, b.y), 0).x, texelFetch(tDepth, b, 0).x, f.x), f.y);
+    }
+    #else
     float z(vec2 o) { vec2 n = vec2(textureSize(tDepth, 0)); return texelFetch(tDepth, ivec2(clamp(floor(uv * n) + o * floor(px * n + 0.5), vec2(0.0), lim * n)), 0).x; }
+    #endif
     #ifdef PERSP
     uniform float cnear, cfar; uniform vec2 fade, inkFade;
     #ifdef SKYFOG
@@ -326,6 +337,9 @@ const ink = new THREE.ShaderMaterial({
       float lap = max(max(d(vec2(1.0, 0.0)) + d(vec2(-1.0, 0.0)) - 2.0 * c, d(vec2(0.0, 1.0)) + d(vec2(0.0, -1.0)) - 2.0 * c), 0.0);
       #ifdef PERSP
       lap /= c;
+      #endif
+      #ifdef LOWRES
+      lap /= px.x * float(textureSize(tDepth, 0).x); // a step's curvature at taps a fraction of a texel apart, as at a whole texel
       #endif
       float e = smoothstep(thr, thr * 6.0, lap) * ink;
       #ifdef PERSP
@@ -419,7 +433,10 @@ function draw(scale = res) {
   rt.viewport.set(0, 0, rw, rh); rt.scissor.set(0, 0, rw, rh); rt.scissorTest = rw < w
   const C = own ? own.camera : cam, zoom = own ? ownCamera.zoom : cam.zoom, u = ink.uniforms
   if (rt.samples !== msaa(C, pr)) { rt.samples = msaa(C, pr); rt.dispose() }
-  const step = Math.max(1, Math.round(pr * scale)) // the outline's width: a CSS px, in whole texels (else slopes read as edges)
+  // the outline's width: a CSS px, in whole texels (else slopes read as edges); below full resolution half a CSS px
+  // between bilinear taps (LOWRES)
+  define('LOWRES', scale < 1)
+  const step = scale < 1 ? 0.5 * pr * scale : Math.max(1, Math.round(pr * scale))
   u.px.value.set(step / w, step / h); u.uvs.value.set(rw / w, rh / h); u.lim.value.set((rw - 0.5) / w, (rh - 0.5) / h)
   u.range.value = C.far - C.near
   define('PERSP', !!C.isPerspectiveCamera)
@@ -482,22 +499,26 @@ function draw(scale = res) {
 
 // ---------- adaptive resolution: when frames drawn back to back keep coming late (over 20 ms: 60 fps or better is
 // on time), the scene is drawn at a lower share `res` of the canvas resolution, a step at a time down to the quality
-// tier's floor; after a while of on-time frames it probes a step back up (and waits twice as long after a probe that
-// was too much). Auto drops to the low tier when even the floor is late. When the view stops and nothing animates,
-// one last frame is drawn at full resolution, so a still map is sharp.
-let res = 1, lateMs = 0, onTimeMs = 0, probeMs = 3000, probedAt = -1e9, settleAt = Infinity, floorLate = 0
+// tier's floor; after a while of on-time frames it probes a step back up (and after a probe that was too much goes
+// straight back and waits twice as long). Auto drops to the low tier when even the floor is late. When the view stops and nothing animates,
+// one last frame is drawn at full resolution, so a still map is sharp; a view that stops while things animate (traffic,
+// ships, weather) goes straight back to full resolution half a second later, and stays there while its frames are on time.
+let res = 1, lateMs = 0, onTimeMs = 0, probeMs = 3000, probedAt = -1e9, settleAt = Infinity, floorLate = 0, stillAt = 0, seenZoom = 0, probeFrom = 1
+const seen = new THREE.Matrix4()
 function settle() { settleAt = performance.now() + 2500; lateMs = onTimeMs = 0; dirty = true } // a new camera or tier compiles shaders: no measure
 // ms: since the last frame; cpu: the main thread's own work in it (a frame late from building a tile is not one a
 // lower resolution would help)
-function adaptResolution(ms, cpu, now) {
+function adaptResolution(ms, cpu, now, C) {
+  if (!seen.equals(C.matrixWorld) || seenZoom !== C.zoom) { seen.copy(C.matrixWorld); seenZoom = C.zoom; stillAt = now }
   if (document.hidden || now < settleAt || ms > 250 || cpu > 10) return // nor is a stall (a hidden tab, a long task)
+  if (res < 1 && now - stillAt > 500 && now - probedAt > probeMs) { probeFrom = res; res = 1; onTimeMs = lateMs = 0; probedAt = now; floorLate = 0; return }
   if (ms > 20) { lateMs += ms; onTimeMs = 0 } else { lateMs = Math.max(0, lateMs - ms * 0.1); onTimeMs += ms } // more than 1 in ~20 late adds up
   if (lateMs > 600) {
     lateMs = 0
-    if (now - probedAt < 3000) probeMs = Math.min(60000, probeMs * 2)
+    if (now - probedAt < 3000) { probeMs = Math.min(60000, probeMs * 2); if (res > probeFrom) { res = probeFrom; return } } // a probe too far: straight back
     if (res > quality.tier.minRes + 0.01) res = Math.max(quality.tier.minRes, Math.round(res * 10 - 1) / 10)
-    else if (++floorLate >= 3) { floorLate = 0; quality.demote() }
-  } else if (res < 1 && onTimeMs > probeMs) { res = Math.min(1, Math.round(res * 10 + 1) / 10); onTimeMs = 0; probedAt = now; floorLate = 0 }
+    else if (!tiles.made.length && !tiles.warming.length && ++floorLate >= 3) { floorLate = 0; quality.demote() } // (not while tiles stream: their uploads, not the pixels)
+  } else if (res < 1 && onTimeMs > probeMs) { probeFrom = res; res = Math.min(1, Math.round(res * 10 + 1) / 10); onTimeMs = 0; probedAt = now; floorLate = 0 }
 }
 function applyQuality(t) { // a new tier (core/quality.js)
   PR = Math.min(devicePixelRatio, t.pixelRatio)
@@ -522,7 +543,7 @@ function loop(now) {
   const ms = now - lastFrame, dt = Math.min(0.1, ms / 1000 || 0); lastFrame = now
   if (city?.animating) dirty = true
   if (!dirty) { if (drew && res < 1) draw(1); drew = false; return } // still: once more, sharp
-  if (drew) adaptResolution(ms, cpu, now)
+  if (drew) adaptResolution(ms, cpu, now, own ? own.camera : cam)
   drew = true
   dirty = false
   if (own) {
@@ -578,7 +599,7 @@ function showQuality() {
 }
 for (const b of document.querySelectorAll('#gfx [data-q]')) b.onclick = () => { quality.set(b.dataset.q); showQuality() }
 city.on('quality', showQuality); showQuality()
-window.view = { cam, controls, setView, zAt, renderer, tiles, trees3d, setAA }
+window.view = { cam, controls, setView, zAt, renderer, tiles, trees3d, setAA, quality, get res() { return res }, set res(v) { res = v; settleAt = Infinity } } // (res: tools pin the adaptive resolution)
 
 // ---------- loading screen: until what's on screen has arrived ----------
 await new Promise((ok) => {

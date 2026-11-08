@@ -198,16 +198,23 @@ export class Tiles {
   // camera (city.view.useCamera) a square of half-size `radius` around the target
   viewRect(camera, target, radius) {
     if (camera.isPerspectiveCamera) { const x = target.x, y = -target.z; return { x0: x - radius, x1: x + radius, y0: y - radius, y1: y + radius } }
+    // the screen's corners on the ground at the target's height, as the camera is turned and tilted (right-drag): a
+    // rectangle that assumed the default view (north up, 30° down) missed the corners of a turned or lower view
     const z = camera.zoom, hw = (camera.right - camera.left) / z / 2, vh = (camera.top - camera.bottom) / z / 2
-    const cx = target.x, cn = -target.z, h0 = target.y || 0
-    // ground depth seen = screen height / sin(30°) around the target; ground higher than the target shows from
-    // further north (and from further south at the bottom edge), 1.73 m per metre of height difference
-    let y0 = cn - vh * 2 - 80, y1 = cn + vh * 2 + 80
-    const north = this.maxHeight(cx - hw, cx + hw, y1, y1 + 3500) - h0, south = this.maxHeight(cx - hw, cx + hw, y0 - 2500, y0) - h0
-    if (north > 0) y1 += Math.min(3500, north * 1.732)
-    if (south > 0) y0 -= Math.min(2500, south * 1.732)
+    camera.updateMatrixWorld()
+    const h0 = target.y || 0, e = camera.matrixWorld.elements // columns: right, up, back
+    const at = (sx, sy) => { const t = (sx * e[1] + sy * e[5]) / e[9]; return [target.x + sx * e[0] + sy * e[4] - t * e[8], -(target.z + sx * e[2] + sy * e[6] - t * e[10])] }
+    const tl = at(-hw, vh), tr = at(hw, vh), bl = at(-hw, -vh), br = at(hw, -vh)
+    // ground higher than the target shows from further on past the top edge (and from nearer at the bottom edge),
+    // 1/tan(the view's tilt) m per metre of height difference, plus 80 m for what stands on it
+    const l = Math.hypot(e[8], e[10]) || 1e-6, fx = -e[8] / l, fy = e[10] / l, cot = l / e[9] // the view's way on the ground
+    const band = (a, b, d) => this.maxHeight(Math.min(a[0], b[0], a[0] + fx * d, b[0] + fx * d), Math.max(a[0], b[0], a[0] + fx * d, b[0] + fx * d),
+      Math.min(a[1], b[1], a[1] + fy * d, b[1] + fy * d), Math.max(a[1], b[1], a[1] + fy * d, b[1] + fy * d)) - h0
+    const far = Math.min(3500, Math.max(0, band(tl, tr, 3500)) * cot) + 80, near = -Math.min(2500, Math.max(0, band(bl, br, -2500)) * cot) - 80
+    const ps = [bl, br, tl, tr, ...[tl, tr].map((p) => [p[0] + fx * far, p[1] + fy * far]), ...[bl, br].map((p) => [p[0] + fx * near, p[1] + fy * near])]
+    const xs = ps.map((p) => p[0]), ys = ps.map((p) => p[1])
     const pad = Math.max(60, hw * 0.15) // a little beyond the edges, so panning reveals loaded ground
-    return { x0: cx - hw - pad, x1: cx + hw + pad, y0: y0 - pad, y1: y1 + pad }
+    return { x0: Math.min(...xs) - pad, x1: Math.max(...xs) + pad, y0: Math.min(...ys) - pad, y1: Math.max(...ys) + pad }
   }
 
   // far (a perspective camera): the overview tiles show out to this far, beyond the detail tiles within radius
@@ -221,6 +228,7 @@ export class Tiles {
     if (dt > 0.5 || camera.isPerspectiveCamera) m.vx = m.vy = 0
     else if (dt > 0.004) { const k = Math.min(1, dt * 6); m.vx += ((target.x - m.x) / dt - m.vx) * k; m.vy += ((-target.z - m.y) / dt - m.vy) * k }
     if (dt > 0.004) Object.assign(m, { x: target.x, y: -target.z, t: now })
+    const seen = { ...r } // on screen (the overview tile fills a gap only there)
     const lx = Math.max(-1500, Math.min(1500, m.vx * 0.8)), ly = Math.max(-1500, Math.min(1500, m.vy * 0.8))
     if (lx > 0) r.x1 += lx; else r.x0 += lx
     if (ly > 0) r.y1 += ly; else r.y0 += ly
@@ -234,7 +242,7 @@ export class Tiles {
       p.used = this.frame
       if (p.state === 'new') need.push([p, Math.hypot((i + 0.5) * 4096 - cx, (j + 0.5) * 4096 - cy)])
       const inner = (i + 1) * 4096 >= r.x0 && i * 4096 <= r.x1 && (j + 1) * 4096 >= r.y0 && j * 4096 <= r.y1
-      let kidsReady = wantDetail && inner, any = false, shown = false
+      let kidsReady = wantDetail && inner, any = false, shown = false, gap = false
       if (wantDetail && inner) {
         for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) {
           const ki = i * 4 + a, kj = j * 4 + b
@@ -243,17 +251,19 @@ export class Tiles {
           const k = this.get(0, ki, kj)
           k.used = this.frame; any = true
           if (k.state === 'new') need.push([k, Math.hypot((ki + 0.5) * 1024 - cx, (kj + 0.5) * 1024 - cy) - 1e5])
-          if (k.state !== 'ready' && k.state !== 'missing') kidsReady = false
+          if (k.state !== 'ready' && k.state !== 'missing') { kidsReady = false; gap ||= (ki + 1) * 1024 >= seen.x0 && ki * 1024 <= seen.x1 && (kj + 1) * 1024 >= seen.y0 && kj * 1024 <= seen.y1 }
           else if (k.visible && k.state === 'ready') shown = true
         }
       }
-      // detail tiles that show stay while new ones arrive at the edge (the base layer fills the gap for a moment):
-      // falling back to the overview tile there would flash the whole 4 km of it, every time a pan reaches a new
-      // row of detail tiles. Zooming out, they stay until the overview tile has arrived.
+      // detail tiles that show stay while new ones arrive at the edge, and the overview tile shows with them, holed
+      // where they show, so the gap is the overview tile's and not the base layer's (not all of it: that flashed the
+      // whole 4 km every time a pan reached a new row of detail tiles). Zooming out, they stay until the overview
+      // tile has arrived.
       const fine = wantDetail && any && (kidsReady || shown), up = p.state === 'ready' || p.state === 'missing'
-      this.show(p, !fine || R !== r) // past the detail tiles: both, the overview tile holed where they show
-      // (and then not in the sun's shadow map, which a perspective camera keeps near it, over the detail tiles)
-      if (p.group && p.cast !== (R === r)) { p.cast = R === r; p.group.traverse((o) => { if (o.isMesh && o.material === this.farMats.building) o.castShadow = p.cast }) }
+      this.show(p, !fine || gap || R !== r) // past the detail tiles too: both, the overview tile holed
+      // (and with both, not in the sun's shadow map: its buildings would shade the detail tiles' cells twice)
+      const cast = R === r && !fine
+      if (p.group && p.cast !== cast) { p.cast = cast; p.group.traverse((o) => { if (o.isMesh && o.material === this.farMats.building) o.castShadow = cast }) }
       for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) {
         const k = this.tiles.get(this.key(0, i * 4 + a, j * 4 + b))
         if (!k) continue
@@ -322,7 +332,7 @@ export class Tiles {
     const alive = (t) => this.tiles.get(this.key(t.level, t.i, t.j)) === t
     let spent = 0
     do {
-      const t = this.warming.find((w) => !w.level) || this.warming[0] // detail tiles first: the far overview tiles wait
+      const t = this.first(this.warming) // on screen first, then detail tiles: the far overview tiles wait
       if (t) { // upload the next mesh of the first made tile
         const m = alive(t) && t.warm.at(-1)
         if (m) {
@@ -338,7 +348,7 @@ export class Tiles {
         this.onChange?.(t.visible) // a tile that shows changes the picture (and the shadows); a hidden one only the plan
         if (!this.rush) return
       }
-      const n = this.made.splice(Math.max(0, this.made.findIndex((m) => !m.level)), 1)[0] // else make the next tile (detail first); its buffers go up from the next frame
+      const n = this.made.splice(this.made.indexOf(this.first(this.made)), 1)[0] // else make the next tile (as warming); its buffers go up from the next frame
       if (!n) return
       if (n.state !== 'loading' || !alive(n)) continue
       this.make(n, n.res); n.res = null
@@ -349,6 +359,13 @@ export class Tiles {
       this.warming.push(n)
       if (!this.rush) return
     } while (this.rush || spent < 3e6)
+  }
+
+  // which waiting tile goes next: one on screen (a zoom in and out leaves tiles it passed queued), a detail one first
+  first(list) {
+    let best, rank = 9
+    for (const t of list) { const k = (t.used === this.frame ? 0 : 2) + (t.level ? 1 : 0); if (k < rank) { best = t; rank = k } }
+    return best
   }
 
   upload(renderer, m) {
