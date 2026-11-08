@@ -20,6 +20,22 @@ export const surface = { wet: { value: 0 }, snow: { value: 0 }, sky: { value: ne
 const SURF = `uniform float wet, snow; uniform vec3 skyCol;
   // the sky seen in a wet surface at p (up-facing): Schlick fresnel towards the camera
   float sheenAt(vec3 p) { float c = max(dot(normalize(cameraPosition - p), vec3(0.0, 1.0, 0.0)), 0.0); return pow(1.0 - c, 5.0); }`
+
+// What stands between a street-level camera and the player (main.js sets occluder from city.player: centre xyz,
+// radius; radius 0 = off) dissolves: the 3D trees as a whole, building faces that cross the line of sight. A world
+// space dissolve in ~0.6 m cells rather than a per-pixel dither, which the ink pass would outline pixel by pixel.
+export const occluder = { value: new THREE.Vector4() }
+export const OCCLUDE = `uniform vec4 occluder;
+  // 1 within r (+ the player's radius) of the line from the camera to the player, fading out over 1.5 m beyond;
+  // the line stops short of the player, whose own surroundings stay
+  float occluded(vec3 p, float r) {
+    if (occluder.w <= 0.0) return 0.0;
+    vec3 ab = occluder.xyz - cameraPosition;
+    float L = length(ab), t = clamp(dot(p - cameraPosition, ab) / (L * L), 0.0, 1.0 - min(0.9, (occluder.w + 1.0) / L));
+    float d = distance(p, cameraPosition + ab * t) - r - occluder.w;
+    return 1.0 - smoothstep(0.0, 1.5, d);
+  }`
+export const DISSOLVE = `void dissolve(vec3 p, float k) { if (k > 0.0 && fract(sin(dot(mod(floor(p * 1.7), 289.0), vec3(12.99, 78.23, 37.72))) * 43758.55) < k) discard; }`
 const surfUniforms = (s) => { s.uniforms.wet = surface.wet; s.uniforms.snow = surface.snow; s.uniforms.skyCol = surface.sky }
 
 // ---------------------------------------------------------------- ground
@@ -211,19 +227,25 @@ export function buildingMaterial() {
   const m = new THREE.MeshLambertMaterial({ vertexColors: true })
   m.onBeforeCompile = (s) => {
     s.uniforms.night = night
+    s.uniforms.occluder = occluder
     surfUniforms(s)
     s.vertexShader = s.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute vec4 aWin;\nvarying vec4 vWin;\nvarying float vUp;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWin = aWin;\nvUp = normalize(mat3(modelMatrix) * objectNormal).y;')
+      .replace('#include <common>', '#include <common>\nattribute vec4 aWin;\nvarying vec4 vWin;\nvarying float vUp;\nvarying vec3 vWp, vWn;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWin = aWin;\nvWn = normalize(mat3(modelMatrix) * objectNormal);\nvUp = vWn.y;\nvWp = (modelMatrix * vec4(transformed, 1.0)).xyz;')
     s.fragmentShader = s.fragmentShader
       .replace('#include <common>', `#include <common>
         varying vec4 vWin;
         varying float vUp;
+        varying vec3 vWp, vWn;
         ${COMMON}
         ${SURF}
+        ${OCCLUDE}
+        ${DISSOLVE}
         float thin(float width, float fw) { return smoothstep(0.6, 1.3, width / fw); }
         float box(vec2 f, vec2 lo, vec2 hi, vec2 fw) { vec2 a = smoothstep(lo - fw, lo + fw, f) * (1.0 - smoothstep(hi - fw, hi + fw, f)); return a.x * a.y; }`)
       .replace('#include <color_fragment>', `#include <color_fragment>
+        // a face across the line of sight to the player (an overhang, a skybridge); not walls alongside it
+        if (occluder.w > 0.0) dissolve(vWp, occluded(vWp, 0.3) * step(0.35, abs(dot(vWn, normalize(occluder.xyz - cameraPosition)))));
         // vWin.x = pattern + (storey code + 32 * storefront) / 64 (tile-worker.js): window rows follow the real floors
         float style = floor(vWin.x + 1e-4), q = floor(fract(vWin.x + 1e-4) * 64.0 + 0.5);
         float front = step(31.5, q), fq = mod(q, 32.0), storey = fq > 0.5 ? 2.4 + fq * 0.15 : 3.2;
@@ -336,7 +358,7 @@ export function buildingMaterial() {
       // the glow's strength rides in alpha, so the post pass can keep lit windows warm under a night grade
       .replace('#include <opaque_fragment>', '#include <opaque_fragment>\ngl_FragColor.a = 1.0 - min(1.0, dot(glow, vec3(0.5)));')
   }
-  m.customProgramCacheKey = () => 'building5'
+  m.customProgramCacheKey = () => 'building6'
   return m
 }
 

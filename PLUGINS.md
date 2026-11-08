@@ -122,7 +122,7 @@ perspective camera the ink outlines are found from depth properly linearised and
 `THREE.Fog` you set on `city.scene` is used by the map and the trees alike). While your camera is active,
 `city.view.zoom` is the map zoom that shows the focus at the same scale, `center` is the focus and `bounds` the
 streamed square, and `'view'` fires as the focus moves. A perspective camera also gets what street level needs:
-trees within ~190 m are real 3D trees (the billboards beyond stand upright), fog fades into the sky texture you set
+trees within ~190 m are real 3D trees (the billboards beyond stand upright), and those trees and the building faces between the camera and `city.player` (see below) dissolve so the player stays in view, fog fades into the sky texture you set
 as `scene.background` rather than one flat colour, detail tiles stay up while new ones arrive past the fog, and
 when frames keep coming late the view is drawn at a lower resolution (down to 0.75 CSS px per pixel; `release()`
 restores it). Its ink lines are smoothed by FXAA below 1.5x pixel ratio (`view.setAA('auto' | 'fxaa' | 'msaa' | 'off')`

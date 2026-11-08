@@ -5,6 +5,7 @@
 // tree material's near3d uniforms), so each tree is drawn exactly once. Flat-shaded Lambert like the rest of
 // the map, so the sun, the shadows and the ink outlines all apply. One InstancedMesh per shape.
 import * as THREE from 'three'
+import { occluder, OCCLUDE, DISSOLVE } from './materials.js'
 
 const PHONE = matchMedia('(pointer: coarse)').matches
 const R0 = PHONE ? 140 : 190 // metres around the camera (times the quality tier's trees3d share)
@@ -77,16 +78,23 @@ export class Trees3D {
   constructor({ scene, tiles, treeMaterial }) {
     Object.assign(this, { scene, tiles, treeMaterial })
     const mat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true })
-    mat.onBeforeCompile = (s) => { // the instance colour tints the leaves only
-      s.vertexShader = s.vertexShader.replace('#include <common>', '#include <common>\nattribute float crown;')
+    mat.onBeforeCompile = (s) => {
+      s.uniforms.occluder = occluder
+      s.vertexShader = s.vertexShader.replace('#include <common>', `#include <common>\nattribute float crown;\nvarying float vFade;\nvarying vec3 vWp;\n${OCCLUDE}`)
         .replace('#include <color_vertex>', THREE.ShaderChunk.color_vertex.replace('vColor.xyz *= instanceColor.xyz;', 'vColor.xyz *= mix(vec3(1.0), instanceColor.xyz, crown);'))
-        // a tree the camera stands in (a street tree over the sidewalk) would fill the view with leaves: not drawn
-        // (its shadow still is)
+        // a tree whose crown is between the camera and the player, that the camera stands under (a street tree over
+        // the sidewalk would fill the view with leaves) or whose crown is right by the lens, dissolves (its shadow stays)
         .replace('#include <project_vertex>', `#include <project_vertex>
           vec3 foot = (modelMatrix * instanceMatrix[3]).xyz;
-          if (distance(foot.xz, cameraPosition.xz) < length(instanceMatrix[0].xyz) * 0.6 + 1.5 && cameraPosition.y < foot.y + length(instanceMatrix[1].xyz) + 1.0) gl_Position = vec4(0.0, 0.0, 2.0, 1.0);`)
+          float cw = length(instanceMatrix[0].xyz) * 0.5, ch = length(instanceMatrix[1].xyz);
+          vec3 cc = foot + vec3(0.0, ch * 0.62, 0.0);
+          float stand = step(distance(foot.xz, cameraPosition.xz), cw * 1.2 + 1.5) * step(cameraPosition.y, foot.y + ch + 1.0);
+          vFade = max(occluded(cc, cw), max(stand, 1.0 - smoothstep(1.4, 1.9, distance(cc, cameraPosition) / cw)));
+          vWp = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;`)
+      s.fragmentShader = s.fragmentShader.replace('#include <common>', `#include <common>\nvarying float vFade;\nvarying vec3 vWp;\n${DISSOLVE}`)
+        .replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\ndissolve(vWp, vFade);')
     }
-    mat.customProgramCacheKey = () => 'tree3d'
+    mat.customProgramCacheKey = () => 'tree3d2'
     this.meshes = SHAPES.map((f) => {
       const m = new THREE.InstancedMesh(f(), mat, MAX)
       m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX * 3), 3)

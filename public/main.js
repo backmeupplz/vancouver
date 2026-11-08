@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { MapControls } from './vendor/MapControls.js'
 import { createCity, loadPlugins } from './city.js'
 import { Tiles } from './core/tiles.js'
-import { groundMaterial, roadMaterial, buildingMaterial, treeAtlas, treeMaterial, night, surface } from './core/materials.js'
+import { groundMaterial, roadMaterial, buildingMaterial, treeAtlas, treeMaterial, night, surface, occluder } from './core/materials.js'
 import { Trees3D } from './core/trees3d.js'
 import { createQuality } from './core/quality.js'
 
@@ -169,6 +169,7 @@ let lastGroundCheck = 0
 
 // ---------- a plugin's own camera (city.view.useCamera): MapControls off, the map is drawn through that camera,
 // tiles stream and shadows fit around opts.focus (read every frame, so the plugin just moves it) ----------
+const OCCLUDER = { foot: [1, 0.4], car: [1.2, 1.2], bus: [1.6, 1.8], boat: [1.5, 2] } // per player mode: centre height, radius
 let own = null // { camera, opts: { focus, radius, shadowRadius } }
 const ownSeen = new THREE.Vector3(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3()
 let shMap = null // the map view's shadow fit, put back exactly on release
@@ -478,6 +479,9 @@ function loop(now) {
   }
   city?.emit('frame', dt, now / 1000)
   if (own?.camera.isPerspectiveCamera) { mats.tree.uniforms.cyl.value = 1; trees3d.update(own.camera) } else if (own) { mats.tree.uniforms.cyl.value = 0; trees3d.off() }
+  // trees and building parts between a street-level camera and the player dissolve (materials.js occluder)
+  const pl = own?.camera.isPerspectiveCamera && city?.player, oc = pl && OCCLUDER[pl.mode]
+  if (oc) occluder.value.set(pl.x, pl.y + oc[0], pl.z, oc[1]); else occluder.value.w = 0
   updateShadows()
   if (shadowStale && now - lastShadow > 500) { shadowStale = false; lastShadow = now; renderer.shadowMap.needsUpdate = true }
   if (shadowStale) dirty = true // come back for it

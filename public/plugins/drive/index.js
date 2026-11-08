@@ -1022,8 +1022,9 @@ export default function drive(city) {
     // a bus keeps to the kerb lane: the camera a little out over the road, clear of the street trees; at a stop with
     // its doors open it swings round in front, looking back at the front door and the people getting on
     const doors = !!game?.doors && Math.abs(car.speed) < 0.5 && !snap
-    const back = onFoot ? 4.3 + sp * 0.18 : doors ? -(car.V.hl + 9) : 8.6 + big * 0.8 + sp * 0.14, up = onFoot ? 1.9 + sp * 0.06 : doors ? 3.8 : 4.3 + big * 0.2 + sp * 0.05
-    const off = !game ? 0 : doors ? -1.2 : -2.2
+    if (!doors) doorCam = null; else if (!doorCam) doorCam = pickDoorCam(P)
+    const back = onFoot ? 4.3 + sp * 0.18 : doors ? -(car.V.hl + doorCam[0]) : 8.6 + big * 0.8 + sp * 0.14, up = onFoot ? 1.9 + sp * 0.06 : doors ? 3.8 : 4.3 + big * 0.2 + sp * 0.05
+    const off = !game ? 0 : doors ? doorCam[1] : -2.2
     const bx = P.x - fx * back + fy * off, by = P.y - fy * back - fx * off
     const gy = Math.max(city.world.heightAt(bx, -by) + (onFoot ? 1.2 : 1.4), P.h + up)
     v3.set(bx, gy, -by)
@@ -1043,6 +1044,29 @@ export default function drive(city) {
     const ahead = onFoot ? 3 : doors ? car.V.hl - 3 : 6 + big * 0.3, right = doors ? car.V.hw + 1.2 : 0
     v4.set(P.x + fwdX(P.yaw) * ahead + fwdY(P.yaw) * right, P.h + (onFoot ? 1.3 : 1.0), -(P.y + fwdY(P.yaw) * ahead - fwdX(P.yaw) * right))
     if (snap) chase.look.copy(v4); else chase.look.lerp(v4, 1 - Math.exp(-(doors ? 2 : 10) * dt))
+  }
+  // where the camera stands at a stop, in front of the bus: metres past its nose and to the side (− out over the road).
+  // The first spot (once a stop) with no tree crown in its view of the front door or by the lens, and no pole, lamp or
+  // sign right in front of it; materials.js occluder dissolves whatever is still in the way
+  const DOOR_CAMS = [[9, -1.2], [9, -4], [6, -2.6], [12, -5.5], [7, 1.8]]
+  let doorCam = null
+  function pickDoorCam(P) {
+    const fx = fwdX(P.yaw), fy = fwdY(P.yaw), lx = P.x + fx * (car.V.hl - 3) + fy * (car.V.hw + 1.2), ly = P.y + fy * (car.V.hl - 3) - fx * (car.V.hw + 1.2)
+    let best = DOOR_CAMS[0], fewest = Infinity, bx, by, dx, dy, L2, hits
+    const hit = (x, y, r, kind) => { // kind 0: a tree (r its trunk, about 0.035 of the crown's width)
+      const ex = x - bx, ey = y - by, e = Math.hypot(ex, ey), u = clamp((ex * dx + ey * dy) / L2, 0, 1), d = Math.hypot(bx + dx * u - x, by + dy * u - y)
+      if (kind) { if (u < 0.5 && d < r + 1.2) hits++; return }
+      const cr = r / 0.07, ahead = ex * dx + ey * dy > e * Math.sqrt(L2) * 0.7 // within 45° of the view's centre
+      if (d < cr + 0.8 || e < cr + 3 || (ahead && cr / e > 0.18)) hits++ // in the line of sight, by the lens, or big in the frame
+    }
+    for (const c of DOOR_CAMS) {
+      bx = P.x + fx * (car.V.hl + c[0]) + fy * c[1]; by = P.y + fy * (car.V.hl + c[0]) - fx * c[1]; dx = lx - bx; dy = ly - by; L2 = dx * dx + dy * dy; hits = 0
+      const mx = (bx + lx) / 2, my = (by + ly) / 2, r = Math.sqrt(L2) / 2 + 6
+      propsNear(mx, my, r, hit)
+      for (const o of poles(mx, my, r)) hit(o.x, -o.z, o.r, 1)
+      if (hits < fewest) { best = c; fewest = hits; if (!hits) break }
+    }
+    return best
   }
   // near and far as tight as the view allows (the ground layers are only centimetres apart): near 1 m behind the van,
   // 0.5 m on foot; far just past the fog, where everything has faded into the sky anyway
