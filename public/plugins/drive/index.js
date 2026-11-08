@@ -475,13 +475,16 @@ export default function drive(city) {
       .dlv-pick { left: 50%; top: 12px; transform: translateX(-50%); padding: 8px 10px 8px 14px; display: flex; gap: 10px; align-items: center; font-size: 14px; }
       body.dlv-picking canvas { cursor: crosshair }
       body.dlv-picking #hint { display: none }
-      .dlv-touch { inset: auto 0 0 0; height: 170px; display: none; }
-      .dlv-touch button { position: absolute; bottom: 52px; width: 74px; height: 74px; border-radius: 50%; font-size: 15px; font-weight: 650; background: rgba(38,30,28,.5); border: 2px solid rgba(255,236,214,.35); touch-action: none; user-select: none; -webkit-user-select: none; }
+      /* the pedals (--pw wide; Go --gh tall, Brake --bh) sit in the bottom-right corner, the handbrake and the
+         action button stack over Go; --pb is the bottom row's distance from the screen edge */
+      .dlv-touch { inset: auto 0 0 0; height: 170px; display: none; --pb: 52px; --pw: 88px; --gh: 128px; --bh: 96px; }
+      .dlv-touch button { position: absolute; bottom: var(--pb); width: 74px; height: 74px; border-radius: 50%; font-size: 15px; font-weight: 650; background: rgba(38,30,28,.5); border: 2px solid rgba(255,236,214,.35); touch-action: none; user-select: none; -webkit-user-select: none; }
       .dlv-touch button.on { background: rgba(232,115,90,.75) }
-      .dlv-touch .l { left: 16px } .dlv-touch .r { left: 100px } .dlv-touch .gas { right: 16px; height: 100px; border-radius: 22px } .dlv-touch .brk { right: 100px; width: 66px; height: 66px }
+      .dlv-touch .l { left: 16px } .dlv-touch .r { left: 100px }
+      .dlv-touch .gas, .dlv-touch .brk { width: var(--pw); border-radius: 22px } .dlv-touch .gas { right: 16px; height: var(--gh) } .dlv-touch .brk { right: calc(16px + var(--pw) + 10px); height: var(--bh) }
       .dlv-touch .hrn, .dlv-touch .hb { bottom: 164px; width: 56px; height: 56px; padding: 0; font-size: 12px; line-height: 1.1; }
-      .dlv-touch .hrn { left: 25px } .dlv-touch .hb { right: 25px }
-      .dlv-touch .act { right: 16px; bottom: 232px; width: auto; height: 40px; padding: 0 14px; border-radius: 20px; font-size: 14px; }
+      .dlv-touch .hrn { left: 25px } .dlv-touch .hb { right: calc(16px + (var(--pw) - 56px) / 2); bottom: calc(var(--pb) + var(--gh) + 12px) }
+      .dlv-touch .act { right: 16px; bottom: calc(var(--pb) + var(--gh) + 80px); width: auto; height: 40px; padding: 0 14px; border-radius: 20px; font-size: 14px; }
       .dlv-touch [hidden] { display: none }
       body.dlv-on.dlv-touchy .dlv-touch { display: block }
       body.dlv-on.dlv-touchy .dlv-help, body.dlv-on.dlv-touchy .dlv-act { display: none }
@@ -547,16 +550,19 @@ export default function drive(city) {
       .compact .dlv-pop { max-width: calc(100% - 48px); box-sizing: border-box; }
       .compact .dlv-job .aboard { max-width: none }
       .compact .dlv-photo { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 8px); }
-      .compact .dlv-touch { --pb: max(16px, calc(env(safe-area-inset-bottom) + 4px)); height: auto; top: 0; }
-      .compact .dlv-touch button { bottom: var(--pb); }
+      /* portrait: tall pedals as wide as the room right of the steering buttons allows (they end at --sl + 158px) */
+      .compact .dlv-touch { --pb: max(16px, calc(env(safe-area-inset-bottom) + 4px)); --pw: clamp(56px, calc((100vw - var(--sl) - var(--sr) - 178px) / 2), 88px); height: auto; top: 0; }
       .compact .dlv-touch .l { left: var(--sl) } .compact .dlv-touch .r { left: calc(var(--sl) + 84px) }
-      .compact .dlv-touch .gas { right: var(--sr) } .compact .dlv-touch .brk { right: calc(var(--sr) + 86px); bottom: var(--pb) }
-      .compact .dlv-touch .hrn { left: calc(var(--sl) + 9px); bottom: calc(var(--pb) + 86px) } .compact .dlv-touch .hb { right: calc(var(--sr) + 9px); bottom: calc(var(--pb) + 112px) }
-      .compact .dlv-touch .act { right: var(--sr); bottom: calc(var(--pb) + 180px); height: 44px; border-radius: 22px; }
+      .compact .dlv-touch .gas { right: var(--sr) } .compact .dlv-touch .brk { right: calc(var(--sr) + var(--pw) + 10px) }
+      .compact .dlv-touch .hrn { left: calc(var(--sl) + 9px); bottom: calc(var(--pb) + 86px) } .compact .dlv-touch .hb { right: calc(var(--sr) + (var(--pw) - 56px) / 2) }
+      .compact .dlv-touch .act { right: var(--sr); height: 44px; border-radius: 22px; }
       .compact body.dlv-on .lofi { padding: 0 } .compact body.dlv-on .lofi-name, .compact body.dlv-on .lofi canvas { display: none }
-      .compact body.dlv-on.dlv-touchy .lofi { bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 112px) !important; }
-      @media (orientation: portrait) { .compact body.dlv-on.dlv-touchy .toast { bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 236px); width: max-content; } } /* over the E button */
+      .compact body.dlv-on.dlv-touchy .lofi { bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 112px) !important; } /* over Brake (--bh 96px) */
+      @media (orientation: portrait) { .compact body.dlv-on.dlv-touchy .toast { bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 264px); width: max-content; } } /* over the E button */
       @media (orientation: landscape) {
+        /* landscape: the short screen keeps the old heights, so the stack over Go ends where it did; the pedals
+           grow wide instead, up to the music player centred between the two clusters (138px wide) */
+        .compact .dlv-touch { --pw: clamp(64px, calc(25vw - var(--sr) / 2 - 44px), 100px); --gh: 100px; --bh: 88px; }
         .compact .dlv-job { max-width: min(420px, 50%); }
         .compact body.dlv-on .lofi { padding: 0 } .compact body.dlv-on .lofi-name, .compact body.dlv-on .lofi canvas { display: none }
       .compact body.dlv-on.dlv-touchy .lofi { bottom: max(16px, calc(env(safe-area-inset-bottom) + 4px)) !important; }
