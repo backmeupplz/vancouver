@@ -133,6 +133,8 @@ export const TAXI = {
   ...VAN, gears: [3.3, 2.2, 1.6, 1.22, 0.96, 0.8], rpmPer: 150, redline: 6800, up: [2600, 3000], down: [1300, 1100],
   vmax: 34, vrev: 9, push: 11, brake: 11, drag: 0.00035, lock: 0.6, lockV: 16, under: 0.0005, thr: 7, brk: 12,
   tract: 0.9, flat: 0.45, turnG: 1.7, handDrag: 1.2, slide: 0.35, handYaw: 1.6, slipBack: 1.8, nitro: 9, nvmax: 1.4, airYaw: 1.6, keep: 0.75, drift: 2.2,
+  // arcade feel: brakes that bite past the tyres (~2 g), engine braking off the gas, quick and sharp steering
+  brake: 22, brk: 30, brakeGrip: 2.2, coast: 2.2, steerRate: 13, lockV: 30, turnG: 2.6, under: 0.0002, handYaw: 1.15,
 }
 // s: { vmax (m/s), push, grip, mass (kg), tank (s of nitro), wb, hl, hw, wheel, circles, ... }: TAXI with those
 export const taxiSpec = (s) => ({ ...TAXI, ...s, length: s.hl * 2, width: s.hw * 2 })
@@ -169,11 +171,11 @@ export function stepVan(c, dt, I, grip) {
   c.speed += ((fwd ? push : -push) - (c.air ? 0 : G * Math.sin(clamp(c.pitch, -0.2, 0.2)) * (c.parked ? 0 : 0.8))) * dt // (no street is steeper than 20%)
   // holding back, never past a standstill: the brakes (as hard as the tyres allow), the handbrake, rolling, air, and
   // the engine off the gas
-  const res = c.air ? V.drag * c.speed * c.speed : c.brk * Math.min(V.brake, mu * G) + (c.parked ? 12 : I.hand ? Math.min(V.handDrag, mu * G * 0.6) : 0) + 0.15 + V.drag * c.speed * c.speed + (gas ? 0 : 0.3 + c.rpm / 9000)
+  const res = c.air ? V.drag * c.speed * c.speed : c.brk * Math.min(V.brake, mu * G * (V.brakeGrip || 1)) + (c.parked ? 12 : I.hand ? Math.min(V.handDrag, mu * G * 0.6) : 0) + 0.15 + V.drag * c.speed * c.speed + (gas ? 0 : 0.3 + c.rpm / 9000 + (V.coast || 0) * Math.min(1, sp / 8))
   c.speed = Math.abs(c.speed) <= res * dt ? 0 : c.speed - Math.sign(c.speed) * res * dt
   // steering: less lock the faster, eased in
   const maxSteer = V.lock / (1 + sp / V.lockV)
-  c.steer += (clamp(I.steer, -1, 1) * maxSteer - c.steer) * (1 - Math.exp(-(I.steer ? 6 : 9) * dt))
+  c.steer += (clamp(I.steer, -1, 1) * maxSteer - c.steer) * (1 - Math.exp(-(I.steer ? V.steerRate || 6 : (V.steerRate || 6) * 1.5) * dt))
   // turning: the bicycle model with understeer growing with speed (more on a slippery road), never more than the
   // front tyres can hold; pushing against a wall still lets it creep round as if at walking pace
   const turnV = sp < 1.2 && gas ? (fwd ? 1.2 : -1.2) : c.speed
