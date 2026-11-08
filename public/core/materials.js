@@ -223,6 +223,11 @@ export function roadMaterial(decal = false) {
 
 // ---------------------------------------------------------------- buildings (facade styles; see tile-worker.js)
 export const night = { value: 0 } // 0 day .. 1 night: lights a share of the windows (city.light.night)
+// glass balcony railings, one per building by its seed (the hex as the linear colour, as vertex colours are)
+const RAIL_GLSL = [0xb8dce0, 0xc8e4e8, 0xa8ccd8, 0xd8e8ea, 0x98c0cc].map((h, i, a) => {
+  const v = `vec3(${[h >> 16, (h >> 8) & 255, h & 255].map((c) => (c / 255).toFixed(4)).join(', ')})`
+  return i < a.length - 1 ? `seed < ${((i + 1) / a.length).toFixed(2)} ? ${v} : ` : v
+}).join('')
 export function buildingMaterial() {
   const m = new THREE.MeshLambertMaterial({ vertexColors: true })
   m.onBeforeCompile = (s) => {
@@ -253,6 +258,14 @@ export function buildingMaterial() {
         float gf = front * 4.5, zf = z - gf; // the storefront is one tall ground floor; storeys count from its top
         vec3 base = diffuseColor.rgb;
         vec3 glassC = srgb(seed < 0.45 ? vec3(0.44, 0.62, 0.68) : seed < 0.65 ? vec3(0.42, 0.54, 0.66) : seed < 0.85 ? vec3(0.42, 0.60, 0.60) : vec3(0.32, 0.42, 0.54));
+        if (style == 11.0) { // balconies (tile-worker.js): on every floor a slab front (0.4 m, the vertex colour) under a
+          // railing (1.05 m: glass, or solid in the wall's colour with bit 32), open up to the next floor
+          float g = mod(z, storey), side = abs(vWn.x);
+          if (g > 1.45) discard;
+          vec3 glassRail = ${RAIL_GLSL};
+          diffuseColor.rgb = g < 0.4 ? base * (0.86 + 0.14 * side) : (front > 0.5 ? base * (0.78 / 1.05) : glassRail) * (0.9 + 0.1 * side);
+          style = 0.0; z = 999.0; // no facade pattern, no contact shadow, no lit windows
+        }
         if (style > 0.5) {
           vec3 pat, avg, col;
           if (style == 3.0) { // glass balcony towers (the 3D slabs come in close; this is the far look)
@@ -358,7 +371,7 @@ export function buildingMaterial() {
       // the glow's strength rides in alpha, so the post pass can keep lit windows warm under a night grade
       .replace('#include <opaque_fragment>', '#include <opaque_fragment>\ngl_FragColor.a = 1.0 - min(1.0, dot(glow, vec3(0.5)));')
   }
-  m.customProgramCacheKey = () => 'building6'
+  m.customProgramCacheKey = () => 'building7'
   return m
 }
 

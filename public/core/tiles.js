@@ -54,7 +54,7 @@ export class Tiles {
     this.unitMat = new THREE.MeshLambertMaterial()
     this.quad = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0)
     this.boatGeo = boatGeos()
-    this.balconies = true
+    this.balconies = true; this.fine = true
     this.made = [] // worker results waiting to become three.js objects, one tile per frame (pump)
     this.warming = [] // tiles whose buffers are being uploaded to the GPU, a few MB per frame, before they show
     this.rush = true // while the loading screen is up: no pacing, everything at once
@@ -301,7 +301,14 @@ export class Tiles {
       geo.setAttribute('cls', new THREE.BufferAttribute(res.ground.cls, 1))
       geo.setIndex(new THREE.BufferAttribute(res.ground.index, 1))
       geo.setAttribute('normal', new THREE.BufferAttribute(res.ground.normal, 3, true))
-      add(geo, this.mats.ground, { receiveShadow: true }, res.ground.box)
+      t.ground = add(geo, this.mats.ground, { receiveShadow: true }, res.ground.box)
+      if (res.ground.coarse) { // the same vertices, fewer triangles: the map further out (setDetail)
+        const cg = new THREE.BufferGeometry()
+        for (const k of ['position', 'cls', 'normal']) cg.setAttribute(k, geo.attributes[k])
+        cg.setIndex(new THREE.BufferAttribute(res.ground.coarse, 1))
+        t.coarse = add(cg, this.mats.ground, { receiveShadow: true }, res.ground.box)
+        t.ground.visible = this.fine; t.coarse.visible = !this.fine
+      }
     }
     for (const [r, mat] of [[res.roads, this.mats.road], [res.paint, this.mats.paint]]) { // bridge surfaces; paint on the ground
       if (!r) continue
@@ -415,10 +422,15 @@ export class Tiles {
   // ready tiles, for plugins that start after some have loaded
   forEach(fn) { for (const t of this.tiles.values()) if (t.state === 'ready') fn(t) }
 
-  setBalconies(on) {
-    if (on === this.balconies) return
-    this.balconies = on
-    for (const t of this.tiles.values()) { if (t.balcony) t.balcony.visible = on; if (t.units) t.units.visible = on }
+  // what close views get: balconies and rooftop plant (`balconies`), the ground to 5 cm instead of 25 (`fine`)
+  setDetail(balconies, fine) {
+    if (balconies === this.balconies && fine === this.fine) return
+    this.balconies = balconies; this.fine = fine
+    for (const t of this.tiles.values()) {
+      if (t.balcony) t.balcony.visible = balconies
+      if (t.units) t.units.visible = balconies
+      if (t.coarse) { t.ground.visible = fine; t.coarse.visible = !fine }
+    }
   }
 
   evict() {

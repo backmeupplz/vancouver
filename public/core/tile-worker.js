@@ -103,24 +103,57 @@ function normals(terr, pos) {
 }
 const heightAt = (terr, x, y) => sampleGrid(terr.h, terr.n, terr.size, x, y) // tile-local metres, y north
 
-// ground: polygons per class, triangulated here and draped over the terrain (long edges split on slopes)
+// ground: polygons per class, triangulated here and draped over the terrain (long edges split on slopes). Detail
+// tiles carry two sets of triangles over one set of vertices: `index` follows the terrain to 5 cm (street level, close
+// zooms), `coarse` to 25 cm (the map further out, where 25 cm is under a pixel: a third of the triangles)
+const GROUND_TOL = [0.05, 0.4], GROUND_COARSE = 0.25
 function ground(t, terr, level) {
   const s = t.sections.GRND
   if (!s) return null
   const dv = t.dv
   let o = s.off
   const runs = dv.getUint16(o, true); o += 2
-  const pos = [], cls = [], idx = []
+  const pos = [], cls = [], idx = [], coarse = level === 0 ? [] : null
   const seen = new Map() // shared vertices: one per (point, class), so each tile uploads about a third as much
   const vert = (x, y, c, lift) => {
     const key = Math.round(x * 50) * 1e7 + Math.round(y * 50) + c * 1e14
     let i = seen.get(key)
-    if (i === undefined) { i = pos.length / 3; seen.set(key, i); const h = heightAt(terr, x, y); pos.push(x, (c === PIER ? Math.max(h, 0.45) : h) + lift, -y); cls.push(c) }
+    if (i === undefined) { i = pos.length / 3; seen.set(key, i); pos.push(x, hz(x, y, c) + lift, -y); cls.push(c) }
     return i
   }
   let hmin = Infinity, hmax = -Infinity
   for (const v of terr.h) { hmin = Math.min(hmin, v); hmax = Math.max(hmax, v) }
-  const maxEdge = hmax - hmin < 2 ? Infinity : t.size / (terr.n - 1) // one terrain cell
+  // Triangles are split where the terrain bends under them, not everywhere: an edge is halved while the ground along it
+  // strays more than tol from the straight line between its ends, or it is longer than 4 terrain cells. The test
+  // looks at the edge alone, so both triangles that share an edge split it alike (no cracks; where polygons meet, a gap
+  // is under tol); slopes and flat ground keep big triangles (an 8 m grid split everywhere was ~3x the triangles for the same picture).
+  const cell = t.size / (terr.n - 1), cap = hmax - hmin < 2 ? Infinity : cell * 4
+  const hz = (x, y, c) => { const h = heightAt(terr, x, y); return c === PIER ? Math.max(h, 0.45) : h }
+  const bends = (ax, ay, bx, by, c, tol) => {
+    const L = Math.hypot(bx - ax, by - ay)
+    if (L > cap) return true
+    if (cap === Infinity || L < 1.5) return false
+    const ha = hz(ax, ay, c), hb = hz(bx, by, c), k = Math.ceil(L / (cell / 2))
+    for (let i = 1; i < k; i++) { const f = i / k; if (Math.abs(hz(ax + (bx - ax) * f, ay + (by - ay) * f, c) - ha - (hb - ha) * f) > tol) return true }
+    return false
+  }
+  // one triangle into `out`, split first along the longest edge that bends
+  const emit = (out, tol, c, lift, ax, ay, bx, by, cx, cy, depth) => {
+    if (depth < 20) {
+      const ab = bends(ax, ay, bx, by, c, tol) ? Math.hypot(bx - ax, by - ay) : 0, bc = bends(bx, by, cx, cy, c, tol) ? Math.hypot(cx - bx, cy - by) : 0
+      const ca = bends(cx, cy, ax, ay, c, tol) ? Math.hypot(ax - cx, ay - cy) : 0, m = Math.max(ab, bc, ca), d = depth + 1
+      if (m > 0) {
+        if (m === ab) { const mx = (ax + bx) / 2, my = (ay + by) / 2; emit(out, tol, c, lift, ax, ay, mx, my, cx, cy, d); emit(out, tol, c, lift, mx, my, bx, by, cx, cy, d) }
+        else if (m === bc) { const mx = (bx + cx) / 2, my = (by + cy) / 2; emit(out, tol, c, lift, ax, ay, bx, by, mx, my, d); emit(out, tol, c, lift, ax, ay, mx, my, cx, cy, d) }
+        else { const mx = (cx + ax) / 2, my = (cy + ay) / 2; emit(out, tol, c, lift, ax, ay, bx, by, mx, my, d); emit(out, tol, c, lift, mx, my, bx, by, cx, cy, d) }
+        return
+      }
+    }
+    const va = vert(ax, ay, c, lift), vb = vert(bx, by, c, lift), vc = vert(cx, cy, c, lift)
+    // face up: earcut keeps the ring's winding; pick the order whose normal points +y
+    const cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    if (cross > 0) out.push(va, vb, vc); else out.push(va, vc, vb)
+  }
   for (let r = 0; r < runs; r++) {
     const c = dv.getUint8(o), np = dv.getUint32(o + 1, true); o += 5
     const lift = c * GROUND_LIFT + 0.02
@@ -133,29 +166,17 @@ function ground(t, terr, level) {
         for (const v of pts) flat.push(v)
       }
       const tri = earcut(flat, holes)
-      const emit = (ax, ay, bx, by, cx, cy, depth) => { // split long triangles so the ground follows the hills
-        const ab = Math.hypot(bx - ax, by - ay), bc = Math.hypot(cx - bx, cy - by), ca = Math.hypot(ax - cx, ay - cy), m = Math.max(ab, bc, ca)
-        if (m > maxEdge && depth < 20) {
-          if (m === ab) { const mx = (ax + bx) / 2, my = (ay + by) / 2; emit(ax, ay, mx, my, cx, cy, depth + 1); emit(mx, my, bx, by, cx, cy, depth + 1) }
-          else if (m === bc) { const mx = (bx + cx) / 2, my = (by + cy) / 2; emit(ax, ay, bx, by, mx, my, depth + 1); emit(ax, ay, mx, my, cx, cy, depth + 1) }
-          else { const mx = (cx + ax) / 2, my = (cy + ay) / 2; emit(ax, ay, bx, by, mx, my, depth + 1); emit(mx, my, bx, by, cx, cy, depth + 1) }
-          return
-        }
-        const va = vert(ax, ay, c, lift), vb = vert(bx, by, c, lift), vc = vert(cx, cy, c, lift)
-        // face up: earcut keeps the ring's winding; pick the order whose normal points +y
-        const cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
-        if (cross > 0) idx.push(va, vb, vc); else idx.push(va, vc, vb)
-      }
       for (let i = 0; i < tri.length; i += 3) {
         const a = tri[i] * 2, b = tri[i + 1] * 2, d = tri[i + 2] * 2
-        emit(flat[a], flat[a + 1], flat[b], flat[b + 1], flat[d], flat[d + 1], 0)
+        emit(idx, GROUND_TOL[level], c, lift, flat[a], flat[a + 1], flat[b], flat[b + 1], flat[d], flat[d + 1], 0)
+        if (coarse) emit(coarse, GROUND_COARSE, c, lift, flat[a], flat[a + 1], flat[b], flat[b + 1], flat[d], flat[d + 1], 0)
       }
     }
   }
   const nv = pos.length / 3
   if (!nv) return null
-  const P = new Float32Array(pos)
-  return { position: P, normal: normals(terr, P), cls: new Uint8Array(cls), index: nv > 65535 ? new Uint32Array(idx) : new Uint16Array(idx) }
+  const P = new Float32Array(pos), I = nv > 65535 ? Uint32Array : Uint16Array
+  return { position: P, normal: normals(terr, P), cls: new Uint8Array(cls), index: new I(idx), coarse: coarse && new I(coarse) }
 }
 
 // detail tiles: a WATER_N x WATER_N mask (1 = water), cell (i east, j north) from the tile's SW corner
@@ -354,7 +375,6 @@ const hex = (h) => [((h >> 16) & 255) / 255, ((h >> 8) & 255) / 255, (h & 255) /
 // colours meant as seen (OSM building:colour / roof:colour, the material palettes): vertex colours are linear
 const lin = (h) => hex(h).map((c) => c ** 1.8) // a little lighter than linear: the stylized map reads brighter than a photo
 const shade = (c, f) => [Math.min(1, c[0] * f), Math.min(1, c[1] * f), Math.min(1, c[2] * f)]
-const RAIL = [0xb8dce0, 0xc8e4e8, 0xa8ccd8, 0xd8e8ea, 0x98c0cc].map(hex)
 
 function buildings(t, terr, level) {
   const s = t.sections.BLDG
@@ -462,22 +482,21 @@ function buildings(t, terr, level) {
         }
       }
     } else roof(W, pts, y1, base + ridge, roofShape, roofBits, roofC, wall, seed)
-    // balconies: a slab and a railing (glass, or concrete on the older towers) on every floor, all the way round
+    // balconies: a slab and a railing (glass, or concrete on the older towers) on every floor, all the way round.
+    // The slab tops are geometry; the slab fronts and railings of all the floors are one sheet per wall, 1.15 m out
+    // from it, that materials.js draws them on, open between them (2 triangles a floor and wall instead of 6)
     if (balc) {
-      const D = 1.15, ring = offset(pts, D)
-      const slabC = shade(wall, 1.05), railC = bk === 3 || !bk && style0 === 7 ? shade(wall, 0.78) : RAIL[Math.floor(seed * RAIL.length)], pw = ROOFW(seed)
-      const fy0 = base + Math.max(mn, front ? 4.5 : 0) + storey
-      for (let fy = Math.max(fy0, y0 + 2.5); fy < y1 - 2.4; fy += storey) {
-        for (let i = 0; i < np; i++) {
-          const a = pts[i], p = pts[(i + 1) % np], A = ring[i], P = ring[(i + 1) % np]
-          const len = Math.hypot(p[0] - a[0], p[1] - a[1])
-          if (len < 2.5) continue
-          const nx = (p[1] - a[1]) / len, nz = (p[0] - a[0]) / len
-          if (facing && !faces(facing, nx, -nz)) continue
-          quad(Bal, [a[0], fy, -a[1]], [p[0], fy, -p[1]], [P[0], fy, -P[1]], [A[0], fy, -A[1]], slabC, [0, 1, 0], pw)
-          quad(Bal, [A[0], fy - 0.4, -A[1]], [P[0], fy - 0.4, -P[1]], [P[0], fy, -P[1]], [A[0], fy, -A[1]], shade(slabC, 0.86 + 0.14 * Math.abs(nx)), [nx, 0, nz], pw)
-          quad(Bal, [A[0], fy, -A[1]], [P[0], fy, -P[1]], [P[0], fy + 1.05, -P[1]], [A[0], fy + 1.05, -A[1]], shade(railC, 0.9 + 0.1 * Math.abs(nx)), [nx, 0, nz], pw)
-        }
+      const D = 1.15, ring = offset(pts, D), solid = bk === 3 || !bk && style0 === 7, slabC = shade(wall, 1.05), pw = ROOFW(seed)
+      const fy0 = Math.max(base + Math.max(mn, front ? 4.5 : 0) + storey, y0 + 2.5), floors = Math.ceil((y1 - 2.4 - fy0) / storey)
+      const b0 = fy0 - 0.4, b1 = fy0 + (floors - 1) * storey + 1.05, bw = (yy) => [11 + (fq + (solid ? 32 : 0)) / 64, 0, yy - b0, seed]
+      for (let i = 0; floors > 0 && i < np; i++) {
+        const a = pts[i], p = pts[(i + 1) % np], A = ring[i], P = ring[(i + 1) % np]
+        const len = Math.hypot(p[0] - a[0], p[1] - a[1])
+        if (len < 2.5) continue
+        const nx = (p[1] - a[1]) / len, nz = (p[0] - a[0]) / len
+        if (facing && !faces(facing, nx, -nz)) continue
+        quad(Bal, [A[0], b0, -A[1]], [P[0], b0, -P[1]], [P[0], b1, -P[1]], [A[0], b1, -A[1]], slabC, [nx, 0, nz], bw(b0), bw(b0), bw(b1), bw(b1))
+        for (let k = 0, fy = fy0; k < floors; k++, fy += storey) quad(Bal, [a[0], fy, -a[1]], [p[0], fy, -p[1]], [P[0], fy, -P[1]], [A[0], fy, -A[1]], slabC, [0, 1, 0], pw)
       }
     }
   }

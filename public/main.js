@@ -466,11 +466,11 @@ function loop(now) {
   dirty = false
   if (own) {
     tiles.update(own.camera, own.opts.focus, own.opts.radius)
-    tiles.setBalconies(quality.tier.detail)
+    tiles.setDetail(quality.tier.detail, true)
     if (own.opts.focus.distanceTo(ownSeen) > 20) { ownSeen.copy(own.opts.focus); city?.emit('view', city.view) }
   } else {
     tiles.update(cam, controls.target)
-    tiles.setBalconies(quality.tier.detail && cam.zoom >= 0.3)
+    tiles.setDetail(quality.tier.detail && cam.zoom >= 0.3, cam.zoom >= 0.3)
   }
   if (!own && now - lastGroundCheck > 300) { // keep the orbit target on the ground
     lastGroundCheck = now
