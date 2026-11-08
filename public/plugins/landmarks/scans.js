@@ -19,10 +19,15 @@ export default function scans(city) {
   const mat = buildingMaterial()
   const L = Object.entries(man).map(([id, l], k) => {
     const a = city.world.fromLatLon(...l.at)
-    const g = Math.min(...l.rings.flatMap((r) => pairs(r).map(([la, lo]) => { const p = city.world.fromLatLon(la, lo); return city.world.heightAt(p.x, p.z) })))
-    return { id, l, x: a.x, z: a.z, g, seed: ((k * 0.618034) % 1) * 0.98 + 0.01, mesh: [], loading: [], want: 0, shown: 0 }
+    const foot = l.rings.flatMap((r) => pairs(r).map(([la, lo]) => { const p = city.world.fromLatLon(la, lo); return [p.x, p.z] }))
+    return { id, l, x: a.x, z: a.z, foot, g: groundOf(foot), seed: ((k * 0.618034) % 1) * 0.98 + 0.01, mesh: [], loading: [], want: 0, shown: 0 }
   })
   const kind = (pattern, l) => pattern + l.storey / 64
+  // stood on the lowest drawn ground round its outline: the map's ground as loaded now (the coarse 64 m grid at the
+  // start, the detail tiles' later), so it is stood again as finer tiles come in (meshes moved, the massing rebuilt)
+  function groundOf(foot) { return Math.min(...foot.map(([x, z]) => city.world.heightAt(x, z))) }
+  let reground = false
+  const offTile = city.on('tile:load', () => { reground = true })
 
   // ---------- far: the footprint massing of every landmark not drawn near ----------
   let far = null
@@ -78,13 +83,13 @@ export default function scans(city) {
     const pos = new Float32Array(nt * 9), col = new Float32Array(nt * 9), win = new Float32Array(nt * 12)
     const v = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()], n = new THREE.Vector3(), e = new THREE.Vector3()
     for (let t = 0; t < nt; t++) {
-      for (let j = 0; j < 3; j++) { const i = I[t * 3 + j] * 3; v[j].set(s.x + P[i] * q, s.g + P[i + 1] * q, s.z + P[i + 2] * q) }
+      for (let j = 0; j < 3; j++) { const i = I[t * 3 + j] * 3; v[j].set(s.x + P[i] * q, P[i + 1] * q, s.z + P[i + 2] * q) }
       n.subVectors(v[1], v[0]).cross(e.subVectors(v[2], v[0]))
       const hl = Math.hypot(n.x, n.z) || 1, tx = -n.z / hl, tz = n.x / hl // along the wall, level
       const c = [C[t * 3], C[t * 3 + 1], C[t * 3 + 2]].map((x) => (x / 255) ** 1.8)
       for (let j = 0; j < 3; j++) {
         pos.set([v[j].x, v[j].y, v[j].z], t * 9 + j * 3); col.set(c, t * 9 + j * 3)
-        win.set(S[t] ? [kind(S[t], s.l), v[j].x * tx + v[j].z * tz, v[j].y - s.g, s.seed + s.l.use] : [0, 0, 999, s.seed], t * 12 + j * 4)
+        win.set(S[t] ? [kind(S[t], s.l), v[j].x * tx + v[j].z * tz, v[j].y, s.seed + s.l.use] : [0, 0, 999, s.seed], t * 12 + j * 4)
       }
     }
     const geo = new THREE.BufferGeometry()
@@ -93,6 +98,7 @@ export default function scans(city) {
     geo.setAttribute('aWin', new THREE.BufferAttribute(win, 4))
     geo.computeVertexNormals() // not indexed: flat
     s.mesh[lv] = add(new THREE.Mesh(geo, mat))
+    s.mesh[lv].position.y = s.g
     show(s) && buildFar()
     city.requestRender()
   }
@@ -108,6 +114,15 @@ export default function scans(city) {
   function check() {
     const c = city.view.center, mpp = city.view.metresPerPixel
     let changed = false, moved = false
+    if (reground) {
+      reground = false
+      for (const s of L) {
+        const g = groundOf(s.foot)
+        if (Math.abs(g - s.g) < 0.05) continue
+        s.g = g; s.far = null; moved = true; changed ||= !s.shown
+        for (const m of s.mesh) if (m) m.position.y = g
+      }
+    }
     for (const s of L) {
       const d = Math.hypot(s.x - c.x, s.z - c.z) - s.l.r, k = s.want ? 1.15 : 1
       const want = mpp > 4 || d > NEAR * k ? 0 : mpp < 0.5 * k && d < NEAR * 0.4 * k ? 2 : 1
@@ -126,7 +141,7 @@ export default function scans(city) {
   for (const r of scanMasks) city.world.suppressBuildings?.(r)
   return {
     dispose() {
-      dead = true; offFrame(); offView()
+      dead = true; offFrame(); offView(); offTile()
       for (const m of [far, ...L.flatMap((s) => s.mesh)]) if (m) { city.scene.remove(m); m.geometry.dispose() }
       mat.dispose()
     },

@@ -24,7 +24,10 @@ export function treeForm(THREE, shape, lo = false) {
   const ico = (d) => { if (!ICO.has(d)) ICO.set(d, new THREE.IcosahedronGeometry(1, d).attributes.position.array); return ICO.get(d) }
   // a lump of leaves: a jittered icosahedron (corners pushed in or out alike, so no cracks), each face shaded by
   // which way it faces (the underside darker) and `s` (lower lumps darker: the crown shades itself)
+  const lumps = [], limbEnds = [] // the crown's lumps (centre, radii, vertex range); where each limb ends, in which lump
   const blob = (x, y, z, rx, ry = rx, rz = rx, d = 0, s = 1) => {
+    const L = { x, y, z, rx, ry, rz, s: k.at() }
+    lumps.push(L)
     const P = ico(lo ? 0 : d), a = rnd() * T, ca = Math.cos(a), sa = Math.sin(a), v = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
     for (let i = 0; i < P.length; i += 9) {
       let ny = 0
@@ -36,6 +39,8 @@ export function treeForm(THREE, shape, lo = false) {
       leaf(s * (0.58 + 0.42 * smooth(-0.75, 0.75, ny)))
       k.tri(v[0], v[1], v[2])
     }
+    L.e = k.at()
+    return L
   }
   // a cone of a conifer's tier: rim at y0 radius r, tip h above; `droop` bends the outer part of the layer down
   // (a shoulder at 70% of the radius), the rim ragged; the underside dark
@@ -49,32 +54,40 @@ export function treeForm(THREE, shape, lo = false) {
     k.xf(from, (p) => { if (p.y < y0 + 1e-6 && p.x * p.x + p.z * p.z > r * r * 0.9) p.y -= h * 0.22 * hash(p.x, 0, p.z) })
   }
   const trunk = (top, r0, r1 = r0 * 0.7, hex) => { bark(hex); k.cyl(r0, r1, top, lo ? 5 : 6, 0) }
-  const limb = (a, b, r0, r1 = r0 * 0.6) => { bark(); k.rod(a, b, r0, r1, lo ? 4 : 5) }
-  // limbs fanning out of the trunk at y0 to radius rr at y1 (angles from a0): branch stubs under a crown, a vase's arms
-  const limbs = (n, y0, y1, rr, r0, a0 = rnd() * T) => { for (let i = 0; i < n; i++) { const a = a0 + (i * T) / n + (rnd() - 0.5) * 0.6; limb([0, y0, 0], [Math.cos(a) * rr, y1, Math.sin(a) * rr], r0) } }
-  // lumps on a ring: n of radius r at distance d, heights y ± dy
-  const ring = (n, d, y, dy, r, ry, s, a0 = rnd() * T) => { for (let i = 0; i < n; i++) { const a = a0 + (i * T) / n + (rnd() - 0.5) * 0.5; blob(Math.cos(a) * d, y + (rnd() - 0.5) * dy, Math.sin(a) * d, r * (0.85 + rnd() * 0.3), ry, r, 0, s * (0.9 + rnd() * 0.12)) } }
+  const limb = (a, b, r0, L, r1 = r0 * 0.6) => { bark(); k.rod(a, b, r0, r1, lo ? 4 : 5); limbEnds.push([...b, lumps.indexOf(L)]) }
+  // limbs fanning out of the trunk at y0 into the crown: each ends inside one of the lumps it is given (well inside: a
+  // coarse lump's faces sit at 0.68 of its radius), the off-centre ones toward their own side, a central one spread
+  // round it; so a limb reaches its leaves however the tree is sized or its crown pruned up (trees3d.js, the atlas)
+  const limbs = (n, y0, r0, into) => {
+    const side = into.filter((L) => Math.hypot(L.x, L.z) > 0.05), a0 = rnd() * T
+    for (let i = 0; i < n; i++) {
+      const L = side.length ? side[Math.floor((i * side.length) / n)] : into[i % into.length]
+      const a = side.length ? Math.atan2(L.z, L.x) : a0 + (i * T) / n + (rnd() - 0.5) * 0.6, f = side.length ? -0.2 : 0.5
+      limb([0, y0, 0], [L.x + Math.cos(a) * f * L.rx, L.y - 0.32 * L.ry, L.z + Math.sin(a) * f * L.rz], r0, L)
+    }
+  }
+  // lumps on a ring: n of radius r at distance d, heights y ± dy (returns them)
+  const ring = (n, d, y, dy, r, ry, s, a0 = rnd() * T) => Array.from({ length: n }, (_, i) => { const a = a0 + (i * T) / n + (rnd() - 0.5) * 0.5; return blob(Math.cos(a) * d, y + (rnd() - 0.5) * dy, Math.sin(a) * d, r * (0.85 + rnd() * 0.3), ry, r, 0, s * (0.9 + rnd() * 0.12)) })
 
   switch (shape) {
     case 1: // columnar: a tall spindle of leaves from low down
       trunk(0.3, 0.035)
-      if (!lo) limbs(2, 0.12, 0.3, 0.18, 0.016)
-      blob(0, 0.36, 0, 0.36, 0.22, 0.36, 0, 0.78)
+      if (!lo) limbs(2, 0.12, 0.016, [blob(0, 0.36, 0, 0.36, 0.22, 0.36, 0, 0.78)])
+      else blob(0, 0.36, 0, 0.36, 0.22, 0.36, 0, 0.78)
       blob(0, 0.55, 0, 0.5, 0.27, 0.5, 1, 0.9)
       blob(0, 0.75, 0, 0.42, 0.22, 0.42, 0, 1)
       if (!lo) blob(0.05, 0.9, 0, 0.26, 0.14, 0.26, 0, 1.06)
       break
     case 2: // spreading: a broad low dome on a stout trunk forking into limbs
       trunk(0.42, 0.032, 0.026)
-      limbs(lo ? 2 : 4, 0.3, 0.55, 0.3, 0.018)
       blob(0, 0.72, 0, 0.36, 0.24, 0.36, 1, 1)
-      ring(lo ? 4 : 6, 0.32, 0.62, 0.12, 0.2, 0.17, 0.92)
+      limbs(lo ? 2 : 4, 0.3, 0.018, ring(lo ? 4 : 6, 0.32, 0.62, 0.12, 0.2, 0.17, 0.92))
       if (!lo) ring(3, 0.16, 0.86, 0.06, 0.2, 0.14, 1.06)
       break
     case 3: // weeping: a dome with curtains of leaves hanging to near the ground
       trunk(0.62, 0.028)
-      if (!lo) limbs(3, 0.45, 0.7, 0.25, 0.014)
-      blob(0, 0.78, 0, 0.36, 0.2, 0.36, 1, 1.02)
+      if (!lo) limbs(3, 0.45, 0.014, [blob(0, 0.78, 0, 0.36, 0.2, 0.36, 1, 1.02)])
+      else blob(0, 0.78, 0, 0.36, 0.2, 0.36, 1, 1.02)
       for (let i = 0, n = lo ? 5 : 8; i < n; i++) {
         const a = (i * T) / n + (rnd() - 0.5) * 0.4, d = 0.36 + rnd() * 0.06
         blob(Math.cos(a) * d, 0.5 - rnd() * 0.06, Math.sin(a) * d, 0.13, 0.36, 0.13, 0, 0.82 + rnd() * 0.12)
@@ -98,7 +111,7 @@ export function treeForm(THREE, shape, lo = false) {
       bark(); k.rod([0, 0, 0], [0.04, 0.5, 0], 0.032, 0.026, lo ? 5 : 6); k.rod([0.04, 0.5, 0], [-0.03, 0.88, 0.02], 0.026, 0.016, lo ? 5 : 6)
       const clumps = lo ? [[0, 0.88, 0, 0.3], [0.26, 0.66, 0.1, 0.24], [-0.24, 0.6, -0.14, 0.22]]
         : [[0, 0.9, 0, 0.3], [0.28, 0.7, 0.08, 0.24], [-0.26, 0.62, -0.12, 0.23], [0.06, 0.74, -0.3, 0.2], [-0.14, 0.8, 0.26, 0.2]]
-      for (const [x, y, z, r] of clumps) { if (x || z) limb([0.02, y - 0.12, 0], [x * 0.8, y - 0.02, z * 0.8], 0.013); blob(x, y, z, r, r * 0.45, r, x || z ? 0 : 1, 0.82 + y * 0.2) }
+      for (const [x, y, z, r] of clumps) { const L = blob(x, y, z, r, r * 0.45, r, x || z ? 0 : 1, 0.82 + y * 0.2); if (x || z) limb([0.02, y - 0.12, 0], [x * 0.8, y - 0.02, z * 0.8], 0.013, L) }
       break
     }
     case 7: { // palm: a ringed trunk, arching fronds
@@ -120,15 +133,14 @@ export function treeForm(THREE, shape, lo = false) {
     }
     case 8: // vase: limbs fanning up and out from a short trunk to a broad flat-topped crown
       trunk(0.3, 0.03, 0.026)
-      limbs(lo ? 3 : 5, 0.26, 0.66, 0.3, 0.018)
-      ring(lo ? 4 : 7, 0.3, 0.74, 0.08, 0.22, 0.16, 0.92)
+      limbs(lo ? 3 : 5, 0.26, 0.018, ring(lo ? 4 : 7, 0.3, 0.74, 0.08, 0.22, 0.16, 0.92))
       blob(0, 0.84, 0, 0.32, 0.17, 0.32, 1, 1.05)
       break
     default: // round: a full head of lumps on a single trunk
       trunk(0.5, 0.03)
-      if (!lo) limbs(3, 0.32, 0.52, 0.2, 0.015)
       blob(0, 0.66, 0, 0.42, 0.3, 0.42, 1, 0.98)
-      ring(lo ? 3 : 5, 0.3, 0.58, 0.14, 0.22, 0.2, 0.86)
+      if (!lo) limbs(3, 0.32, 0.015, ring(5, 0.3, 0.58, 0.14, 0.22, 0.2, 0.86))
+      else ring(3, 0.3, 0.58, 0.14, 0.22, 0.2, 0.86)
       if (!lo) blob(0.04, 0.86, -0.06, 0.24, 0.16, 0.24, 0, 1.08)
   }
   // to unit size: 1 tall, the crown 1 wide (the instance scales it to the tree's height and crown width)
@@ -136,6 +148,8 @@ export function treeForm(THREE, shape, lo = false) {
   let top = 0, wide = 0
   for (let i = 0; i < part.length; i++) { top = Math.max(top, P[i * 3 + 1]); if (!part[i]) wide = Math.max(wide, Math.hypot(P[i * 3], P[i * 3 + 2])) }
   g.scale(0.5 / wide, 1 / top, 0.5 / wide)
+  // for tools/trees_check.mjs: each limb's end (unit size) and the lump it ends in (its vertex range)
+  g.userData = { limbs: limbEnds.map(([x, y, z, l]) => [(x * 0.5) / wide, y / top, (z * 0.5) / wide, l]), lumps: lumps.map((L) => [L.s, L.e]) }
   g.setAttribute('color', g.attributes.aCol)
   g.setAttribute('crown', new THREE.Float32BufferAttribute(part.map((p) => 1 - p), 1))
   for (const a of ['aCol', 'aPart', 'aSwing']) g.deleteAttribute(a)

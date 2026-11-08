@@ -17,6 +17,7 @@ from common import digest, file_digest, files_digest, code_key, code_data, cpu_s
 from roofs import roof_lookup, valid_poly
 from facades import facade_lookup, NONE as B_NONE, GLASS as B_GLASS, SOLID as B_SOLID
 from lidar_massing import massing_lookup, walls_near
+from geom_rules import apply_rules
 
 OUT = os.environ.get('OUT', 'public/tiles')
 
@@ -367,9 +368,9 @@ def build(ij):
         shapely.prepare(holes); L_ = np.array(lids)
         for b in builds:
             B = Polygon(b['ring'])
-            if not holes.intersects(B): continue
+            if not holes.intersects(B) or holes.intersection(B.buffer(0)).area < 0.5 * B.area: continue  # mostly beside the box: on the ground (a mall, a parkade by a portal)
             on = L_[shapely.contains_xy(B.buffer(4), L_[:, 0], L_[:, 1])]
-            if len(on): b['mn'] = max(b['mn'] or 0.0, float(on[:, 2].max()) - b['base'])
+            if len(on): b['mn'] = max(b['mn'] or 0.0, float(on[:, 2].max()) - b['base']); b['lid'] = True
         builds = [b for b in builds if (b['mn'] or 0) < b['h'] - 1]
 
     # ---- docks: piers and floating docks mapped as lines (a marina's walkways and fingers) are decks on the water;
@@ -425,6 +426,10 @@ def build(ij):
     # ---- write the 16 detail tiles and the medium tile
     n = 0
     ground8 = road_ground(dtm, road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0, own=False), X0, Y0, lines)  # 8 m, fitted to the streets
+    # the geometry rules (tools/geom_rules.py): their fixes on this cell's buildings, then what is left
+    g8 = lambda x, y: ndimage.map_coordinates(ground8, [(Y0 + L1 - np.asarray(y)) / 8, (np.asarray(x) - X0) / 8], order=1, mode='nearest')
+    rules = apply_rules(dict(builds=builds, ground=g8, decks=[(np.asarray(L['pts'], float), np.asarray(L['z']), L['w']) for L in lines if L['z'] and not L.get('tube')]))
+    rules = {k: (n, len(left)) for k, (n, left) in rules.items()}
     for a in range(4):
         for b in range(4):
             tx, ty = X0 + a * L0, Y0 + b * L0
@@ -442,7 +447,7 @@ def build(ij):
     write_tile(out, X0, Y0, L1, terr, polys, lines, builds, trees, detail=False, water_only=sea.all(), pois=[])
     os.makedirs(f'{OUT}/1', exist_ok=True)
     write_if_changed(f'{OUT}/1/{i}_{j}.bin', out.bytes())
-    return ij, 'ok', round(time.time() - t0, 1), n, len(builds), len(trees), f'trunks off streets: {moved} moved, {dropped} dropped'
+    return ij, 'ok', round(time.time() - t0, 1), n, len(builds), len(trees), f'trunks off streets: {moved} moved, {dropped} dropped', rules
 
 
 BEACH_OFF = ('water', 'pool', 'pier', 'road', 'arterial', 'sidewalk', 'blvd', 'walk', 'cycle', 'parking', 'plaza', 'pitch', 'playground')
@@ -932,10 +937,13 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
     pix = lambda x, y: ((x - X0) / HR, (Y0 + L1 - y) / HR)
     own = lambda c: X0 <= c[0] < X0 + L1 and Y0 <= c[1] < Y0 + L1
     rows = []
-    parts_c = []
+    parts_c, parts_p = [], []  # the parts' centres, and their outlines with their min heights
     for oid, prs, t in items:
         if 'building:part' in t and 'building' not in t:
-            for outer, _ in prs: parts_c.append(np.mean(outer[:-1], axis=0))
+            for outer, _ in prs:
+                if len(outer) < 4: continue
+                parts_c.append(np.mean(outer[:-1], axis=0))
+                parts_p.append((Polygon(outer).buffer(0), hnum(t.get('min_height')) or (hnum(t.get('building:min_level')) or 0) * 3.1))
     parts_c = np.array(parts_c) if parts_c else np.zeros((0, 2))
     seen = set()
     for oid, prs, t in items:
@@ -950,14 +958,30 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
             a = ring_area(r)
             if a < 4: continue
             is_part = 'building:part' in t and 'building' not in t
+            cap = None
             if not is_part and len(parts_c):
                 xs = [p[0] for p in r]; ys = [p[1] for p in r]
-                sel = parts_c[(parts_c[:, 0] > min(xs)) & (parts_c[:, 0] < max(xs)) & (parts_c[:, 1] > min(ys)) & (parts_c[:, 1] < max(ys))]
-                if len(sel) and any(Polygon(r).contains(shapely.geometry.Point(p)) for p in sel[:20]): continue  # parts carry the shape
+                sel = np.nonzero((parts_c[:, 0] > min(xs)) & (parts_c[:, 0] < max(xs)) & (parts_c[:, 1] > min(ys)) & (parts_c[:, 1] < max(ys)))[0]
+                B = Polygon(r).buffer(0)
+                sel = [k for k in sel if B.contains(shapely.geometry.Point(parts_c[k]))]
+                if sel:  # parts carry the shape, unless some of them start up in the air over nothing the parts draw (a
+                    # tower mapped as a part from the podium's roof up, the podium only as the outline): then the outline
+                    # stands up to the lowest of them, round the parts that do stand on the ground
+                    low = unary_union([parts_p[k][0] for k in sel if parts_p[k][1] < 1] or [Polygon()])
+                    air = [parts_p[k] for k in sel if parts_p[k][1] >= 1]
+                    bare = unary_union([q for q, _ in air] or [Polygon()]).difference(low.buffer(0.5)).intersection(B)
+                    if bare.area < max(10, 0.2 * sum(q.area for q, _ in air)): continue
+                    cap = min(m for _, m in air)
+                    rest = B.difference(low)
+                    for g in getattr(rest, 'geoms', [rest]):
+                        if g.geom_type != 'Polygon' or g.area < 4: continue
+                        rr = list(g.exterior.coords)[:-1]
+                        rows.append((rr, t, g.area, tuple(np.mean(rr, axis=0)), False, cap))
+                    continue
             key = (round(c[0] * 2), round(c[1] * 2), round(a / 4))
             if key in seen: continue
             seen.add(key)
-            rows.append((r, t, a, c, is_part))
+            rows.append((r, t, a, c, is_part, cap))
 
     def measure(r):
         """the LiDAR inside a ring: (heights above base on the 2 m grid, usable cells, NW corner, base) or None"""
@@ -980,7 +1004,7 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
         return z, ok, fx, base, full & free & (z > 1.5)  # last: every roof cell, eaves included (for roof pitch fits)
 
     out = []
-    for r, t, a, c, is_part in rows:
+    for r, t, a, c, is_part, cap in rows:
         mz = measure(r)
         if mz is None: continue
         z, ok, fx, base, roofm = mz
@@ -994,9 +1018,9 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
         info = dict(t=t, btype=btype, a=a, shop=shop, lv=lv, ind=ind is not None and shapely.contains_xy(ind, c[0], c[1]), zone=zone(c),
                     fac=fac, year=start_year(t) or fac.get('year') or None, ring=r)
         gid = rnd.randrange(1, 1 << 30)
-        parts = None
-        ms = massing_lookup(r) if not mn else None  # tools/lidar_massing.py: the 2022 LiDAR's own massing, where it has one
-        if ms and not (tag_h and abs(tag_h - max(p['ridge'] or p['h'] for p in ms)) > max(6, 0.3 * tag_h)):
+        parts = [dict(ring=r, h=cap, mn=0, roof=0, ridge=0, pitch=0, units=None)] if cap else None  # under its parts
+        ms = massing_lookup(r) if not mn and not cap else None  # tools/lidar_massing.py: the 2022 LiDAR's own massing, where it has one
+        if ms and not parts and not (tag_h and abs(tag_h - max(p['ridge'] or p['h'] for p in ms)) > max(6, 0.3 * tag_h)):
             parts = [dict(p, pitch=0, m22=True) for p in ms]
         if parts is None and chm is not None and not is_part and not mn and pct(chm, 90) > 2.2:
             p97 = float(pct(chm, 97))
@@ -1016,8 +1040,9 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
                 if z is not None and rf_ in (1, 2, 5):  # the mapper's roof shape, the LiDAR's ridge direction
                     f = fit_roof(r, z, roofm, fx, shape)
                     if f: rf_ = f[0]
-            parts = [dict(ring=r, h=h, mn=mn, roof=rf_, ridge=ridge or 0, pitch=0, units=None)]
+            parts = [dict(ring=r, h=h, mn=mn, roof=rf_, ridge=ridge or 0, pitch=0, units=None, tagmn=bool(mn))]  # (a mapped min height: geom_rules leaves it up)
         for p in parts:
+            if p['mn'] and p['mn'] >= max(p['h'], p['ridge'] or 0) - 0.3: continue  # its min height over its top (mistagged): nothing to draw
             p.update(base=base, gid=gid, info=info, a=ring_area(p['ring']))
             if p['units'] is None and z is not None and not p['roof']: p['units'] = []  # LiDAR here: no made-up plant
             out.append(p)
@@ -2321,11 +2346,15 @@ if __name__ == '__main__':
     man = manifest(OUT); cells = man.setdefault('cells', {})
     jobs = [(ij, None if os.environ.get('FORCE') == '1' else cells.get('%d_%d' % ij)) for ij in want]
     n = dict(same=0, ok=0, sea=0, FAILED=0)
+    rules = {}  # geometry rules over the cells baked: name -> [fixed, left]
     with Pool(procs) as p:
         for r in p.imap_unordered(safe_build, jobs):
             n[r[1]] += 1
+            if r[1] == 'ok':
+                for k, v in r[-2].items(): rules[k] = [a + b for a, b in zip(rules.get(k, [0, 0]), v)]
             if r[1] != 'FAILED': cells['%d_%d' % r[0]] = r[-1]; save_manifest(OUT, man)
             if r[1] != 'same': print(r[:-1] if r[1] != 'FAILED' else r, round(time.time() - t0), 's', flush=True)
     print(n, 'in', round(time.time() - t0), 's', flush=True)
+    if rules: print('geometry rules (fixed, left):', rules, flush=True)
     write_index(OUT)
 

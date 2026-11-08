@@ -25,7 +25,7 @@ look; PLUGINS.md is the plugin contract. Read the parts you need, not the whole 
   `weather/`, `transit/`, `ships/`, `planes/`, `landmarks/`, `lofi/`, `multiplayer/`
 - `tools/`: bake (`tiles.py` main, `osm_split.py`, `sea.py`, `heights.py`, `hrdem.py`, `common.py` shared helpers),
   data (`roofs.py`, `beachlogs.py`, `facades.py`, `mapillary.py`, `transit_data.py`), audits/checks (`audit_elev.py`,
-  `audit_trunks.py`, `*_check.mjs`, `python3 tools/tiles.py selftest`)
+  `audit_trunks.py`, `geom_rules.py` (rules every bake runs: checks + fixes), `*_check.mjs`, `python3 tools/tiles.py selftest`)
 - `server/` Rust live server (`cargo test`)
 
 ## Working rules

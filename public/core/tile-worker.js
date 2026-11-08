@@ -706,7 +706,10 @@ function buildings(t, terr, level, lines, carriage) {
     const roofC = shade(roofHex & 0x1000000 ? lin(roofHex & 0xffffff) : lin(pick(ownRoof ? pal.roof : PALETTES[0].roof)), 0.96 + gr() * 0.08)
     const y0 = base + mn, y1 = base + h
     if (front && carriage && mn < 2.5) shopSpill(pts, carriage, spill)
-    if (detail && mn < 0.5 && np <= 120) skirt(AO, pts, terr, base)
+    if (detail && mn < 0.5 && np <= 120) skirt(AO, pts, terr)
+    // a plinth: one base for a footprint on a slope leaves its walls in the air on the downhill side, so a part standing
+    // on the ground (no min height) has its walls carried on, windowless, down to the lowest drawn ground along its outline
+    const lo = mn < 0.5 ? lowest(terr, pts) - 0.3 : y0, plinth = lo < y0 - 0.45, plC = shade(wall, 0.82)
     // walls, each by what it faces (after Slop Toronto's footprint edges): on the low and mid-rise walls of brick, siding
     // and punched windows (rows of shops and houses; not glass towers) a wall a neighbour covers for 60% of its height or
     // more, or a sliver, is a windowless party wall; a storefront only where the wall looks onto a street (all of
@@ -725,6 +728,7 @@ function buildings(t, terr, level, lines, carriage) {
       if (looks && !party) FAC = looks.subarray(i * 4, i * 4 + 4)
       quad(W, [a[0], y0, -a[1]], [p[0], y0, -p[1]], [p[0], y1, -p[1]], [a[0], y1, -a[1]], wall, [nx, 0, nz], w(u, y0), w(u + len, y0), w(u + len, y1), w(u, y1))
       FAC = NOFAC
+      if (plinth) quad(W, [a[0], lo, -a[1]], [p[0], lo, -p[1]], [p[0], y0, -p[1]], [a[0], y0, -a[1]], plC, [nx, 0, nz], [0, u, 0, seed], [0, u + len, 0, seed], [0, u + len, 0, seed], [0, u, 0, seed])
       u += len
     }
     const flat = !roofShape || !ridge || ridge <= h
@@ -774,13 +778,22 @@ function buildings(t, terr, level, lines, carriage) {
 // ambient occlusion where the walls meet the ground: a strip 3 m out from the foot of every wall, darkest at the wall
 // (materials.js aoMaterial multiplies the ground under it); courtyards and the gaps between buildings get it twice
 const SKIRT = 3
-function skirt(B, pts, terr, base) {
+function skirt(B, pts, terr) { // on the drawn ground both sides (a plinth carries the walls down to it)
   const out = offset(pts, SKIRT), n = pts.length
   for (let i = 0; i < n; i++) {
     const j = (i + 1) % n, v = B.P.length / 3
-    for (const [q, t] of [[pts[i], 0], [pts[j], 0], [out[j], 1], [out[i], 1]]) { B.P.push(q[0], (t ? heightAt(terr, q[0], q[1]) : base) + 0.06, -q[1]); B.T.push(t) }
+    for (const [q, t] of [[pts[i], 0], [pts[j], 0], [out[j], 1], [out[i], 1]]) { B.P.push(q[0], heightAt(terr, q[0], q[1]) + 0.06, -q[1]); B.T.push(t) }
     B.I.push(v, v + 2, v + 1, v, v + 3, v + 2)
   }
+}
+// the lowest drawn ground along a ring (tile-local), every 2 m
+function lowest(terr, pts) {
+  let lo = Infinity
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], p = pts[(i + 1) % pts.length], k = Math.ceil(Math.hypot(p[0] - a[0], p[1] - a[1]) / 2)
+    for (let s = 0; s < k; s++) lo = Math.min(lo, heightAt(terr, a[0] + ((p[0] - a[0]) * s) / k, a[1] + ((p[1] - a[1]) * s) / k))
+  }
+  return lo
 }
 const onMask = (R, x, y) => { const i = Math.floor(x), j = Math.floor(y); if (i < 0 || j < 0 || i >= R.n || j >= R.n) return false; const k = j * R.n + i; return !!(R.bits[k >> 3] & (1 << (k & 7))) }
 // does the wall a -> p (a counter-clockwise ring's) look onto a street: 3 m long or more, a carriageway within 18 m straight out
