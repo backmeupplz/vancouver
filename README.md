@@ -16,7 +16,8 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
 5. `uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/tiles.py [procs]` bakes the
    map tiles into `public/tiles/` (about 2 minutes on 9 cores, ~115 MB): 1 km detail tiles and 4 km overview tiles
    with terrain, ground polygons, roads with their node graph, buildings, trees (LiDAR canopy peaks, species from the
-   city's inventory) and points like traffic signals. Buildings are OSM footprints shaped by the LiDAR surface inside
+   city's inventory, crowns as wide as the canopy each owns, trunks never on a carriageway or a sidewalk's walking zone:
+   `tools/audit_trunks.py public/tiles` counts any left), marina docks with boats at their berths and points like traffic signals. Buildings are OSM footprints shaped by the LiDAR surface inside
    them: up to four roof levels (podium, tower, penthouse, terraces), pitched roofs fitted to it (gable either way,
    hip, shed), rooftop plant only where it shows, the city's 2009 roof sections where they still match. Their look
    comes from OSM (material, colours, levels for the window rows, heritage, shops for storefronts) and from the

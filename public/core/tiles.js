@@ -18,6 +18,22 @@ const bytes = (m) => { // a mesh's buffers not on the GPU yet
   return n + (m.geometry.index?.array?.byteLength || 0)
 }
 const WORKERS = Math.min(4, Math.max(2, (navigator.hardwareConcurrency || 4) - 2))
+// the season's colours (?season=spring|summer|autumn|winter to see another): the tiles carry autumn's
+const SEASON = new URLSearchParams(location.search).get('season') || ['winter', 'winter', 'spring', 'spring', 'summer', 'summer', 'summer', 'summer', 'summer', 'autumn', 'autumn', 'winter'][new Date().getMonth()]
+const SEASONAL = { winter: [0, 8, 8, 8, 8, 5, 6, 7, 8, 8], spring: [0, 0, 0, 0, 0, 5, 6, 7, 0, 10], summer: [0, 0, 0, 0, 0, 5, 6, 7, 0, 0], autumn: null }[SEASON]
+const HULLS = [0xf2f1ec, 0x2c3c58, 0x30483a, 0x3c6a96] // white, navy, dark green, blue
+
+// a boat 1 long along +x (bow east), its waterline at 0: a pointed hull, a deck and cabin, a mast (sailboats)
+function boatGeos() {
+  const solid = (shape, y0, y1) => new THREE.ExtrudeGeometry(shape, { depth: y1 - y0, bevelEnabled: false, curveSegments: 1 }).rotateX(-Math.PI / 2).translate(0, y0, 0)
+  const outline = (pts) => new THREE.Shape(pts.map(([x, y]) => new THREE.Vector2(x, y)))
+  const hull = solid(outline([[-0.5, -0.15], [0.22, -0.16], [0.5, 0], [0.22, 0.16], [-0.5, 0.15]]), -0.03, 0.075)
+  const top = solid(outline([[-0.34, -0.1], [0.12, -0.1], [0.2, 0], [0.12, 0.1], [-0.34, 0.1]]), 0.075, 0.13)
+  const mast = new THREE.BoxGeometry(0.018, 1.25, 0.018).translate(0.06, 0.075 + 0.625, 0)
+  const geos = { hull, top, mast }
+  for (const g of Object.values(geos)) { g.deleteAttribute('uv'); g.computeVertexNormals(); g.userData.shared = true }
+  return geos
+}
 
 export class Tiles {
   constructor({ scene, treeScene, mats, base = 'tiles/', onLoad, onUnload, onChange }) {
@@ -36,6 +52,7 @@ export class Tiles {
     this.unitGeo = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0)
     this.unitMat = new THREE.MeshLambertMaterial()
     this.quad = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0)
+    this.boatGeo = boatGeos()
     this.balconies = true
     this.made = [] // worker results waiting to become three.js objects, one tile per frame (pump)
     this.warming = [] // tiles whose buffers are being uploaded to the GPU, a few MB per frame, before they show
@@ -271,6 +288,7 @@ export class Tiles {
     t.graph = res.graph
     t.footprints = res.footprints || null
     t.water = res.water || null
+    t.carriage = res.carriage || null
     // once a geometry is on the GPU its arrays are dropped from memory (bounds are computed first, for culling)
     const free = (geo, b) => {
       if (b) { geo.boundingBox = new THREE.Box3(v0.fromArray(b), new THREE.Vector3().fromArray(b, 3)); geo.boundingSphere = geo.boundingBox.getBoundingSphere(new THREE.Sphere()) } else { geo.computeBoundingSphere(); geo.computeBoundingBox() }
@@ -323,6 +341,19 @@ export class Tiles {
       m.computeBoundingSphere()
       t.units = m; g.add(m); m.visible = this.balconies
     }
+    if (res.boats) { // berthed boats: hull (instance colour), deck and cabin, a mast on the sailboats
+      const B = res.boats, n = B.length / 6, M = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), sc = new THREE.Vector3(), c = new THREE.Color(), up = new THREE.Vector3(0, 1, 0)
+      const sails = []
+      for (let i = 0; i < n; i++) if (B[i * 6 + 5] & 1) sails.push(i)
+      const parts = [['hull', n], ['top', n], ['mast', sails.length]].map(([k, m]) => { const im = new THREE.InstancedMesh(this.boatGeo[k], this.unitMat, m); im.receiveShadow = true; im.castShadow = k !== 'mast'; return im })
+      for (let i = 0; i < n; i++) {
+        M.compose(p.set(B[i * 6], B[i * 6 + 1], B[i * 6 + 2]), q.setFromAxisAngle(up, B[i * 6 + 3]), sc.setScalar(B[i * 6 + 4]))
+        parts[0].setMatrixAt(i, M); parts[1].setMatrixAt(i, M)
+        parts[0].setColorAt(i, c.setHex(HULLS[(B[i * 6 + 5] >> 1) & 3])); parts[1].setColorAt(i, c.setHex(0xe6e4de))
+      }
+      sails.forEach((i, k) => { parts[0].getMatrixAt(i, M); parts[2].setMatrixAt(k, M); parts[2].setColorAt(k, c.setHex(0xd4d6d8)) })
+      for (const im of parts) if (im.count) { im.computeBoundingSphere(); im.matrixAutoUpdate = false; g.add(im) }
+    }
     this.scene.add(g)
     t.group = g
     if (res.trees) t.trees = this.makeTrees(t, res.trees)
@@ -331,12 +362,17 @@ export class Tiles {
   makeTrees(t, { pos, info }) {
     const n = pos.length / 3
     const P = new Float32Array(n * 3), S = new Float32Array(n * 2), C = new Float32Array(n * 3), V = new Float32Array(n)
+    // per shape: billboard width by height (old tiles, no crown width), per metre of crown (the painted crown fills
+    // less than its cell) and at most by height (columns and conifers stay slim however much canopy they own)
     const W = [0.75, 0.42, 1.0, 0.8, 0.36, 0.46, 0.62, 0.62], H = [1.08, 1.05, 1.0, 1.08, 1.05, 1.05, 1.0, 1.05]
+    const K = [1.25, 1.7, 1.22, 1.25, 1.75, 1.4, 1.3, 1.3], MAXW = [1.5, 0.6, 1.7, 1.3, 0.6, 0.75, 1.0, 0.9]
     let lo = Infinity, hi = -Infinity
     for (let i = 0; i < n; i++) {
-      const shape = info[i * 4], fam = info[i * 4 + 1], h = Math.max(3, info[i * 4 + 2]), seed = Math.abs(info[i * 4 + 3])
+      const shape = info[i * 4], fam = SEASONAL ? SEASONAL[info[i * 4 + 1] & 15] ?? 0 : info[i * 4 + 1] & 15, cq = info[i * 4 + 1] >> 4, h = Math.max(3, info[i * 4 + 2]), seed = Math.abs(info[i * 4 + 3])
       P[i * 3] = pos[i * 3]; P[i * 3 + 1] = pos[i * 3 + 1]; P[i * 3 + 2] = pos[i * 3 + 2]
-      S[i * 2] = Math.min(22, Math.max(2.6, h * W[shape])); S[i * 2 + 1] = h * 0.866 * H[shape]
+      // the crown's width from the LiDAR canopy (tools/tiles.py crown_q), in the colour byte's high nibble
+      const w = cq ? Math.min((2 + cq * 1.4) * K[shape], h * MAXW[shape]) : h * W[shape]
+      S[i * 2] = Math.min(30, Math.max(2.6, w)); S[i * 2 + 1] = h * 0.866 * H[shape] // a wide crown stands taller (the tree material)
       const f = FAMILY[fam] || FAMILY[0], c = f[Math.floor(seed * f.length) % f.length]
       const v = 0.94 + seed * 0.12
       C[i * 3] = c.r * v; C[i * 3 + 1] = c.g * v; C[i * 3 + 2] = c.b * v
@@ -400,10 +436,32 @@ export class Tiles {
     for (const o of [t.group, t.trees]) {
       if (!o) continue
       o.removeFromParent()
-      o.traverse((m) => { if (m.geometry && m.geometry !== this.unitGeo && m.geometry !== this.quad) m.geometry.dispose() })
+      o.traverse((m) => { if (m.geometry && m.geometry !== this.unitGeo && m.geometry !== this.quad && !m.geometry.userData.shared) m.geometry.dispose() })
     }
     this.tiles.delete(this.key(t.level, t.i, t.j))
     this.byIJ.delete(ij(t.level, t.i, t.j))
+  }
+
+  // street furniture: the nearest point to (x, y) (world metres, y north) at least `margin` m off the carriageways and
+  // cycle tracks the ground draws (the detail tiles' 1 m masks), within maxD m; null where (x, y) is clear already, or
+  // no detail tile has it, or nothing clear is that near
+  offRoad(x, y, margin = 0.6, maxD = 8) {
+    const on = (px, py) => this.onRoad(px, py)
+    const clear = (px, py) => !on(px, py) && !on(px + margin, py) && !on(px - margin, py) && !on(px, py + margin) && !on(px, py - margin)
+    if (!this.tiles.get(this.key(0, Math.floor(x / 1024), Math.floor(y / 1024)))?.carriage || clear(x, y)) return null
+    for (let r = 0.5; r <= maxD; r += 0.5) {
+      const n = Math.max(8, Math.ceil(r * 6))
+      for (let a = 0; a < n; a++) { const px = x + Math.cos((a / n) * 2 * Math.PI) * r, py = y + Math.sin((a / n) * 2 * Math.PI) * r; if (clear(px, py)) return { x: px, y: py } }
+    }
+    return null
+  }
+
+  // is (x, y) on a carriageway or cycle track as drawn (false where no detail tile is loaded)
+  onRoad(x, y) {
+    const t = this.tiles.get(this.key(0, Math.floor(x / 1024), Math.floor(y / 1024))), R = t?.carriage
+    if (!R) return false
+    const k = Math.floor(y - t.oy) * R.n + Math.floor(x - t.ox)
+    return !!(R.bits[k >> 3] & (1 << (k & 7)))
   }
 
   // ground height (metres) at world x east, y north: from the finest loaded tile

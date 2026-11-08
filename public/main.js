@@ -388,9 +388,10 @@ function draw(scale = res) {
     if (scene.fog?.isFog) u.fade.value.set(scene.fog.near, scene.fog.far); else u.fade.value.set(1e9, 2e9)
   } else u.thr.value = Math.max(0.35 / (K * cam.zoom), 0.9)
   u.ink.value = THREE.MathUtils.smoothstep(zoom, 0.05, 0.16)
-  u.sat.value = 0.96 + 0.24 * THREE.MathUtils.smoothstep(zoom, 0.04, 0.2)
+  // a light grade: the materials carry natural, map-like colours of their own (a strong blue gain read as neon)
+  u.sat.value = 1.0 + 0.12 * THREE.MathUtils.smoothstep(zoom, 0.04, 0.2)
   const near = THREE.MathUtils.smoothstep(zoom, 0.04, 0.12)
-  u.gain.value.set(1 + 0.1 * near, 1 + 0.17 * near, 1 + 0.38 * near)
+  u.gain.value.set(1 + 0.05 * near, 1 + 0.06 * near, 1 + 0.09 * near)
   treeScene.fog = scene.fog
   renderer.info.autoReset = false; renderer.info.reset()
   const smooth = aaMode === 'fxaa' || (aaMode === 'auto' && C.isPerspectiveCamera && pr < 1.5)

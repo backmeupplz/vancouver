@@ -78,7 +78,7 @@ function build(t, level) {
   out.graph.pois = pois(t)
   const b = buildings(t, terr, level)
   out.buildings = b.walls; out.balconies = b.balconies; out.units = b.units
-  if (level === 0) { out.footprints = b.footprints; out.water = water(t) }
+  if (level === 0) { out.footprints = b.footprints; out.water = water(t); out.carriage = roadMask(t); out.boats = boats(t, terr) }
   out.trees = trees(t, terr)
   return out
 }
@@ -115,7 +115,7 @@ function ground(t, terr, level) {
   const vert = (x, y, c, lift) => {
     const key = Math.round(x * 50) * 1e7 + Math.round(y * 50) + c * 1e14
     let i = seen.get(key)
-    if (i === undefined) { i = pos.length / 3; seen.set(key, i); pos.push(x, heightAt(terr, x, y) + lift, -y); cls.push(c) }
+    if (i === undefined) { i = pos.length / 3; seen.set(key, i); const h = heightAt(terr, x, y); pos.push(x, (c === PIER ? Math.max(h, 0.45) : h) + lift, -y); cls.push(c) }
     return i
   }
   let hmin = Infinity, hmax = -Infinity
@@ -159,11 +159,23 @@ function ground(t, terr, level) {
 }
 
 // detail tiles: a WATER_N x WATER_N mask (1 = water), cell (i east, j north) from the tile's SW corner
-const WATER_N = 256, WATER = 19 // GROUND class index of water (tools/tiles.py)
-function water(t) {
+const WATER_N = 256, WATER = 19, PIER = 20 // GROUND class indices of water and piers (tools/tiles.py)
+function water(t) { const m = raster(t, new Set([WATER]), WATER_N); return m && { n: WATER_N, mask: m } }
+// and a 1 m mask of the carriageways and cycle tracks as drawn (bits, row-major from the SW corner): street furniture
+// stands outside it (city.world.offRoad)
+const ROADS_N = 1024, CARR = new Set([25, 29, 30]) // cycle, road, arterial
+function roadMask(t) {
+  const m = raster(t, CARR, ROADS_N)
+  if (!m) return null
+  const bits = new Uint8Array(m.length / 8)
+  for (let i = 0; i < m.length; i++) if (m[i]) bits[i >> 3] |= 1 << (i & 7)
+  return { n: ROADS_N, bits }
+}
+// an n x n mask of the ground classes in `want`: the cells whose centres are inside their polygons, or null if none
+function raster(t, want, n) {
   const s = t.sections.GRND
   if (!s) return null
-  const dv = t.dv, n = WATER_N, c = t.size / n, mask = new Uint8Array(n * n)
+  const dv = t.dv, c = t.size / n, mask = new Uint8Array(n * n)
   let o = s.off, any = false
   const runs = dv.getUint16(o, true); o += 2
   for (let r = 0; r < runs; r++) {
@@ -173,11 +185,11 @@ function water(t) {
       const flat = [], holes = []
       for (let k = 0; k < nr; k++) {
         const [pts, o2] = readRing(t, o); o = o2
-        if (cls !== WATER) continue
+        if (!want.has(cls)) continue
         if (k) holes.push(flat.length / 2)
         for (const v of pts) flat.push(v)
       }
-      if (cls !== WATER || !flat.length) continue
+      if (!want.has(cls) || !flat.length) continue
       const tri = earcut(flat, holes)
       for (let q = 0; q < tri.length; q += 3) { // fill the cells whose centres are inside the triangle
         const ax = flat[tri[q] * 2] / c - 0.5, ay = flat[tri[q] * 2 + 1] / c - 0.5, bx = flat[tri[q + 1] * 2] / c - 0.5, by = flat[tri[q + 1] * 2 + 1] / c - 0.5
@@ -193,7 +205,7 @@ function water(t) {
       }
     }
   }
-  return any ? { n, mask } : null
+  return any ? mask : null
 }
 
 function readLines(t) {
@@ -310,27 +322,27 @@ function graph(t, lines) {
 }
 
 // ---------------------------------------------------------------- buildings
-const PALETTES = [ // style ids from tools/tiles.py (HOUSE, APT, ...)
+const PALETTES = [ // style ids from tools/tiles.py (HOUSE, APT, ...); colours as seen (sRGB), like OSM's
   // 0 house
-  { wall: [0xf2efe6, 0xe8e0cc, 0xd9d2c3, 0xc9d6dc, 0xb8c8d4, 0xe6d6a8, 0xb8c8a8, 0xd8a890, 0xf0e8d8, 0xa8b8c4, 0xe0c8b0, 0x8fa4b4], roof: [0x4a4f55, 0x5f6366, 0x6e6a66, 0x7a5a48, 0x3e4349, 0x8c4a3a, 0x9a5038, 0x52606a, 0x6b4d3c] },
+  { wall: [0xe8e4d8, 0xd8d0bc, 0xc8c0b0, 0xb8c4c8, 0xa8b8c4, 0xd4c49c, 0xa8b498, 0xc89880, 0xe0d8c8, 0x98a8b4, 0xd0b8a0, 0x8094a4], roof: [0x4a4f55, 0x5f6366, 0x6e6a66, 0x7a5a48, 0x3e4349, 0x8c4a3a, 0x9a5038, 0x52606a, 0x6b4d3c] },
   // 1 apartments
-  { wall: [0xf6f6f2, 0xf0f2f0, 0xe8eef0, 0xf2ece0, 0xeadcc0, 0xe4e6e6, 0xe8d0b0, 0xd8c8a8, 0xc8d0d4], roof: [0xc4c6c4, 0xb4b8b8, 0xd2d0ca, 0xa8acae, 0x5a6068, 0x6a7078] },
+  { wall: [0xe6e2d8, 0xd6d0c4, 0xcfc6b4, 0xe0d6c0, 0xc4b494, 0xb09a7c, 0x9a6e58, 0x8c5c4a, 0xd2ccc0, 0xbcbab2, 0xc8b898], roof: [0x8c8e8c, 0x9a9c9a, 0x7e8284, 0xa8a8a4, 0x5a6068, 0x6a7078] },
   // 2 office / glass
-  { wall: [0xe6ecee, 0xd6e0e4, 0xc8d4dc, 0xf0f2f0, 0xb8c8d0], roof: [0xc4c6c4, 0xb4b8b8, 0x9ea4a8, 0x5a6068] },
+  { wall: [0xd8dcdc, 0xc8d0d4, 0xb8c4cc, 0xe0e2e0, 0xa8b8c0], roof: [0x9a9c9a, 0x8c9090, 0x7e8488, 0x5a6068] },
   // 3 brick / heritage (Gastown, Chinatown, Yaletown warehouses: red and brown brick, a few painted)
   { wall: [0x8a4c3c, 0x7c4636, 0x925844, 0x744234, 0x9a6448, 0x845440, 0x7a5040, 0xb08a6a], roof: [0x6e5a50, 0x7c6a60, 0x4a4f55, 0x5a5e62] },
   // 4 commercial
-  { wall: [0xc9c2b2, 0xd6cfbf, 0xb8b4aa, 0xe0d8c6, 0xb8c4cc, 0xd8d8d4, 0xc4a888, 0xa8b0b4], roof: [0xc4c6c4, 0xb4b8b8, 0xd2d0ca, 0xa8acae, 0x9ea4a8, 0x7c8288] },
+  { wall: [0xc4bcaa, 0xd0c8b8, 0xb0aca2, 0xd8d0be, 0xa8b4bc, 0xcccbc6, 0xb89c7c, 0x9ca4a8], roof: [0x9c9e9c, 0x8c9090, 0xaaa8a2, 0x868a8c, 0x7a7e82, 0x5c6266] },
   // 5 civic / white
-  { wall: [0xf2f0ea, 0xeeeeea, 0xe4e6e6, 0xe8e0d0, 0xd8d0c0], roof: [0xbcbcb8, 0xc8c8c4, 0x6a8a7a, 0x5a6068] },
+  { wall: [0xe4e2dc, 0xdcdcd8, 0xd0d2d2, 0xd8d0c0, 0xc8c0b0], roof: [0x9a9a96, 0xa8a8a4, 0x5a7a6a, 0x5a6068] },
   // 6 glass condo tower: white and pale grey mullions and slab edges around blue-green glass
-  { wall: [0xf4f6f4, 0xeef2f2, 0xe2e8ea, 0xf6f4ee, 0xd8e0e4], roof: [0xc8cac8, 0xbcc0c0, 0xd4d4d0] },
+  { wall: [0xe8ecea, 0xe0e6e6, 0xd2dadc, 0xeae8e2, 0xc8d2d6], roof: [0xa4a6a4, 0x989c9c, 0xb0b0ac] },
   // 7 concrete (West End towers, 1960s-70s offices, parkades)
-  { wall: [0xc8c0b0, 0xbab4a8, 0xd2cab8, 0xaca8a0, 0xc4beb4, 0xd8ceb8, 0xb0b4b4], roof: [0xb8b8b4, 0xa8aaa8, 0xc4c4c0] },
+  { wall: [0xc0b8a8, 0xb0aa9e, 0xcac2b0, 0xa29e96, 0xbab4aa, 0xd0c6b0, 0xa6aaaa], roof: [0x989894, 0x8a8c8a, 0xa4a4a0] },
   // 8 metal shed (warehouses, mills, port sheds)
   { wall: [0xb8bcbe, 0xa8b0b4, 0xc8c8c0, 0x8a98a4, 0xd0ccbc, 0x7c8c84, 0xc4b8a0, 0x9aa4ac], roof: [0xb0b4b6, 0xc0c4c4, 0xa0a8ac, 0xd8dad8, 0x8c949a] },
   // 9 big box / mall
-  { wall: [0xd8d2c4, 0xe4e0d6, 0xc8c4bc, 0xd4ccbc, 0xe8e4dc], roof: [0xd8d8d4, 0xe0e0dc, 0xc8cac8] },
+  { wall: [0xd0cabc, 0xdcd8ce, 0xbebab2, 0xccc4b4, 0xe0dcd4], roof: [0xb8b8b4, 0xc4c4c0, 0xa8aaa8] },
   // 10 stone
   { wall: [0xc8bca4, 0xb8ae98, 0xd4c8b0, 0xa8a090, 0xbcb4a4], roof: [0x5a6a64, 0x6a5a50, 0x4a4f55, 0x5a8a78] },
   // 11 character house: painted wood siding (deep greens, blues, greys, creams, a burgundy)
@@ -340,8 +352,7 @@ const PALETTES = [ // style ids from tools/tiles.py (HOUSE, APT, ...)
 ]
 const hex = (h) => [((h >> 16) & 255) / 255, ((h >> 8) & 255) / 255, (h & 255) / 255]
 // colours meant as seen (OSM building:colour / roof:colour, the material palettes): vertex colours are linear
-const lin = (h) => hex(h).map((c) => c ** 2.2)
-const TRUE = new Set([3, 8, 10, 11]) // palettes given as seen (brick, metal, stone, painted wood)
+const lin = (h) => hex(h).map((c) => c ** 1.8) // a little lighter than linear: the stylized map reads brighter than a photo
 const shade = (c, f) => [Math.min(1, c[0] * f), Math.min(1, c[1] * f), Math.min(1, c[2] * f)]
 const RAIL = [0xb8dce0, 0xc8e4e8, 0xa8ccd8, 0xd8e8ea, 0x98c0cc].map(hex)
 
@@ -408,9 +419,9 @@ function buildings(t, terr, level) {
     const bk = fx & 15 // balconies: 1 none, 2 glass, 3 solid fronts; 0: by the pattern
     const balc = detail && h - mn > 9 && np <= 120 && (bk ? bk > 1 : fl & 32 ? bits & 2 && (style === 3 || style === 9 || style0 === 7 && tower) : style === 3)
     const pal = PALETTES[style0] || PALETTES[4]
-    const wall = shade(wallHex & 0x1000000 ? lin(wallHex & 0xffffff) : (TRUE.has(style0) ? lin : hex)(pick(pal.wall)), 0.97 + gr() * 0.06)
+    const wall = shade(wallHex & 0x1000000 ? lin(wallHex & 0xffffff) : lin(pick(pal.wall)), 0.97 + gr() * 0.06)
     const ownRoof = !roofShape || style0 === 8 || style0 >= 11
-    const roofC = shade(roofHex & 0x1000000 ? lin(roofHex & 0xffffff) : (ownRoof && TRUE.has(style0) ? lin : hex)(pick(ownRoof ? pal.roof : PALETTES[0].roof)), 0.96 + gr() * 0.08)
+    const roofC = shade(roofHex & 0x1000000 ? lin(roofHex & 0xffffff) : lin(pick(ownRoof ? pal.roof : PALETTES[0].roof)), 0.96 + gr() * 0.08)
     const y0 = base + mn, y1 = base + h
     // walls
     let u = 0
@@ -613,6 +624,21 @@ function pois(t) {
   const dv = t.dv, n = dv.getUint32(s.off, true), out = []
   let o = s.off + 4
   for (let i = 0; i < n; i++) { out.push({ kind: dv.getUint8(o), id: Number(dv.getBigUint64(o + 1, true)), x: dv.getInt16(o + 9, true) * t.k + t.ox, y: dv.getInt16(o + 11, true) * t.k + t.oy }); o += 13 }
+  return out
+}
+
+// ---------------------------------------------------------------- boats at their berths (marinas)
+// -> 6 floats each: tile-local x, water level, z, heading (radians, from east towards north), length, kind (1 sail | colour << 1)
+function boats(t, terr) {
+  const s = t.sections.BOAT
+  if (!s) return null
+  const dv = t.dv, n = dv.getUint32(s.off, true)
+  if (!n) return null
+  const out = new Float32Array(n * 6)
+  for (let i = 0, o = s.off + 4; i < n; i++, o += 7) {
+    const x = dv.getInt16(o, true) * t.k, y = dv.getInt16(o + 2, true) * t.k
+    out.set([x, Math.max(0, heightAt(terr, x, y)), -y, (dv.getUint8(o + 4) / 256) * Math.PI * 2, dv.getUint8(o + 5) / 10, dv.getUint8(o + 6)], i * 6)
+  }
   return out
 }
 

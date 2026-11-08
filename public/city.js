@@ -21,6 +21,9 @@ export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll
       fromLatLon(lat, lon) { const [x, n] = ll(lat, lon); return new THREE.Vector3(x, zAt(x, n), -n) },
       toLatLon(x, z) { return toLatLon(x, -z) },
       heightAt(x, z) { return zAt(x, -z) },
+      // street furniture's footing: the nearest point { x, z } at least `margin` m off the carriageways and cycle tracks
+      // the map draws, within maxD m; null where (x, z) is clear already (or the detail tile isn't loaded)
+      offRoad(x, z, margin = 0.6, maxD = 8) { const p = tiles?.offRoad(x, -z, margin, maxD); return p && { x: p.x, z: -p.y } },
       // a [[lat, lon], …] ring where your plugin draws its own building: the generic one there is removed
       suppressBuildings(ring) { suppressBuildings?.(ring) },
       // call fn(tile) for every loaded tile now, and on every tile that loads later; returns an unsubscribe

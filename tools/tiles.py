@@ -12,18 +12,13 @@ from shapely.ops import unary_union
 from PIL import Image, ImageDraw
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(__file__))
-from common import xy, extent, L0, L1, KX, KY, LAT_O, LON_O, HR, KINDS, KI, DRIVE, SHOP_AMENITY, line_kind, hnum, densify, all_tiles, HR_CACHE, hr_lookup, tile_args, load_feat
+from common import GROUND, GI, xy, extent, L0, L1, KX, KY, LAT_O, LON_O, HR, KINDS, KI, DRIVE, SHOP_AMENITY, line_kind, hnum, densify, all_tiles, HR_CACHE, hr_lookup, tile_args, load_feat
 from roofs import roof_lookup
 from facades import facade_lookup, NONE as B_NONE, GLASS as B_GLASS, SOLID as B_SOLID
 
 OUT = os.environ.get('OUT', 'public/tiles')
 VERSION = 2
 
-# ---------------------------------------------------------------- ground classes (draw order = list order)
-GROUND = ['land', 'residential', 'commercial', 'industrial', 'farmland', 'grass', 'golf', 'scrub', 'wetland', 'forest', 'sand',
-          'rock', 'construction', 'apron', 'parking', 'plaza', 'playground', 'pitch', 'track', 'water', 'pier', 'pool', 'snow',
-          'trail', 'walk', 'cycle', 'ballast', 'sidewalk', 'blvd', 'road', 'arterial']  # streets last: they win where things overlap
-GI = {k: i for i, k in enumerate(GROUND)}
 
 
 def ground_class(t):
@@ -156,7 +151,7 @@ SHAPE = {
     'TRACHYCARPUS': 7, 'ARBUTUS': 2,
 }
 # colour families (indices into the page's palette, see public/core/trees.js): 0 green, 1 yellow, 2 orange, 3 red, 4 brown,
-# 5 dark conifer, 6 blue-green conifer, 7 forest green, 8 bare-ish (late)
+# 5 dark conifer, 6 blue-green conifer, 7 forest green, 8 bare-ish (late), 9 cherry
 AUTUMN = {
     'ACER': (3, 2, 1), 'PRUNUS': (2, 3), 'MALUS': (1, 0), 'TILIA': (1, 0), 'FRAXINUS': (1, 8), 'QUERCUS': (4, 0), 'CARPINUS': (1, 0),
     'BETULA': (1,), 'SALIX': (0, 1), 'ULMUS': (1, 0), 'AESCULUS': (4, 2), 'FAGUS': (4, 2), 'PLATANUS': (4, 1), 'LIQUIDAMBAR': (3, 2),
@@ -171,6 +166,7 @@ def tree_look(genus, rnd):
     if shape is None: shape = 0
     if shape >= 4:
         return shape, 6 if g in ('PICEA', 'CEDRUS') else 5
+    if g == 'PRUNUS': return shape, 9  # cherries and plums: autumn's red, blossom in spring (the page's palette)
     fam = AUTUMN.get(g)
     if fam is None: return shape, 0 if rnd.random() < 0.6 else rnd.choice((1, 2, 4))
     return shape, fam[0] if rnd.random() < 0.7 else rnd.choice(fam + (0,))
@@ -323,6 +319,20 @@ def build(ij):
             polys.setdefault('sidewalk', []).append(outer)
             if blvd: polys.setdefault('blvd', []).append(ls.buffer(w / 2 + blvd, quad_segs=3, cap_style='flat'))
 
+    # ---- docks: piers and floating docks mapped as lines (a marina's walkways and fingers) are decks on the water;
+    # the boats berthed along them in marinas
+    docks = []
+    for _, c, _, t in feat.get('lines', []):
+        if t.get('man_made') != 'pier' or len(c) < 2 or t.get('highway') and t['highway'] not in ('footway', 'path'): continue
+        ls = LineString(c)
+        w = hnum(t.get('width')) or (3.0 if ls.length > 60 else 2.0)
+        docks.append((ls, w))
+        polys.setdefault('pier', []).append(ls.buffer(w / 2, quad_segs=2, cap_style='flat', join_style='mitre'))
+    for _, prs, t in areas:  # docks mapped as areas (a walkway and its fingers, the water between them holes): their edges
+        if t.get('man_made') == 'pier':
+            docks += [(LineString(r), 0.0) for o, ins in prs for r in [o, *ins] if len(r) >= 4]
+    boats = berths(docks, polys, areas, X0, Y0, rnd) if docks else []
+
     # ---- where no trunk may stand: carriageways and paths (as drawn), rail, pitches, tracks, courts, car parks, beaches, pools
     # (crowns may still hang over a path; only the trunk is kept off it)
     nogo = Image.new('L', (N, N), 0); dn = ImageDraw.Draw(nogo)
@@ -338,6 +348,7 @@ def build(ij):
 
     # ---- trees from the canopy
     trees = canopy_trees(dsm, dtm, fp, water_r, X0, Y0, rnd, polys, nogo)
+    trees, moved, dropped = off_streets(trees, polys, lambda x, y: fp[min(N - 1, max(0, int((Y0 + L1 - y) / HR))), min(N - 1, max(0, int((x - X0) / HR)))])
 
     # ---- points the simulation uses: signals, crossings, stops, street lamps, benches, transit stops
     POI = {'traffic_signals': 0, 'crossing': 1, 'stop': 2, 'street_lamp': 3, 'bench': 4, 'bus_stop': 5, 'give_way': 6}
@@ -354,7 +365,7 @@ def build(ij):
             out = Out(tx, ty, L0)
             ti_, tj_ = i * 4 + a, j * 4 + b
             terr = terrain_grid(dtm, a * L0, (3 - b) * L0, L0, 129)  # 8 m: embankments, cuts and seawalls under the roads
-            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all()):
+            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, boats=boats, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all()):
                 continue
             os.makedirs(f'{OUT}/0', exist_ok=True)
             open(f'{OUT}/0/{ti_}_{tj_}.bin', 'wb').write(out.bytes()); n += 1
@@ -363,7 +374,7 @@ def build(ij):
     write_tile(out, X0, Y0, L1, terr, polys, lines, builds, trees, detail=False, water_only=sea.all(), pois=[])
     os.makedirs(f'{OUT}/1', exist_ok=True)
     open(f'{OUT}/1/{i}_{j}.bin', 'wb').write(out.bytes())
-    return ij, 'ok', round(time.time() - t0, 1), n, len(builds), len(trees)
+    return ij, 'ok', round(time.time() - t0, 1), n, len(builds), len(trees), f'trunks off streets: {moved} moved, {dropped} dropped'
 
 
 def flat_water(dtm, sea, water):
@@ -965,6 +976,56 @@ def apply_sections(out, X0, Y0, rnd, measure, under):
 
 
 # ---------------------------------------------------------------- trees
+def off_streets(trees, polys, in_building):
+    """no trunk on a carriageway, a cycle track or a sidewalk's walking zone, as the ground draws them (the streets'
+    pieces above): a street tree stands in its boulevard, else in the tree pits along the kerb; one that can't is
+    dropped. Crowns may still overhang the street. -> (trees, moved, dropped)"""
+    from shapely.strtree import STRtree
+    from shapely.ops import nearest_points
+    carr = polys.get('road', []) + polys.get('arterial', []) + polys.get('cycle', [])
+    if not trees or not carr: return trees, 0, 0
+    walk, blvd = polys.get('sidewalk', []), polys.get('blvd', [])
+    C, Wk, Bv = STRtree(carr), STRtree(walk or [Polygon()]), STRtree(blvd or [Polygon()])
+    pts = shapely.points(np.array([(t[0], t[1]) for t in trees]))
+    hit = lambda T, **k: set(T.query(pts, **k)[0].tolist())
+    on_road, on_walk, on_blvd, pit = hit(C, predicate='intersects'), hit(Wk, predicate='intersects'), hit(Bv, predicate='intersects'), hit(C, predicate='dwithin', distance=1.2)
+    out, moved, dropped = [], 0, 0
+    for i, t in enumerate(trees):
+        if i not in on_road and (i not in on_walk or i in on_blvd or i in pit):
+            out.append(t); continue
+        p = pts[i]
+        roads = unary_union([carr[k] for k in C.query(p.buffer(14))])
+        spot = None
+        strips = [blvd[k] for k in Bv.query(p.buffer(8))] if blvd else []
+        if strips:  # the planting strip between the kerb and the sidewalk
+            g = unary_union(strips).difference(roads.buffer(0.5)).buffer(-0.4)
+            if not g.is_empty: spot = nearest_points(g, p)[0]
+        if spot is None or spot.distance(p) > 8:  # a tree pit by the kerb
+            spot = nearest_points(roads.buffer(0.9).boundary, p)[0]
+        if spot.distance(p) > 8 or roads.distance(spot) < 0.5 or in_building(spot.x, spot.y): dropped += 1; continue
+        out.append((spot.x, spot.y, *t[2:])); moved += 1
+    return out, moved, dropped
+
+
+def crown_widths(chm, canopy, at, hs):
+    """crown diameter (m) of each tree at grid cell at[k] (height hs[k]): the canopy cells nearer to it than to any other
+    crown, within reach of its height, as a disc of the same area"""
+    if not at: return []
+    mark = np.zeros(chm.shape, np.int32)
+    for k, (y, x) in enumerate(at): mark[y, x] = k + 1
+    d, (iy, ix) = ndimage.distance_transform_edt(mark == 0, return_indices=True)
+    own = mark[iy, ix] - 1
+    reach = (0.45 * np.asarray(hs, np.float32) + 2.0).clip(3, 13) / HR
+    mine = canopy & (d <= reach[own])
+    area = np.bincount(own[mine], minlength=len(at)) * HR * HR
+    return [float(np.clip(2 * math.sqrt(a / math.pi), 0.35 * h + 1.5, 1.1 * h + 3)) for a, h in zip(area, hs)]
+
+
+def crown_q(cw):
+    """a crown width in the high nibble of a tree's colour byte (0 = not known: the page sizes it by its height)"""
+    return int(np.clip(round((cw - 2.0) / 1.4), 1, 15))
+
+
 def canopy_trees(dsm, dtm, fp, water, X0, Y0, rnd, polys, nogo):
     if dsm is None: return []
     N = dtm.shape[0]
@@ -979,7 +1040,7 @@ def canopy_trees(dsm, dtm, fp, water, X0, Y0, rnd, polys, nogo):
     # thin crowded peaks: keep the tallest within the crown radius
     order = np.argsort(-hs)
     taken = np.zeros((N // 2 + 2, N // 2 + 2), np.int32) - 1
-    keep = []
+    keep, crown_at = [], []
     for k in order:
         y, x, h = ys[k], xs[k], hs[k]
         rad = max(1.5, min(7.5, 0.22 * h + 1.0)) * 0.7 / HR
@@ -993,13 +1054,17 @@ def canopy_trees(dsm, dtm, fp, water, X0, Y0, rnd, polys, nogo):
             y, x = fi[y, x], fj[y, x]
         taken[cy, cx] = len(keep)
         keep.append((X0 + (x + 0.5) * HR, Y0 + L1 - (y + 0.5) * HR, float(h)))
+        crown_at.append((ys[k], xs[k]))
+    # crown widths: every canopy cell belongs to the nearest kept crown (within reach of its height), so neighbouring
+    # crowns meet the way the canopy does and a street of trees reads as one green mass, not a row of lollipops
+    cw = crown_widths(chm, (chm > 3.0) & ~fp & ~water, crown_at, [k[2] for k in keep])  # crowns may overhang roofs
     # species: the city's inventory where it has the tree, else a guess from the crown and the land cover
     near = {}
     for x, y, genus, common, h in TREES:
         if X0 - 5 <= x < X0 + L1 + 5 and Y0 - 5 <= y < Y0 + L1 + 5: near.setdefault((int(x // 4), int(y // 4)), []).append((x, y, genus, h))
     out = []
     used = set()
-    for x, y, h in keep:
+    for (x, y, h), w in zip(keep, cw):
         g = None
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
@@ -1016,7 +1081,7 @@ def canopy_trees(dsm, dtm, fp, water, X0, Y0, rnd, polys, nogo):
             conifer = h > 24 or peaky > 0.22 or h > 14 and rnd.random() < 0.5
             if conifer: shape, col = rnd.choice((4, 4, 4, 5, 5, 6)), rnd.choice((5, 5, 7, 6))
             else: shape, col = rnd.choice((0, 0, 0, 2, 1, 3)), rnd.choice((0, 0, 0, 0, 7, 1, 2, 4))
-        out.append((x, y, shape, col, min(63.0, h)))
+        out.append((x, y, shape, col | crown_q(w) << 4, min(63.0, h)))
     # young street trees the LiDAR can't see yet
     for cell, lst in near.items():
         for c in lst:
@@ -1025,7 +1090,50 @@ def canopy_trees(dsm, dtm, fp, water, X0, Y0, rnd, polys, nogo):
             py, px_ = int((Y0 + L1 - c[1]) / HR), int((c[0] - X0) / HR)
             if 0 <= py < N and 0 <= px_ < N and blocked[py, px_]: continue
             shape, col = tree_look(c[2], rnd)
-            out.append((c[0], c[1], shape, col, c[3]))
+            out.append((c[0], c[1], shape, col | crown_q(0.45 * c[3] + 1.5) << 4, c[3]))
+    return out
+
+
+def berths(docks, polys, areas, X0, Y0, rnd):
+    """boats alongside the docks of marinas: one each side of a finger, then along the walkways wherever one fits
+    (never over a dock, another boat or the shore). -> [(x, y, heading, length, kind)]"""
+    from shapely import affinity
+    marina = [Polygon(o).buffer(40) for _, prs, t in areas if t.get('leisure') == 'marina' for o, _ in prs if len(o) >= 4]
+    if not marina: return []
+    marina = unary_union(marina)
+    water = unary_union(polys.get('water', [])) if polys.get('water') else None
+    if water is None: return []
+    shapely.prepare(water); shapely.prepare(marina)
+    deck = unary_union([d.buffer(w / 2 + 0.3, cap_style='flat') for d, w in docks])
+    shapely.prepare(deck)
+    out, placed = [], {}  # placed: 20 m cell -> hulls (with a gap round them)
+    for ls, w in sorted(docks, key=lambda d: d[0].length):  # fingers first: they decide the berths
+        if not marina.intersects(ls): continue
+        cs = list(ls.coords)
+        for (ax, ay), (bx, by) in zip(cs, cs[1:]):
+            seg = math.hypot(bx - ax, by - ay)
+            if seg < 5: continue
+            ux, uy = (bx - ax) / seg, (by - ay) / seg
+            step = seg if seg < 26 else 0  # a finger: one berth per side, the length of the finger; a walkway: a row
+            for side in (1, -1):
+                s0 = 0.0
+                while s0 < seg - 4:
+                    ln = min(seg * 0.9, rnd.uniform(7, 15)) if step else rnd.uniform(8, 16)
+                    if step: s0 = (seg - ln) / 2
+                    beam = 0.32 * ln
+                    off = w / 2 + beam / 2 + 0.6
+                    cx, cy = ax + ux * (s0 + ln / 2) - uy * off * side, ay + uy * (s0 + ln / 2) + ux * off * side
+                    hull = affinity.rotate(box(-ln / 2, -beam / 2, ln / 2, beam / 2), math.atan2(uy, ux), use_radians=True, origin=(0, 0))
+                    hull = affinity.translate(hull, cx, cy)
+                    cell = (int(cx // 20), int(cy // 20))
+                    near = [q for i in (-1, 0, 1) for j in (-1, 0, 1) for q in placed.get((cell[0] + i, cell[1] + j), ())]
+                    if rnd.random() < 0.85 and water.contains(hull) and not deck.intersects(hull) and not any(hull.intersects(q) for q in near):
+                        placed.setdefault(cell, []).append(hull.buffer(0.4))
+                        sail = ln > 8.5 and rnd.random() < 0.5
+                        col = 0 if rnd.random() < 0.8 else rnd.randrange(1, 4)  # white, navy, dark green, blue
+                        out.append((cx, cy, math.atan2(uy, ux) % (2 * math.pi), ln, (1 if sail else 0) | col << 1))
+                    if step: break
+                    s0 += ln + 1.2
     return out
 
 
@@ -1428,7 +1536,7 @@ def pack_ring(out, ring):
     return b
 
 
-def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=()):
+def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=()):
     tb = box(tx, ty, tx + size, ty + size)
     n = terr.shape[0]
     out.section('TERR', struct.pack('<H', n) + np.clip(np.round(terr * 10), -32768, 32767).astype('<i2').tobytes())
@@ -1540,6 +1648,9 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
         if not detail and (h < 9 or (hash((round(x), round(y))) & 3)): continue
         tr_ += struct.pack('<hhBBB', *out.q(x, y), shape, col, int(min(63, h) * 4)); nt += 1
     out.section('TREE', struct.pack('<I', nt) + bytes(tr_))
+    if detail:  # boats at their berths: centre, heading (1/256 turn), length (1/10 m), kind (1 sail) | colour << 1
+        bt = [b for b in boats if tx <= b[0] < tx + size and ty <= b[1] < ty + size]
+        out.section('BOAT', struct.pack('<I', len(bt)) + b''.join(struct.pack('<hhBBB', *out.q(x, y), int(a / (2 * math.pi) * 256) & 255, int(min(255, ln * 10)), k) for x, y, a, ln, k in bt))
     pb = bytearray(); npo = 0
     for k, nid, x, y in pois:
         if tx <= x < tx + size and ty <= y < ty + size: pb += struct.pack('<BQhh', k, nid, *out.q(x, y)); npo += 1
@@ -1591,6 +1702,10 @@ def selftest():
     assert down == -1, down
     z, down = ramp(sa, np.full(len(sa), 2.0), gr.copy(), 4.0, 0.08, 150)  # a deck end a little high: down to the ground
     assert down == 1 and np.isfinite(z[:2]).all(), (down, z[:3])
+    # crowns: two 12 m trees in a 20 x 40 m patch of canopy share it, up to their reach; a lone tree in a small patch keeps a small crown
+    can = np.zeros((40, 40), bool); can[10:20, 5:25] = True; can[30:33, 30:33] = True
+    w = crown_widths(np.full((40, 40), 12.0), can, [(15, 10), (15, 20), (31, 31)], [12.0, 12.0, 6.0])
+    assert 13 < w[0] < 17 and 13 < w[1] < 17 and w[2] < 7.5 and crown_q(w[0]) > crown_q(w[2]), w
     print('selftest ok')
 
 

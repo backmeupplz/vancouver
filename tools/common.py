@@ -37,6 +37,32 @@ def tile_args(argv):
     return [tuple(map(int, a.split('_'))) for a in argv]
 
 
+# ---------------------------------------------------------------- ground classes (draw order = list order; the page's GROUND_COLOURS)
+GROUND = ['land', 'residential', 'commercial', 'industrial', 'farmland', 'grass', 'golf', 'scrub', 'wetland', 'forest', 'sand',
+          'rock', 'construction', 'apron', 'parking', 'plaza', 'playground', 'pitch', 'track', 'water', 'pier', 'pool', 'snow',
+          'trail', 'walk', 'cycle', 'ballast', 'sidewalk', 'blvd', 'road', 'arterial']  # streets last: they win where things overlap
+GI = {k: i for i, k in enumerate(GROUND)}
+
+
+def read_tile(path):
+    """a baked tile -> (bytes, ox, oy, size, {section tag: (offset, length)}, ring): ring(o) reads the delta-encoded
+    points at o -> (world x, north array, next offset)"""
+    import gzip, struct
+    import numpy as np
+    b = gzip.decompress(open(path, 'rb').read())
+    ox, oy, size = struct.unpack_from('<fff', b, 8)
+    k = (2 * size) / 32766
+    sec, o = {}, 20
+    while o < len(b):
+        tag = b[o:o + 4].decode(); n = struct.unpack_from('<I', b, o + 4)[0]; sec[tag] = (o + 8, n); o += 8 + n
+
+    def ring(o):
+        n = struct.unpack_from('<I', b, o)[0]
+        d = np.frombuffer(b, '<i2', 2 * n, o + 4).reshape(-1, 2).astype(np.int64).cumsum(0)
+        return d * k + (ox, oy), o + 4 + 4 * n
+    return b, ox, oy, size, sec, ring
+
+
 # ---------------------------------------------------------------- roads and other lines
 # kind ids shared with the page (KIND in public/core/tile-worker.js)
 KINDS = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living', 'pedestrian', 'footway', 'cycleway',

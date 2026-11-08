@@ -50,6 +50,7 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.world.fromLatLon(lat, lon)` | `THREE.Vector3` on the ground at that point |
 | `city.world.toLatLon(x, z)` | `{ lat, lon }` |
 | `city.world.heightAt(x, z)` | ground height in metres (real elevation, from the finest loaded tile; 0 where nothing is loaded yet) |
+| `city.world.offRoad(x, z, margin = 0.6, maxD = 8)` | for street furniture: the nearest `{ x, z }` at least `margin` m off the carriageways and cycle tracks the map draws (detail tiles), within `maxD` m; `null` where `(x, z)` is clear already or no detail tile is loaded there |
 | `city.world.eachTile(fn)` | `fn(tile)` for every loaded map tile now and later (`{ level, i, j, ox, oy, size, graph, terrain, footprints, water, trees }`, see below); returns an unsubscribe |
 | `city.world.suppressBuildings(ring)` | `[[lat, lon], …]`: the generic building there is removed because your plugin draws its own |
 | `city.view.zoom`, `.center`, `.metresPerPixel`, `.bounds` | what is on screen (`bounds`: `{x0, z0, x1, z1}`) |

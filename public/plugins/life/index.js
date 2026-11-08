@@ -239,6 +239,16 @@ export default function life(city) {
     sig.meshes = []; sig.d = sig.lamps = sig.glow = null
     sig.heads = heads; sig.ctls = ctls
     const n = heads.length / 8
+    let moved = 0
+    for (let i = 0; i < n; i++) { // poles stand off the carriageways and cycle tracks as drawn (OSM's widths are only a guess); the arm reaches back over the lanes
+      const o = i * 8, p = city.world.offRoad(heads[o], -heads[o + 1], 0.5, 10)
+      if (!p) continue
+      moved++
+      const ax = Math.cos(heads[o + 3]), ay = Math.sin(heads[o + 3])
+      heads[o + 4] = Math.max(1.5, Math.min(14, heads[o + 4] + (heads[o] - p.x) * ax + (heads[o + 1] + p.z) * ay))
+      heads[o] = p.x; heads[o + 1] = -p.z; heads[o + 2] = city.world.heightAt(p.x, p.z)
+    }
+    if (window.lifeDebug) { let on = 0; for (let i = 0; i < n; i++) if (city.tiles?.onRoad?.(heads[i * 8], heads[i * 8 + 1])) on++; console.log(`life: ${n} signal poles, ${moved} moved off the street, ${on} still on it`) }
     sig.state = new Int8Array(n).fill(-1)
     if (!n) return
     const pole = new THREE.InstancedMesh(poleGeo, greyMat, n), arm = new THREE.InstancedMesh(armGeo, greyMat, n), head = new THREE.InstancedMesh(headGeo, housingMat, n)

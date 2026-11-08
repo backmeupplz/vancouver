@@ -112,7 +112,7 @@ export default function drive(city) {
   }
   // things to bump into, 6 floats each (x, north, radius, kind, angle, ground) on a 32 m grid over the tile (start
   // offsets per cell, like a counting sort): tree trunks, and the street lamps, stop / give-way and bus stop signs the
-  // tiles have as points. Signs and lamps mapped on the carriageway are moved to its kerb.
+  // tiles have as points. Signs and lamps mapped on the carriageway are moved to its kerb, and off the street as drawn.
   function furniture(b) {
     const t = b.t, K = 1024 / CELL, P = []
     const KIND = { 3: LAMP, 2: STOP, 6: YIELD, 5: BUS, 4: BENCH }
@@ -131,10 +131,12 @@ export default function drive(city) {
         if (d < 0.4) { x = px + nx * (s.p.w / 2 + 0.6); y = py + ny * (s.p.w / 2 + 0.6) } // on the street: to the kerb
         ang = kind === LAMP ? Math.atan2(nx, -ny) : yawFromDir(Math.atan2(dy, dx)) // lamps reach over it, signs face along it
       }
+      const off = kind !== BENCH && city.world.offRoad(x, -y, 0.4, 6) // and off the street as the map draws it
+      if (off) { x = off.x; y = -off.z }
       P.push(x, y, kind === LAMP ? 0.15 : kind === BENCH ? 0.6 : 0.1, kind, ang, city.world.heightAt(x, -y))
     }
     const T = t.trees, pos = T?.pos || T?.geometry?.attributes.iPos?.array, size = T?.size || T?.geometry?.attributes.iSize?.array
-    if (pos && t.level === 0) for (let i = 0; i < pos.length / 3; i++) P.push(t.ox + pos[i * 3], t.oy - pos[i * 3 + 2], Math.max(0.15, size[i * 2] * 0.035), 0, 0, pos[i * 3 + 1])
+    if (pos && t.level === 0) for (let i = 0; i < pos.length / 3; i++) P.push(t.ox + pos[i * 3], t.oy - pos[i * 3 + 2], Math.min(0.4, Math.max(0.15, size[i * 2] * 0.03)), 0, 0, pos[i * 3 + 1])
     const n = P.length / 6, cnt = new Uint32Array(K * K + 1), cellOf = (i) => clamp(Math.floor((P[i * 6 + 1] - t.oy) / CELL), 0, K - 1) * K + clamp(Math.floor((P[i * 6] - t.ox) / CELL), 0, K - 1)
     for (let i = 0; i < n; i++) cnt[cellOf(i) + 1]++
     for (let i = 0; i < K * K; i++) cnt[i + 1] += cnt[i]

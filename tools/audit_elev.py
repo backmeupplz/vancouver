@@ -10,14 +10,14 @@
 # Run: uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/audit_elev.py <tiles dir> [procs] [i_j ...]
 # Writes <tiles dir>/audit.json (every finding, worst first) and prints counts and the worst of each kind with a view
 # hash for the site (#X,Y,zoom; main.js setView: X = E*6 + 23551.5, Y = 9727.5 - (N*0.5 + h*0.866)*6).
-import gzip, json, os, struct, sys
+import json, os, struct, sys
 from multiprocessing import Pool
 import numpy as np
 import shapely
 from shapely.geometry import LineString, Polygon
 from shapely.strtree import STRtree
 sys.path.insert(0, os.path.dirname(__file__))
-from common import latlon, L0, KINDS, line_kind, hnum, hr_lookup, densify, all_tiles, tile_args, load_feat
+from common import read_tile, latlon, L0, KINDS, line_kind, hnum, hr_lookup, densify, all_tiles, tile_args, load_feat
 
 DIR = sys.argv[1] if len(sys.argv) > 1 else 'public/tiles'
 TUNNEL = ('yes', 'building_passage', 'culvert')
@@ -25,17 +25,7 @@ TUNNEL = ('yes', 'building_passage', 'culvert')
 
 def parse(path):
     """a baked tile -> (ox, oy, size, terrain n x n, lines [dict], buildings [dict])"""
-    b = gzip.decompress(open(path, 'rb').read())
-    ox, oy, size = struct.unpack_from('<fff', b, 8)
-    k = (2 * size) / 32766
-    sec, o = {}, 20
-    while o < len(b):
-        tag = b[o:o + 4].decode(); n = struct.unpack_from('<I', b, o + 4)[0]; sec[tag] = (o + 8, n); o += 8 + n
-
-    def ring(o):
-        n = struct.unpack_from('<I', b, o)[0]
-        d = np.frombuffer(b, '<i2', 2 * n, o + 4).reshape(-1, 2).astype(np.int64).cumsum(0)
-        return d * k + (ox, oy), o + 4 + 4 * n
+    b, ox, oy, size, sec, ring = read_tile(path)
     o = sec['TERR'][0]; n = struct.unpack_from('<H', b, o)[0]
     terr = np.frombuffer(b, '<i2', n * n, o + 2).reshape(n, n) / 10.0
     lines = []
@@ -62,6 +52,7 @@ def parse(path):
             if fl & 8: o += 4
             if fl & 16: o += 6
             if fl & 32: o += 2
+            if fl & 128: o += 2  # facade looks (tools/facades.py)
             if fl & 64: o += 1 + 8 * b[o]
             pts, o = ring(o)
             blds.append(dict(base=base / 10, bot=base / 10 + mn, top=base / 10 + max(h / 10, ridge), ring=pts))

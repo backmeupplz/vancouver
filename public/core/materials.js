@@ -39,12 +39,12 @@ const surfUniforms = (s) => { s.uniforms.wet = surface.wet; s.uniforms.snow = su
 
 // ---------------------------------------------------------------- ground
 // class order matches tools/tiles.py GROUND
-const GROUND_COLOURS = [
-  [126, 160, 92], [122, 156, 88], [178, 174, 164], [168, 160, 146], [168, 176, 104], [112, 164, 74], [108, 174, 80], [112, 134, 82],
-  [98, 130, 94], [56, 98, 54], [230, 214, 172], [152, 148, 142], [180, 162, 132], [150, 152, 154], [122, 125, 129], [204, 198, 186],
-  [198, 172, 132], [100, 168, 72], [190, 102, 76], [40, 98, 150], [176, 150, 110], [96, 192, 222], [240, 244, 248],
+const GROUND_COLOURS = [ // stylized but true: greens by land cover (not neon), teal water, grey asphalt, light concrete walks
+  [124, 150, 90], [122, 146, 90], [178, 174, 164], [168, 162, 150], [166, 166, 108], [110, 152, 78], [104, 160, 80], [110, 132, 84],
+  [98, 128, 94], [60, 98, 58], [226, 212, 174], [154, 150, 144], [178, 162, 134], [146, 148, 150], [112, 115, 120], [196, 192, 182],
+  [196, 172, 136], [98, 152, 72], [184, 102, 78], [52, 104, 128], [168, 148, 118], [92, 184, 206], [240, 244, 248],
   // 23 trail, walk, cycle, ballast, sidewalk, blvd, road, arterial (order = tools/tiles.py GROUND)
-  [184, 164, 128], [206, 202, 194], [104, 108, 112], [140, 128, 114], [200, 198, 190], [108, 160, 76], [120, 123, 128], [104, 108, 115],
+  [182, 164, 130], [196, 192, 184], [98, 102, 108], [132, 120, 108], [190, 188, 180], [106, 144, 76], [104, 107, 113], [96, 99, 106],
 ]
 export function groundMaterial() {
   const m = new THREE.MeshLambertMaterial()
@@ -132,11 +132,11 @@ export function roadMaterial(decal = false) {
         vec3 col; float dPaint = 0.0; vec3 dCol = vec3(1.0);
         float grain = 0.94 + 0.08 * noise(vW.xz * 2.3) + 0.04 * noise(vW.xz * 0.2);
         if (kind == 101) { // bridge deck fascia and underside
-          col = srgb(vec3(0.78, 0.77, 0.73)) * grain;
+          col = srgb(vec3(0.70, 0.69, 0.66)) * grain;
         } else if (kind == 100) { // sidewalks, kerbs, boulevards (under the carriageway)
           float blvd = floor(vR2.x / 256.0), walk = floor(mod(vR2.x, 256.0) / 16.0);
           float e = at - w * 0.5;
-          vec3 concrete = srgb(vec3(0.80, 0.78, 0.74)) * grain, kerb = srgb(vec3(0.88, 0.87, 0.84)), grass = srgb(vec3(0.42, 0.62, 0.30)) * (0.92 + 0.12 * noise(vW.xz * 0.5));
+          vec3 concrete = srgb(vec3(0.68, 0.67, 0.64)) * grain, kerb = srgb(vec3(0.78, 0.77, 0.74)), grass = srgb(vec3(0.38, 0.50, 0.28)) * (0.92 + 0.12 * noise(vW.xz * 0.5));
           col = concrete;
           if (blvd > 0.0) col = mix(col, grass, band(e, 0.25, 0.25 + blvd, ft));
           col = mix(col, kerb, band(e, -0.1, 0.25, ft));
@@ -152,14 +152,14 @@ export function roadMaterial(decal = false) {
           col = srgb(vec3(0.94, 0.94, 0.9));
           dPaint = band(fract(s / 1.1), 0.0, 0.5, fs / 1.1) * step(at, w * 0.5 + 0.2); dCol = col;
         } else if (kind >= 9 && kind <= 13) { // footway, cycleway, path, steps, track
-          col = kind == 10 ? srgb(vec3(0.40, 0.42, 0.44)) : kind == 11 || kind == 13 ? srgb(vec3(0.72, 0.64, 0.50)) : srgb(vec3(0.82, 0.80, 0.76));
+          col = kind == 10 ? srgb(vec3(0.40, 0.42, 0.44)) : kind == 11 || kind == 13 ? srgb(vec3(0.72, 0.64, 0.50)) : srgb(vec3(0.71, 0.70, 0.67));
           col *= grain;
           if (kind == 10) col = mix(col, srgb(vec3(0.95, 0.95, 0.9)), band(at, 0.0, 0.06, ft) * band(fract(s / 4.0), 0.0, 0.5, fs) * detail);
           if (kind == 12) col *= 1.0 - 0.18 * band(fract(s / 0.35), 0.0, 0.18, fs) * detail;
         } else { // carriageways, runways, taxiways
           float lanes = mod(vR2.x, 32.0), oneway = step(31.5, vR2.x);
           float dA = vR2.y, dB = vR2.z, len = vR2.w;
-          col = srgb(kind <= 4 || kind >= 16 ? vec3(0.40, 0.42, 0.45) : vec3(0.47, 0.48, 0.50)) * grain;
+          col = srgb(kind <= 4 || kind >= 16 ? vec3(0.33, 0.34, 0.36) : vec3(0.36, 0.37, 0.39)) * grain;
           col *= 1.0 - 0.06 * band(at, w * 0.5 - 0.6, w * 0.5, ft); // gutters
           float junctionFade = smoothstep(9.0, 12.0, min(dA, dB)); // no lane paint inside junctions
           vec3 white = srgb(vec3(0.94, 0.94, 0.90)), yellow = srgb(vec3(0.93, 0.78, 0.25));
@@ -251,7 +251,7 @@ export function buildingMaterial() {
         float seed = vWin.w, z = vWin.z, u = vWin.y;
         float gf = front * 4.5, zf = z - gf; // the storefront is one tall ground floor; storeys count from its top
         vec3 base = diffuseColor.rgb;
-        vec3 glassC = srgb(seed < 0.45 ? vec3(0.42, 0.72, 0.78) : seed < 0.65 ? vec3(0.42, 0.60, 0.78) : seed < 0.85 ? vec3(0.40, 0.70, 0.66) : vec3(0.30, 0.46, 0.62));
+        vec3 glassC = srgb(seed < 0.45 ? vec3(0.44, 0.62, 0.68) : seed < 0.65 ? vec3(0.42, 0.54, 0.66) : seed < 0.85 ? vec3(0.42, 0.60, 0.60) : vec3(0.32, 0.42, 0.54));
         if (style > 0.5) {
           vec3 pat, avg, col;
           if (style == 3.0) { // glass balcony towers (the 3D slabs come in close; this is the far look)
@@ -268,7 +268,7 @@ export function buildingMaterial() {
             float detail = clamp(1.6 - 2.5 * max(fw.x, fw.y), 0.0, 1.0);
             float slab = mix(0.14, 1.0 - smoothstep(0.14 - fw.y, 0.14 + fw.y, f.y), thin(0.14, fw.y));
             float mull = mix(0.07, 1.0 - smoothstep(0.07 - fw.x, 0.07 + fw.x, f.x), thin(0.07, fw.x));
-            vec3 cg = srgb(seed < 0.3 ? vec3(0.36, 0.62, 0.62) : seed < 0.55 ? vec3(0.40, 0.66, 0.70) : seed < 0.8 ? vec3(0.34, 0.56, 0.64) : vec3(0.46, 0.70, 0.64));
+            vec3 cg = srgb(seed < 0.3 ? vec3(0.38, 0.54, 0.56) : seed < 0.55 ? vec3(0.42, 0.58, 0.62) : seed < 0.8 ? vec3(0.36, 0.50, 0.58) : vec3(0.46, 0.60, 0.58));
             vec3 glass = cg * (0.8 + 0.4 * mix(0.6, f.y, thin(0.5, fw.y)));
             pat = mix(mix(glass, base, mull), base, slab);
             avg = mix(cg * 0.95, base, 0.2);
@@ -363,11 +363,13 @@ export function buildingMaterial() {
 
 // ---------------------------------------------------------------- trees: painted billboards from a canvas atlas
 // shapes (tools/tiles.py): 0 round, 1 columnar, 2 spreading, 3 weeping, 4 fir, 5 cedar, 6 pine, 7 palm
-// colour families: 0 green, 1 yellow, 2 orange, 3 red, 4 brown, 5 dark conifer, 6 blue-green conifer, 7 forest green, 8 thin
-const FAMILY = [
-  [0x4f9a36, 0x3f8a2e, 0x5aa040, 0x478e3a, 0x6aac44], [0xd8b23a, 0xc9a227, 0xe0c048, 0xb8a434], [0xe07a26, 0xd98f22, 0xc96a24, 0xe89a3a],
-  [0xb8452a, 0xa8342c, 0xc0502e, 0x9a2f36], [0x9a6a32, 0x8a7034, 0xa88a40], [0x2f5e3c, 0x2a5638, 0x376840, 0x244c30],
-  [0x4a7464, 0x3e6a5c, 0x527c6c], [0x3a6a30, 0x447436, 0x2f5e2c, 0x4e7c3a], [0x8a8a5a, 0x9a9060],
+// colour families: 0 green, 1 yellow, 2 orange, 3 red, 4 brown, 5 dark conifer, 6 blue-green conifer, 7 forest green, 8 thin,
+// 9 cherry, 10 cherry in blossom (tiles.js picks the season's)
+const FAMILY = [ // muted, the way a canopy reads from above in late October
+  [0x4e7a36, 0x56823a, 0x46702f, 0x5c8640, 0x648a42], [0xc4a23e, 0xb4983a, 0xccac4c, 0xa69238], [0xc47a32, 0xbc8836, 0xb06a2e, 0xcc9240],
+  [0xa64c32, 0x963e32, 0xae5a36, 0x8c3c34], [0x8a6a3a, 0x7e6c3a, 0x967e46], [0x2e5034, 0x2a4c32, 0x345a3a, 0x24462e],
+  [0x46685c, 0x3c6054, 0x4c7062], [0x3c602e, 0x446834, 0x32562a, 0x4c6e3a], [0x8a8a5a, 0x9a9060],
+  [0xb85a3a, 0xc06a3c, 0xa84c36], [0xf0b4c6, 0xf4c4d2, 0xe6a6ba, 0xf8d4de], // 9 cherry (autumn), 10 cherry in blossom
 ].map((f) => f.map((h) => new THREE.Color(h)))
 export { FAMILY }
 
@@ -408,9 +410,9 @@ export function treeAtlas() {
     }
   }
   // 0 round, 1 columnar, 2 spreading, 3 weeping
-  { const [ox, oy] = cell(0); trunk(ox, oy, 0.72); crown(ox, oy, 0.5, 0.42, 0.33, 0.3) }
+  { const [ox, oy] = cell(0); trunk(ox, oy, 0.72); crown(ox, oy, 0.5, 0.42, 0.35, 0.32, 8, 80) }
   { const [ox, oy] = cell(1); trunk(ox, oy, 0.8, 0.05); crown(ox, oy, 0.5, 0.42, 0.18, 0.38, 6, 60) }
-  { const [ox, oy] = cell(2); trunk(ox, oy, 0.68, 0.07); crown(ox, oy, 0.5, 0.42, 0.44, 0.24, 9, 90) }
+  { const [ox, oy] = cell(2); trunk(ox, oy, 0.68, 0.07); crown(ox, oy, 0.5, 0.44, 0.42, 0.3, 9, 90) }
   { const [ox, oy] = cell(3); trunk(ox, oy, 0.6); crown(ox, oy, 0.5, 0.5, 0.32, 0.36, 7, 70)
     const X = (x) => ox + x * ATL, Y = (y) => oy + y * ATL; g2.strokeStyle = 'rgba(20,30,16,0.35)'; g2.lineWidth = 2
     for (let i = 0; i < 14; i++) { const x = 0.25 + i * 0.036; g2.beginPath(); g2.moveTo(X(x), Y(0.4)); g2.quadraticCurveTo(X(x - 0.02), Y(0.65), X(x - 0.03), Y(0.86)); g2.stroke() } }
@@ -452,7 +454,7 @@ export function treeMaterial(atlas) {
           mv = viewMatrix * vec4(w, 1.0);
         } else {
           mv = modelViewMatrix * vec4(iPos, 1.0);
-          mv.xy += position.xy * iSize;
+          mv.xy += position.xy * vec2(iSize.x, max(iSize.y, iVar < 3.5 ? iSize.x * 0.72 : 0.0)); // broadleaf: a wide crown seen from above stands taller
         }
         gl_Position = projectionMatrix * mv;
         #ifdef USE_FOG

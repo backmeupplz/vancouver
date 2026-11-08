@@ -39,7 +39,15 @@ function merge(parts) {
 const WHITE = new THREE.Color(1, 1, 1)
 const trunk = (top, r = 0.035, col = TRUNK) => part(new THREE.CylinderGeometry(r * 0.75, r, top, 6, 1).translate(0, top / 2, 0), 0, 1, col)
 // the biggest lump of a crown rounder (80 faces), the others 20: ~160 triangles a broadleaf tree
-const lump = (x, y, z, r, shade, sy = 1, detail = 0) => part(new THREE.IcosahedronGeometry(r, detail).scale(1, sy, 1).rotateY(x * 7 + z * 3).translate(x, y, z), 1, shade, WHITE)
+const lump = (x, y, z, r, shade, sy = 1, detail = 0) => {
+  const g = part(new THREE.IcosahedronGeometry(r, detail).scale(1, sy, 1).rotateY(x * 7 + z * 3).translate(x, y, z), 1, shade, WHITE)
+  const P = g.attributes.position.array, C = g.attributes.color.array
+  for (let i = 0; i < P.length / 3; i++) { // chunky faceted crowns: a darker underside, a sunlit top
+    const k = 0.84 + 0.3 * Math.min(1, Math.max(0, ((P[i * 3 + 1] - y) / (r * sy) + 1) / 2))
+    C[i * 3] *= k; C[i * 3 + 1] *= k; C[i * 3 + 2] *= k
+  }
+  return g
+}
 function broadleaf(bottom, lumps, trunkTop) { // crown from `bottom` to 1
   const h = 1 - bottom, cy = bottom + h * 0.5
   return merge([trunk(trunkTop), ...lumps.map(([x, y, z, r, s], i) => lump(x * 0.5, cy + y * h * 0.5, z * 0.5, r * Math.min(1, h * 1.25), s, h * 1.6 > 1 ? 1.25 : 1, i ? 0 : 1))])
@@ -80,7 +88,11 @@ export class Trees3D {
     const mat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true })
     mat.onBeforeCompile = (s) => {
       s.uniforms.occluder = occluder
-      s.vertexShader = s.vertexShader.replace('#include <common>', `#include <common>\nattribute float crown;\nvarying float vFade;\nvarying vec3 vWp;\n${OCCLUDE}`)
+      s.vertexShader = s.vertexShader.replace('#include <common>', `#include <common>\nattribute float crown;\nattribute vec2 iBase;\nvarying float vFade;\nvarying vec3 vWp;\n${OCCLUDE}`)
+        // street trees are pruned up: the crown starts at iBase.y (share of the height) instead of the model's iBase.x,
+        // the trunk stretched to meet it, so vans, buses and walkers pass under the leaves
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+          { float b0 = iBase.x, b = max(iBase.y, b0); transformed.y = transformed.y < b0 ? transformed.y * b / b0 : b + (transformed.y - b0) * (1.0 - b) / (1.0 - b0); }`)
         .replace('#include <color_vertex>', THREE.ShaderChunk.color_vertex.replace('vColor.xyz *= instanceColor.xyz;', 'vColor.xyz *= mix(vec3(1.0), instanceColor.xyz, crown);'))
         // a tree whose crown is between the camera and the player, that the camera stands under (a street tree over
         // the sidewalk would fill the view with leaves) or whose crown is right by the lens, dissolves (its shadow stays)
@@ -94,9 +106,14 @@ export class Trees3D {
       s.fragmentShader = s.fragmentShader.replace('#include <common>', `#include <common>\nvarying float vFade;\nvarying vec3 vWp;\n${DISSOLVE}`)
         .replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\ndissolve(vWp, vFade);')
     }
-    mat.customProgramCacheKey = () => 'tree3d2'
+    mat.customProgramCacheKey = () => 'tree3d3'
     this.meshes = SHAPES.map((f) => {
-      const m = new THREE.InstancedMesh(f(), mat, MAX)
+      const geo = f(), P = geo.attributes.position.array, Cr = geo.attributes.crown.array
+      let b0 = 1
+      for (let i = 0; i < Cr.length; i++) if (Cr[i] > 0.5) b0 = Math.min(b0, P[i * 3 + 1]) // where the model's leaves start
+      geo.setAttribute('iBase', new THREE.InstancedBufferAttribute(new Float32Array(MAX * 2).fill(Math.max(0.02, b0)), 2))
+      const m = new THREE.InstancedMesh(geo, mat, MAX)
+      m.userData.b0 = Math.max(0.02, b0)
       m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX * 3), 3)
       m.instanceMatrix.setUsage(THREE.DynamicDrawUsage); m.instanceColor.setUsage(THREE.DynamicDrawUsage)
       m.count = 0; m.castShadow = true; m.receiveShadow = true; m.frustumCulled = false
@@ -143,6 +160,11 @@ export class Trees3D {
     this.grids.set(t, g)
     return g
   }
+  // does a crown of radius r round (x, y) (world metres, y north) reach over a carriageway or cycle track?
+  over(x, y, r) {
+    for (let a = 0; a < 8; a++) if (this.tiles.onRoad(x + Math.cos(a * 0.785) * r, y + Math.sin(a * 0.785) * r)) return true
+    return this.tiles.onRoad(x, y)
+  }
   cell(P, i, k) { return Math.min(k - 1, Math.max(0, Math.floor(-P[i * 3 + 2] / CELL))) * k + Math.min(k - 1, Math.max(0, Math.floor(P[i * 3] / CELL))) }
 
   rebuild(cx, cz) {
@@ -173,20 +195,30 @@ export class Trees3D {
     const counts = this.meshes.map(() => 0), { M, q, s, p, c } = this
     for (let k = 0; k < n; k++) {
       const [, t, e] = near[k], A = t.trees.geometry.attributes
-      const shape = A.iVar.array[e] | 0, mesh = this.meshes[shape], w = A.iSize.array[e * 2], h = A.iSize.array[e * 2 + 1] / 0.866
+      const shape = A.iVar.array[e] | 0, mesh = this.meshes[shape], h = A.iSize.array[e * 2 + 1] / 0.866
+      let w = A.iSize.array[e * 2] * 0.9
       const x = A.iPos.array[e * 3], y = A.iPos.array[e * 3 + 1], z = A.iPos.array[e * 3 + 2]
       const seed = (x * 0.37 + z * 0.73) % 6.283
+      // clearance: leaves at least 2.5 m up over sidewalks, 4.5 m where the crown reaches over a carriageway; a young
+      // tree too small for that keeps its crown off the street instead
+      const wx = t.ox + x, wy = t.oy - z
+      let clear = shape === 7 ? 0 : 2.5
+      if (clear && this.over(wx, wy, w * 0.45)) {
+        if (h >= 7.5) clear = 4.5
+        else { while (w > 2 && this.over(wx, wy, w * 0.45)) w -= 0.75 }
+      }
       p.set(t.ox + x, y - 0.1, -t.oy + z)
       q.setFromAxisAngle(UP, seed)
       s.set(w * (shape === 1 ? 1.1 : 1), h, w * (0.9 + 0.2 * Math.abs(Math.sin(seed * 3.1))))
       const i = counts[shape]++
       mesh.setMatrixAt(i, M.compose(p, q, s))
-      c.fromArray(A.iCol.array, e * 3).multiplyScalar(0.8) // lit by the sun, a little darker than the painted billboards
+      mesh.geometry.attributes.iBase.setXY(i, mesh.userData.b0, Math.min(0.7, clear / h))
+      c.fromArray(A.iCol.array, e * 3) // lit by the sun like the painted billboards
       mesh.setColorAt(i, c)
     }
     this.meshes.forEach((m, i) => { // upload only what is drawn
       m.count = counts[i]
-      for (const a of [m.instanceMatrix, m.instanceColor]) { a.clearUpdateRanges(); a.addUpdateRange(0, counts[i] * a.itemSize); a.needsUpdate = true }
+      for (const a of [m.instanceMatrix, m.instanceColor, m.geometry.attributes.iBase]) { a.clearUpdateRanges(); a.addUpdateRange(0, counts[i] * a.itemSize); a.needsUpdate = true }
     })
     // the billboards inside the circle step aside
     this.treeMaterial.uniforms.near3d.value.set(cx, cz, R)
