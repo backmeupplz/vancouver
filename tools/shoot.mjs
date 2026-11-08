@@ -14,6 +14,7 @@ try {
     const map = v.startsWith('#'), [kind, a, b, c] = v.split(/[:,]/), game = !map
     const { browser, page, errs } = await open({ ...o, port: srv.port, query: game ? '?drivedebug' : '', hash: map ? v : '' })
     await settle(page, 800)
+    if (game && kind !== 'sail') await page.waitForFunction(() => window.driveDebug, null, { timeout: 30000 })
     if (kind === 'sail') {
       await page.evaluate(([la, lo]) => { const c = city, d = c.world.fromLatLon(la, lo).sub(c.controls.target); c.camera.position.add(d); c.controls.target.add(d); c.camera.zoom = 0.12; c.camera.updateProjectionMatrix(); c.controls.update(); c.requestRender() }, [+a, +b])
       await settle(page, 1500)

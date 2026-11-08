@@ -25,38 +25,41 @@ export default function scans(city) {
 
   // ---------- far: the footprint massing of every landmark not drawn near ----------
   let far = null
-  function buildFar() {
+  function farOf(s) { // its massing's triangles, made once
     const pos = [], col = [], win = []
     const tri = (ps, c, ws, want) => { // wound to face `want`
       const [a, b, d] = ps, nx = (b[1] - a[1]) * (d[2] - a[2]) - (b[2] - a[2]) * (d[1] - a[1]), ny = (b[2] - a[2]) * (d[0] - a[0]) - (b[0] - a[0]) * (d[2] - a[2]), nz = (b[0] - a[0]) * (d[1] - a[1]) - (b[1] - a[1]) * (d[0] - a[0])
       const o = nx * want[0] + ny * want[1] + nz * want[2] < 0 ? [0, 2, 1] : [0, 1, 2]
       for (const i of o) { pos.push(...ps[i]); col.push(...c); win.push(...ws[i]) }
     }
-    for (const s of L) {
-      if (s.near && s.mesh) continue
-      const wall = lin(s.l.wall), roof = lin(s.l.roof), wk = kind(s.l.pattern, s.l), rw = [0, 0, 999, s.seed]
-      for (const [mn, h, ...f] of s.l.far) {
-        const r = pairs(f).map(([la, lo]) => { const p = city.world.fromLatLon(la, lo); return [p.x, p.z] })
-        const [cx, cz] = r.reduce((m, p) => [m[0] + p[0] / r.length, m[1] + p[1] / r.length], [0, 0])
-        const y0 = s.g + mn, y1 = s.g + h, w = (uu, y) => [wk, uu, y - s.g, s.seed + s.l.use]
-        let u = 0
-        for (let i = 0; i < r.length; i++) {
-          const a = r[i], b = r[(i + 1) % r.length], len = Math.hypot(b[0] - a[0], b[1] - a[1])
-          const want = [(a[0] + b[0]) / 2 - cx, 0, (a[1] + b[1]) / 2 - cz] // outward, near enough for a footprint
-          const A0 = [a[0], y0, a[1]], B0 = [b[0], y0, b[1]], B1 = [b[0], y1, b[1]], A1 = [a[0], y1, a[1]]
-          tri([A0, B0, B1], wall, [w(u, y0), w(u + len, y0), w(u + len, y1)], want)
-          tri([A0, B1, A1], wall, [w(u, y0), w(u + len, y1), w(u, y1)], want)
-          u += len
-        }
-        for (const t of THREE.ShapeUtils.triangulateShape(r.map(([x, z]) => new THREE.Vector2(x, z)), [])) tri(t.map((i) => [r[i][0], y1, r[i][1]]), roof, [rw, rw, rw], [0, 1, 0])
+    const wall = lin(s.l.wall), roof = lin(s.l.roof), wk = kind(s.l.pattern, s.l), rw = [0, 0, 999, s.seed]
+    for (const [mn, h, ...f] of s.l.far) {
+      const r = pairs(f).map(([la, lo]) => { const p = city.world.fromLatLon(la, lo); return [p.x, p.z] })
+      const [cx, cz] = r.reduce((m, p) => [m[0] + p[0] / r.length, m[1] + p[1] / r.length], [0, 0])
+      const y0 = s.g + mn, y1 = s.g + h, w = (uu, y) => [wk, uu, y - s.g, s.seed + s.l.use]
+      let u = 0
+      for (let i = 0; i < r.length; i++) {
+        const a = r[i], b = r[(i + 1) % r.length], len = Math.hypot(b[0] - a[0], b[1] - a[1])
+        const want = [(a[0] + b[0]) / 2 - cx, 0, (a[1] + b[1]) / 2 - cz] // outward, near enough for a footprint
+        const A0 = [a[0], y0, a[1]], B0 = [b[0], y0, b[1]], B1 = [b[0], y1, b[1]], A1 = [a[0], y1, a[1]]
+        tri([A0, B0, B1], wall, [w(u, y0), w(u + len, y0), w(u + len, y1)], want)
+        tri([A0, B1, A1], wall, [w(u, y0), w(u + len, y1), w(u, y1)], want)
+        u += len
       }
+      for (const t of THREE.ShapeUtils.triangulateShape(r.map(([x, z]) => new THREE.Vector2(x, z)), [])) tri(t.map((i) => [r[i][0], y1, r[i][1]]), roof, [rw, rw, rw], [0, 1, 0])
     }
+    return { pos, col, win }
+  }
+  function buildFar() {
+    const parts = L.filter((s) => !(s.near && s.mesh)).map((s) => (s.far ??= farOf(s)))
+    const cat = (k, n) => { const a = new Float32Array(parts.reduce((t, p) => t + p[k].length, 0)); let o = 0; for (const p of parts) { a.set(p[k], o); o += p[k].length } return new THREE.BufferAttribute(a, n) }
+    const pos = cat('pos', 3)
     if (far) { city.scene.remove(far); far.geometry.dispose(); far = null }
-    if (!pos.length) return
+    if (!pos.count) return
     const geo = new THREE.BufferGeometry()
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
-    geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3))
-    geo.setAttribute('aWin', new THREE.Float32BufferAttribute(win, 4))
+    geo.setAttribute('position', pos)
+    geo.setAttribute('color', cat('col', 3))
+    geo.setAttribute('aWin', cat('win', 4))
     geo.computeVertexNormals()
     far = add(new THREE.Mesh(geo, mat))
   }

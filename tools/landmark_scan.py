@@ -165,9 +165,9 @@ def surface(X, Y, Z, own_poly, other_polys, sculpture=False):
     top = float(np.percentile(dsm[on], 99.9)) + 1 if on.any() else 0
     zs = np.arange(DZ / 2, top + DZ, DZ)
     regs = slices(on, dsm, Z, ix, iy, zs) if not sculpture else [on & (dsm >= z) for z in zs]
-    if not sculpture and len(zs) > 7:  # an overhang's outline holds for metres: a slice or two that differ are jitter
+    if not sculpture and len(zs) > 21:  # an overhang's outline holds for metres: a slice or two that differ are jitter
         cut = np.stack([(on & (dsm >= z)) & ~r for z, r in zip(zs, regs)])
-        cut = ndimage.median_filter(cut, size=(9, 1, 1))
+        cut = ndimage.median_filter(cut, size=(21, 1, 1))
         regs = [(on & (dsm >= z)) & ~c for z, c in zip(zs, cut)]
     nb = int(round(BELOW / DZ))
     sm = np.where(on, ndimage.median_filter(dsm, size=3), dsm) if not sculpture else dsm  # roof speckle
