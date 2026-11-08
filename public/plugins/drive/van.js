@@ -107,6 +107,13 @@ export const VAN = {
   pitch: [0.0085, -0.075, 0.05, 70, 8], roll: [0.011, 0.085, 55, 6.5],
   hl: 2.2, hw: 0.95, length: 4.3, width: 1.8, pivot: 0, wheel: 0.36, // collision box half length / width; pivot: how far the body's middle is ahead of the axle it turns about
   circles: [[1.45, 0, -1.45], 1.05], // against buildings: circles along it (metres ahead of the middle) and their radius
+  // grip: the tyres' friction; tract: the share of it the drive wheels pull with; flat: how much less the high gears
+  // pull (1: by the ratio); turnG: the cornering limit; the handbrake: its drag (m/s²), the rear grip left (slide) and
+  // how much more it turns (handYaw), coming back over 1 / slipBack s; nitro: the boost's push (m/s², 0: none) and
+  // top speed (× vmax); airYaw: steering while airborne (rad/s); keep: the share of a slide the tyres turn back into
+  // speed as they grip again (an arcade drift doesn't scrub it off); drift: in an arcade drift the slide dies away at
+  // this rate (1/s) rather than by the tyres' grip, so the cab holds an angle; mass (kg)
+  grip: 0.95, tract: 0.55, flat: 1, turnG: 1.05, handDrag: 5, slide: 0.3, handYaw: 1.4, slipBack: Infinity, nitro: 0, nvmax: 1, airYaw: 0, keep: 0, drift: 0, mass: 1500,
 }
 // A Vancouver city bus: 12 m (New Flyer-ish) or 18 m articulated, a 6-cylinder diesel or trolley motor through a
 // five-speed automatic, slow to pull away, soft on its air springs (it leans and dives), a long wheelbase and turning
@@ -120,13 +127,22 @@ export const BUS = {
 }
 export const ARTIC = { ...BUS, push: 2.3, wb: 5.8, hl: 5.6, length: 18.3, pivot: 2.6, circles: [[4.4, 2.2, 0, -2.2, -4.4], 1.35],
   joint: 5.85, trail: 4.4, rear: [3.7, 3.45, [2.2, 0, -2.2]] } // the joint behind the middle, the rear axle behind it; the rear box: its middle behind the joint, half length, circles
+// Arcade cabs for the taxi game (taxi.js): quick, fast, forgiving; the handbrake drifts rather than stops, a nitro
+// boost past the top speed, a little steering in the air. Each cab is this with its own numbers (taxiSpec).
+export const TAXI = {
+  ...VAN, gears: [3.3, 2.2, 1.6, 1.22, 0.96, 0.8], rpmPer: 150, redline: 6800, up: [2600, 3000], down: [1300, 1100],
+  vmax: 34, vrev: 9, push: 11, brake: 11, drag: 0.00035, lock: 0.6, lockV: 16, under: 0.0005, thr: 7, brk: 12,
+  tract: 0.9, flat: 0.45, turnG: 1.7, handDrag: 1.2, slide: 0.35, handYaw: 1.6, slipBack: 1.8, nitro: 9, nvmax: 1.4, airYaw: 1.6, keep: 0.75, drift: 2.2,
+}
+// s: { vmax (m/s), push, grip, mass (kg), tank (s of nitro), wb, hl, hw, wheel, circles, ... }: TAXI with those
+export const taxiSpec = (s) => ({ ...TAXI, ...s, length: s.hl * 2, width: s.hw * 2 })
 const G = 9.8
 export function newVan(V = VAN) {
   return { V, speed: 0, lat: 0, yaw: 0, steer: 0, kick: 0, yawRate: 0, gear: 1, rpm: V.idle, thr: 0, brk: 0, shiftT: 0, revT: 0, ax: 0,
-    pitch: 0, parked: false, nopower: false, bp: 0, bpv: 0, br: 0, brv: 0, hz: 0, hv: 0 } // pitch: the ground's; bp / br / hz: the body on its springs
+    pitch: 0, parked: false, nopower: false, bp: 0, bpv: 0, br: 0, brv: 0, hz: 0, hv: 0, slip: 0, boost: false, air: false } // pitch: the ground's; bp / br / hz: the body on its springs; boost / air: set by the caller
 }
 export function stepVan(c, dt, I, grip) {
-  const V = c.V, GEARS = V.gears, mu = 0.95 * grip, sp = Math.abs(c.speed), s0 = c.speed
+  const V = c.V, GEARS = V.gears, mu = V.grip * grip, sp = Math.abs(c.speed), s0 = c.speed
   // into reverse: hold the brake at a standstill for a moment; back into drive the same way with the gas
   if (c.gear > 0 ? I.down && c.speed < 0.3 : I.up && c.speed > -0.3) { if ((c.revT += dt) > 0.3) { c.gear = c.gear > 0 ? -1 : 1; c.revT = 0 } } else c.revT = 0
   const fwd = c.gear > 0, gas = !c.parked && !c.nopower && (fwd ? I.up : I.down), brake = fwd ? I.down : I.up
@@ -144,12 +160,16 @@ export function stepVan(c, dt, I, grip) {
   c.rpm += (Math.min(V.redline, rpmT) - c.rpm) * (1 - Math.exp(-14 * dt))
   // pushing: torque (a flat curve, a little peak mid-range) through the gear, not past the tyres' grip; the limiter
   const tq = 0.78 + 0.22 * Math.sin(Math.PI * clamp((c.rpm - V.band[0]) / V.band[1], 0, 1))
-  let push = c.shiftT > 0 ? 0 : c.thr * V.push * (ratio / GEARS[0]) * tq
-  push = Math.min(push * clamp(((fwd ? V.vmax : V.vrev) - sp) / 1.5, 0, 1), mu * G * 0.55)
-  c.speed += ((fwd ? push : -push) - G * Math.sin(clamp(c.pitch, -0.2, 0.2)) * (c.parked ? 0 : 0.8)) * dt // (no street is steeper than 20%)
+  let push = c.shiftT > 0 ? 0 : c.thr * V.push * (ratio / GEARS[0]) ** V.flat * tq
+  push = Math.min(push * clamp(((fwd ? V.vmax : V.vrev) - sp) / 1.5, 0, 1), mu * G * V.tract)
+  // nitro: a push of its own, past the top speed (forward only, not when held)
+  if (c.boost && fwd && V.nitro && !c.parked) push += V.nitro * clamp((V.vmax * V.nvmax - c.speed) / 3, 0, 1)
+  if (c.air) push = 0 // the wheels spin in the air: only the boost pushes
+  if (c.air && c.boost && fwd && V.nitro) push = V.nitro * 0.5
+  c.speed += ((fwd ? push : -push) - (c.air ? 0 : G * Math.sin(clamp(c.pitch, -0.2, 0.2)) * (c.parked ? 0 : 0.8))) * dt // (no street is steeper than 20%)
   // holding back, never past a standstill: the brakes (as hard as the tyres allow), the handbrake, rolling, air, and
   // the engine off the gas
-  const res = c.brk * Math.min(V.brake, mu * G) + (c.parked ? 12 : I.hand ? Math.min(5, mu * G * 0.6) : 0) + 0.15 + V.drag * c.speed * c.speed + (gas ? 0 : 0.3 + c.rpm / 9000)
+  const res = c.air ? V.drag * c.speed * c.speed : c.brk * Math.min(V.brake, mu * G) + (c.parked ? 12 : I.hand ? Math.min(V.handDrag, mu * G * 0.6) : 0) + 0.15 + V.drag * c.speed * c.speed + (gas ? 0 : 0.3 + c.rpm / 9000)
   c.speed = Math.abs(c.speed) <= res * dt ? 0 : c.speed - Math.sign(c.speed) * res * dt
   // steering: less lock the faster, eased in
   const maxSteer = V.lock / (1 + sp / V.lockV)
@@ -158,10 +178,12 @@ export function stepVan(c, dt, I, grip) {
   // front tyres can hold; pushing against a wall still lets it creep round as if at walking pace
   const turnV = sp < 1.2 && gas ? (fwd ? 1.2 : -1.2) : c.speed
   let yr = (turnV * Math.tan(c.steer)) / (V.wb * (1 + (V.under / grip) * c.speed * c.speed))
-  const lim = (mu * G * 1.05) / Math.max(2, sp)
+  const lim = (mu * G * V.turnG) / Math.max(2, sp)
   yr = clamp(yr, -lim, lim)
-  const hand = I.hand && sp > 3
-  if (hand) yr *= 1.4 // the rear lets go
+  // the handbrake: the rear lets go (a van grips again as soon as it is let off, a cab's drift dies away)
+  c.slip = I.hand && sp > 3 ? 1 : Math.max(0, c.slip - dt * (V.slipBack === Infinity ? 1e9 : V.slipBack))
+  yr *= 1 + (V.handYaw - 1) * c.slip
+  if (c.air) yr = clamp(I.steer, -1, 1) * V.airYaw // in the air: a little air control, no tyres
   yr += c.kick
   c.kick *= Math.exp(-5 * dt)
   // the van turns, its momentum doesn't: the velocity is split anew along the turned body...
@@ -169,8 +191,11 @@ export function stepVan(c, dt, I, grip) {
   c.yaw += d
   c.speed = s * cs - l * sn; c.lat = s * sn + l * cs
   // ...and the tyres pull the sideways part out as hard as their grip allows: a slide where they can't
-  const pull = mu * G * (hand ? 0.3 : 1) * dt
+  let pull = c.air ? 0 : mu * G * (1 - (1 - V.slide) * c.slip) * dt
+  if (V.drift && c.slip && !c.air) pull += (Math.abs(c.lat) * (1 - Math.exp(-V.drift * dt)) - mu * G * dt) * c.slip // arcade: an angle it holds
+  const lat0 = Math.abs(c.lat)
   c.lat = Math.abs(c.lat) <= pull ? 0 : c.lat - Math.sign(c.lat) * pull
+  if (V.keep && c.speed > 1) c.speed += (lat0 - Math.abs(c.lat)) * V.keep
   c.yawRate = yr
   // the body on its springs: squats as it pulls away, dives under braking, leans out of turns, bounces over kerbs
   const [pk, p0, p1, ps, pd] = V.pitch, [rk, rm, rs, rd] = V.roll

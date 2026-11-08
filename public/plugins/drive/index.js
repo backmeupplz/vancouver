@@ -18,7 +18,10 @@
 // Or drive a bus on a real TransLink route (route.js: the route picker, the GPS line, stops and passengers; bus.js: the
 // bus, 12 m or articulated, diesel or trolley): the same driving with a bus's numbers (van.js BUS, ARTIC), an articulated
 // rear section towed about its joint, the tail swinging out round a tight turn.
+// Or Rush Fare (taxi.js, cabs.js): an arcade cab shift against the clock, with van.js's arcade numbers (taxiSpec): drifts
+// on the handbrake, a nitro boost, air off crests and deck ends (the cab's lift over the road, fly()).
 import { makeVan, newVan, stepVan, jolt, VAN, BUS as CITYBUS, ARTIC } from './van.js'
+import { openGarage, taxiGame, specOf, CABS, DRIVERS, makeCab, CSS as TAXI_CSS } from './taxi.js'
 import { makeBus, setDoors } from './bus.js'
 import { loadLines, loadRoute, picker, busGame, accentOf, CSS as BUS_CSS } from './route.js'
 import { makeWalker, poseWalker } from './walker.js'
@@ -571,7 +574,7 @@ export default function drive(city) {
         .compact body.dlv-on .lofi { padding: 0 } .compact body.dlv-on .lofi-name, .compact body.dlv-on .lofi canvas { display: none }
       .compact body.dlv-on.dlv-touchy .lofi { bottom: max(16px, calc(env(safe-area-inset-bottom) + 4px)) !important; }
       }`
-    css.textContent += BUS_CSS
+    css.textContent += BUS_CSS + TAXI_CSS
     document.head.append(css)
     const el = (cls, html) => { const d = document.createElement('div'); d.className = cls; d.innerHTML = html; d.hidden = true; document.body.append(d); return d }
     const co = el('dlv dlv-co card', `<div class="name">Salmonberry Parcel Co.</div>
@@ -589,16 +592,16 @@ export default function drive(city) {
     const photo = el('dlv dlv-photo', '')
     const aboard = document.createElement('div'); aboard.className = 'aboard'; job.lastElementChild.append(aboard)
     const stam = document.createElement('div'); stam.className = 'dlv-stam'; stam.innerHTML = '<i></i>'; job.lastElementChild.append(stam)
-    const touch = el('dlv dlv-touch', '<button class="l" data-k="left" aria-label="Turn left">◀</button><button class="r" data-k="right" aria-label="Turn right">▶</button><button class="brk" data-k="brake" aria-label="Brake and reverse">Brake</button><button class="gas" data-k="gas" aria-label="Go">Go</button><button class="hrn" data-k="horn" aria-label="Horn">Horn</button><button class="hb" data-k="hand" aria-label="Handbrake">Hand<br>brake</button><button class="act" data-act hidden></button>')
+    const touch = el('dlv dlv-touch', '<button class="l" data-k="left" aria-label="Turn left">◀</button><button class="r" data-k="right" aria-label="Turn right">▶</button><button class="brk" data-k="brake" aria-label="Brake and reverse">Brake</button><button class="gas" data-k="gas" aria-label="Go">Go</button><button class="hrn" data-k="horn" aria-label="Horn">Horn</button><button class="hb" data-k="hand" aria-label="Handbrake">Hand<br>brake</button><button class="nos" data-k="nos" aria-label="Nitro">Nitro</button><button class="act" data-act hidden></button>')
     const q = (e, s) => e.querySelector(s)
     return { el, co, btns, read, job, help, act, pop, pickEl, touch, sheet, flash, photo, aboard, stam, stamBar: stam.firstChild,
       all: [co, btns, read, job, help, act, pop, pickEl, touch, sheet, flash, photo], n: q(co, '[data-n]'), m: q(co, '[data-m]'), c: q(co, '[data-c]'),
       assist: q(btns, '[data-assist]'), mute: q(btns, '[data-mute]'), exit: q(btns, '[data-exit]'), arrow: q(job, 'svg'), north: q(job, '.n'), w: q(job, '[data-w]'), p: q(job, '[data-p]'), s: q(job, '[data-s]'),
       d: q(job, '[data-d]'), t: q(job, '[data-t]'), b: q(pop, '[data-b]'), qq: q(pop, '[data-q]'), pt: q(pickEl, '[data-pt]'), cancel: q(pickEl, '[data-cancel]'), brk: q(touch, '.brk'), hrn: q(touch, '.hrn'), hb: q(touch, '.hb'), tact: q(touch, '[data-act]'), css }
   }
-  const touchState = { left: false, right: false, gas: false, brake: false, horn: false, hand: false }
+  const touchState = { left: false, right: false, gas: false, brake: false, horn: false, hand: false, nos: false }
   touchButtons(ui.touch, touchState, (k) => { audio(); if (k === 'horn') hornOn() }, (k) => { if (k === 'horn') hornOff() })
-  ui.tact.addEventListener('click', () => (game ? game.action() : errand ? hurry() : toggleFoot()))
+  ui.tact.addEventListener('click', () => (taxi ? null : game ? game.action() : errand ? hurry() : toggleFoot()))
   ui.exit.onclick = () => exit()
   ui.cancel.onclick = () => cancelPick()
   // Lane assist, on by default: keys and touch buttons steer all or nothing, so holding a straight line takes constant
@@ -609,7 +612,7 @@ export default function drive(city) {
   ui.assist.onclick = () => setAssist(!assist)
   function assistHint() { // once, the first time the van is driven
     try { if (localStorage.getItem('delivery.assistSeen')) return; localStorage.setItem('delivery.assistSeen', '1') } catch { return }
-    city.ui.toast(`Lane assist is ${assist ? 'on' : 'off'}: when you let go of the steering, the ${game ? 'bus' : 'van'} straightens up along the road.${touchy ? ' The Lane button switches it.' : ' G or the button switches it.'}`, 7000)
+    city.ui.toast(`Lane assist is ${assist ? 'on' : 'off'}: when you let go of the steering, the ${game ? 'bus' : taxi ? 'cab' : 'van'} straightens up along the road.${touchy ? ' The Lane button switches it.' : ' G or the button switches it.'}`, 7000)
   }
   ui.mute.onclick = () => setMuted(!muted)
   ui.mute.textContent = muted ? 'Sound off' : 'Sound on'
@@ -621,7 +624,7 @@ export default function drive(city) {
     clearTimeout(popT); popT = setTimeout(() => { ui.pop.classList.remove('on'); setTimeout(() => { if (!ui.pop.classList.contains('on')) ui.pop.hidden = true }, 350) }, 2600)
   }
   function showHelp() { // the keys, for a few seconds after each change between van and feet (always while delivering)
-    ui.help.textContent = game ? 'W gas · S brake (a tap is gentle, hold for more) · A D steer · E doors · H horn · R back on the route · Esc end the shift'
+    ui.help.textContent = taxi ? taxi.help() : game ? 'W gas · S brake (a tap is gentle, hold for more) · A D steer · E doors · H horn · R back on the route · Esc end the shift'
       : hike ? 'WASD or arrows to walk · Shift to push on (it tires you) · the trail guides you when you let go · Esc to the map'
       : onFoot ? 'WASD or arrows to walk · Shift to run · E to get in the van · Esc to the map'
       : `W gas · S brake, hold to reverse · A D steer · Space handbrake · E get out · H horn · R back on the road · Esc map`
@@ -638,6 +641,7 @@ export default function drive(city) {
   // section is towed about the joint (tow())
   const secs = [{ x: 0, y: 0, fx: 0, fy: 1, hl: 2.2, hw: 0.95 }, { x: 0, y: 0, fx: 0, fy: 1, hl: 3.45, hw: 1.28 }]
   let nsec = 1, game = null, busSpawn = null // game: a bus shift (route.js)
+  let taxi = null, taxiChoice = null, garage = null, toGarage = false // taxi: a Rush Fare shift (taxi.js); the cab chosen in the garage
   function boxes() {
     const V = car.V, a = secs[0]
     a.x = car.x; a.y = car.y; a.fx = fwdX(car.yaw); a.fy = fwdY(car.yaw); a.hl = V.hl; a.hw = V.hw
@@ -671,7 +675,8 @@ export default function drive(city) {
     <button data-m="foot"><span>🚶</span><div>Explore on foot<small>Walk the sidewalks; ${touchy ? 'hop' : 'E gets'} in the van</small></div></button>
     <button data-m="deliver"><span>📦</span><div>Deliveries<small>Pick up at real shops, drop off at real doors; a compass, tips</small></div></button>
     <button data-m="bus"><span>🚌</span><div>Drive a bus<small>Real TransLink routes on their timetable: stops, riders, the bell</small></div></button>
-    <button data-m="hike"><span>🥾</span><div>Hike a trail<small>Grouse Grind, Quarry Rock, Lynn Canyon and more</small></div></button></div>`
+    <button data-m="hike"><span>🥾</span><div>Hike a trail<small>Grouse Grind, Quarry Rock, Lynn Canyon and more</small></div></button>
+    <button data-m="taxi"><span>🚕</span><div>Rush Fare<small>Arcade cabs against the clock: fares across town, stunts, nitro</small></div></button></div>`
   const menuEl = button.panel.querySelector('.dlv-menu'), menuHTML = menuEl.innerHTML
   function hikeLog() { try { return JSON.parse(localStorage.getItem('drive.hikes') || '{}') } catch { return {} } }
   const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
@@ -691,8 +696,15 @@ export default function drive(city) {
         menuEl.querySelector('[data-back]').addEventListener('click', () => { menuEl.innerHTML = menuHTML; menu() })
         return
       }
+      if (b.dataset.m === 'taxi') { closeMenu(); return showGarage() }
       closeMenu(); startPick(b.dataset.m)
     })
+  }
+  // Rush Fare: the garage first (taxi.js), then where to start on the map
+  function showGarage() {
+    if (garage || state !== 'off') return
+    audio()
+    garage = openGarage(THREE, (c) => { garage = null; taxiChoice = c; startPick('taxi') }, () => { garage = null })
   }
   function closeMenu() { button.panel.hidden = true; button.button.setAttribute('aria-expanded', 'false'); setTimeout(() => { menuEl.innerHTML = menuHTML; menu() }, 300) }
   menu()
@@ -710,7 +722,7 @@ export default function drive(city) {
     if (state !== 'off') return
     pickKind = kind; state = 'pick'
     audio()
-    ui.pt.textContent = `${touchy ? 'Tap' : 'Click'} where to start ${kind === 'foot' ? 'walking' : kind === 'car' ? 'driving' : 'your shift'}`
+    ui.pt.textContent = `${touchy ? 'Tap' : 'Click'} where to start ${kind === 'foot' ? 'walking' : kind === 'car' ? 'driving' : kind === 'taxi' ? 'your shift: downtown is busiest' : 'your shift'}`
     ui.pickEl.hidden = false
     spotPicker.on()
   }
@@ -762,13 +774,14 @@ export default function drive(city) {
     onFoot = kind === 'foot' || kind === 'hike'
     hike = kind === 'hike' ? at.hike : null
     document.activeElement?.blur?.() // a focused toolbar button would take Space (brake) as a click
-    Object.assign(car, newVan(kind === 'bus' ? (at.pick.r.artic ? ARTIC : CITYBUS) : VAN), { roll: 0, deck: false, roof: undefined, kerb: true, parked: onFoot, kneel: 0 })
+    Object.assign(car, newVan(kind === 'bus' ? (at.pick.r.artic ? ARTIC : CITYBUS) : kind === 'taxi' ? specOf(CABS[taxiChoice.cab]) : VAN), { roll: 0, deck: false, roof: undefined, kerb: true, parked: onFoot, kneel: 0, lift: 0, vy: 0, airT: 0, airMax: 0, airDeck: false })
     errand = null; carried.visible = false
     if (kind === 'bus') { // the shift: where it starts (the first stop, or the one nearest the middle of the map)
       vehicle = at.bus
       game = busGame(busCtx(), at.pick, at.data)
       spot = busSpawn = game.startAt(at.pick.from, at.x, at.y)
     }
+    if (kind === 'taxi') vehicle = makeCab(THREE, CABS[taxiChoice.cab], taxiChoice.livery, DRIVERS[taxiChoice.driver])
     if (onFoot) {
       Object.assign(man, { x: spot.x, y: spot.y, yaw: spot.yaw, speed: 0, board: null, stamina: 1, winded: false, roof: undefined })
       man.h = city.world.heightAt(man.x, -man.y) + 0.15
@@ -793,6 +806,7 @@ export default function drive(city) {
     wblob.visible = onFoot; blob.visible = hasVan; blob2.visible = nsec === 2
     blob.scale.set(car.V.width / 1.8, 1, (car.V.hl * 2 + 0.6) / 4.3); blob2.scale.set(car.V.width / 1.8, 1, ((car.V.rear?.[1] || 0) * 2 + 0.6) / 4.3)
     if (hike) setGoal(hike.gx, hike.gy, 0x7fe0b0, icons.summit)
+    if (kind === 'taxi') taxi = taxiGame(taxiCtx(), taxiChoice)
     place()
     fitCamera()
     cellsNear(body().x, body().y, 800)
@@ -839,13 +853,21 @@ export default function drive(city) {
       summary: () => summary(),
     }
   }
+  // what a Rush Fare shift (taxi.js) gets to work with
+  function taxiCtx() {
+    return { THREE, city, car, cab: vehicle, pcam, el: ui.el, sheet: ui.sheet, touchy, audio, out: () => master, tone: (...a) => tone(...a), bell: (...a) => bell(...a), sfx, buzz,
+      setGoal, hideMarkers, icon: icons.summit, segsNear, stopFor, insideBuilding, isWater, others, placesNear,
+      reset: () => resetToRoad(), exit: (f) => exit(f), toGarage: () => { toGarage = true; exit(true) }, shake: (v) => { shake = Math.max(shake, v) } }
+  }
   function exit(force) {
     hornOff()
     if (state === 'pick') return cancelPick()
     if (state !== 'play') return
+    if (taxi && !force) return taxi.endShift() // the results first
     if (deliver && !force && (shift.n || shift.km > 0.3)) return summary() // the end-of-shift card first
     if (game && !force && (game.S.carried || game.S.km > 0.3)) return summary()
     game?.dispose()
+    taxi?.dispose(); taxi = null
     ui.sheet.hidden = true; ui.photo.classList.remove('on')
     fromPose = poseOf(chase.pos, chase.look, pcam.fov)
     state = 'out'; t0 = performance.now()
@@ -869,6 +891,7 @@ export default function drive(city) {
     }
     game = null; busSpawn = null
     city.scene.background = saved.bg; city.scene.fog = saved.fog
+    if (toGarage) { toGarage = false; setTimeout(showGarage, 0) }
     hike = null; errand = null; run = null; vista = 0
     publishPlayer(true)
     document.body.classList.remove('dlv-on', 'dlv-touchy', 'dlv-shot'); document.documentElement.classList.remove('dlv-assist')
@@ -927,7 +950,7 @@ export default function drive(city) {
     pcam.aspect = innerWidth / innerHeight
     pcam.updateProjectionMatrix()
   }
-  const chaseFov = () => (innerWidth < innerHeight ? 72 : onFoot ? 62 : 58)
+  const chaseFov = () => (innerWidth < innerHeight ? 72 : onFoot ? 62 : 58) + (taxi && !onFoot ? taxi.fov : 0) // a cab's FOV kicks out with speed and nitro
   function chasePose(dt, snap) {
     const k = snap ? 1 : 1 - Math.exp(-(onFoot ? 4 : 3.2) * dt), P = body()
     if (onFoot || Math.abs(car.speed) > 0.5 || snap) chase.yaw += wrap(P.yaw - chase.yaw) * k
@@ -937,13 +960,14 @@ export default function drive(city) {
     // its doors open it swings round in front, looking back at the front door and the people getting on
     const doors = !!game?.doors && Math.abs(car.speed) < 0.5 && !snap
     if (!doors) doorCam = null; else if (!doorCam) doorCam = pickDoorCam(P)
-    const back = onFoot ? 4.3 + sp * 0.18 : doors ? -(car.V.hl + doorCam[0]) : 8.6 + big * 0.8 + sp * 0.14, up = onFoot ? 1.9 + sp * 0.06 : doors ? 3.8 : 4.3 + big * 0.2 + sp * 0.05
+    const back = onFoot ? 4.3 + sp * 0.18 : doors ? -(car.V.hl + doorCam[0]) : 8.6 + big * 0.8 + (taxi ? Math.min(sp, 22) : sp) * 0.14, up = onFoot ? 1.9 + sp * 0.06 : doors ? 3.8 : 4.3 + big * 0.2 + sp * 0.05
     const off = !game ? 0 : doors ? doorCam[1] : -2.2
     const bx = P.x - fx * back + fy * off, by = P.y - fy * back - fx * off
     const tube = P.roof != null // in a tunnel: under its ceiling, and the buildings overhead are no walls
-    const gy = tube ? Math.min(P.h + up, P.roof - 0.7) : Math.max(city.world.heightAt(bx, -by) + (onFoot ? 1.2 : 1.4), P.h + up)
+    const lift = onFoot ? 0 : car.lift // (a cab in the air: the camera rises with it)
+    const gy = tube ? Math.min(P.h + up, P.roof - 0.7) : Math.max(city.world.heightAt(bx, -by) + (onFoot ? 1.2 : 1.4), P.h + up + lift)
     v3.set(bx, gy, -by)
-    if (snap) chase.pos.copy(v3); else chase.pos.lerp(v3, 1 - Math.exp(-(doors ? 1.6 : 7) * dt))
+    if (snap) chase.pos.copy(v3); else chase.pos.lerp(v3, 1 - Math.exp(-(doors ? 1.6 : taxi ? 10 : 7) * dt))
     if (tube) chase.pos.y = Math.min(chase.pos.y, P.roof - 0.7)
     // keep the camera out of buildings, every frame and after the smoothing (so it never glides through a wall):
     // on the line from the player to the camera, stop short of the first wall; then step off walls beside it
@@ -958,7 +982,7 @@ export default function drive(city) {
     const wall = !tube && collide(chase.pos.x, -chase.pos.z, 2.5)
     chase.near = wall ? clamp((2.5 - Math.hypot(wall.x, wall.y)) * 0.6, 0.2, nearPlane()) : nearPlane()
     const ahead = onFoot ? 3 : doors ? car.V.hl - 3 : 6 + big * 0.3, right = doors ? car.V.hw + 1.2 : 0
-    v4.set(P.x + fwdX(P.yaw) * ahead + fwdY(P.yaw) * right, P.h + (onFoot ? 1.3 : 1.0), -(P.y + fwdY(P.yaw) * ahead - fwdX(P.yaw) * right))
+    v4.set(P.x + fwdX(P.yaw) * ahead + fwdY(P.yaw) * right, P.h + lift + (onFoot ? 1.3 : 1.0), -(P.y + fwdY(P.yaw) * ahead - fwdX(P.yaw) * right))
     if (snap) chase.look.copy(v4); else chase.look.lerp(v4, 1 - Math.exp(-(doors ? 2 : 10) * dt))
   }
   // where the camera stands at a stop, in front of the bus: metres past its nose and to the side (− out over the road).
@@ -1025,9 +1049,9 @@ export default function drive(city) {
   const people = (x, y, r) => { try { return traffic()?.people?.(x, -y, r, scratch.people) || [] } catch (e) { console.warn('drive: traffic.people', e); return [] } }
   const poles = (x, y, r) => { try { return traffic()?.poles?.(x, -y, r, scratch.poles) || [] } catch (e) { console.warn('drive: traffic.poles', e); return [] } }
   const otherBox = (o) => ({ x: o.x, y: -o.z, fx: Math.sin(o.heading), fy: -Math.cos(o.heading), hl: (o.length || 4.4) / 2, hw: (o.width || 1.8) / 2 }) // heading: forward (sin, cos) in (x, z)
-  function hitTraffic(o, impact) {
+  function hitTraffic(o, impact, shove = 0) {
     if (o.mp) return
-    try { city.traffic?.bump?.(o.id, impact) } catch (e) { console.warn('drive: traffic.bump', e) }
+    try { city.traffic?.bump?.(o.id, impact, shove) } catch (e) { console.warn('drive: traffic.bump', e) }
   }
   // bounce the van off something: n (x, north, unit) points from it to the van, (ux, uy) is its velocity. The
   // velocity relative to it is reflected with restitution e and scrubbed; a hit off the middle (off: metres ahead of
@@ -1050,8 +1074,18 @@ export default function drive(city) {
         if (!c) continue
         car.x += c.nx * c.depth; car.y += c.ny * c.depth; boxes()
         // off a heavy moving wall: the van's velocity relative to it, reflected
+        const s0 = car.speed, l0 = car.lat
         const vn = bounce(c.nx, c.ny, b.fx * (o.speed || 0), b.fy * (o.speed || 0), 0.35, clamp((b.x - car.x) * fx + (b.y - car.y) * fy, -hl, hl))
-        if (vn) bumped(vn, () => hitTraffic(o, vn))
+        if (!vn) continue
+        // a cab ploughs on: it loses only the other car's share of the momentum, and shoves that car aside
+        let shove = 0
+        if (taxi) {
+          const k = 1400 / (1400 + car.V.mass)
+          car.speed = s0 + (car.speed - s0) * k; car.lat = l0 + (car.lat - l0) * k
+          shove = clamp(vn * 0.3, 0.6, 2.4) * (-c.nx * b.fy + c.ny * b.fx >= 0 ? 1 : -1) // towards its right (fy, -fx) or left
+          taxi.hitCar(o.id)
+        }
+        bumped(vn, () => hitTraffic(o, vn, shove))
       }
     }
   }
@@ -1102,6 +1136,7 @@ export default function drive(city) {
     }
   }
   function startled(sp) {
+    if (taxi) return taxi.oops()
     if (deliver) {
       shift.people++
       if (run) for (const p of run.parcels) if (p.aboard && !p.done) p.bumps += 3
@@ -1117,6 +1152,7 @@ export default function drive(city) {
     shake = Math.min(0.55, 0.08 + impact * 0.05)
     if (!onFoot) jolt(car, clamp(impact / 8, 0.1, 0.8), 0, 0)
     if (game && impact > 2) game.bump(impact)
+    if (taxi) taxi.bump(impact)
     if (run && !onFoot && impact > 2) { shift.bumps++; for (const p of run.parcels) if (p.aboard && !p.done) p.bumps += impact > 6 ? 2 : 1 }
     fn?.()
   }
@@ -1124,7 +1160,7 @@ export default function drive(city) {
     const P = body()
     if (state === 'off' || state === 'pick') { if (city.player) { city.player = null; city.emit('player', null) } return }
     const p = city.player || (city.player = { vehicle: 'van', colour: COLOUR })
-    p.mode = onFoot ? 'foot' : game ? 'bus' : 'car'; p.vehicle = game ? 'bus' : 'van'; p.x = P.x; p.y = P.h; p.z = -P.y; p.heading = wrap(P.yaw + Math.PI); p.speed = P.speed
+    p.mode = onFoot ? 'foot' : game ? 'bus' : 'car'; p.vehicle = game ? 'bus' : taxi ? 'taxi' : 'van'; p.x = P.x; p.y = P.h; p.z = -P.y; p.heading = wrap(P.yaw + Math.PI); p.speed = P.speed
     if (emit) city.emit('player', p)
   }
   function publish() { // the van and the walker as obstacles the simulated cars brake for
@@ -1144,7 +1180,7 @@ export default function drive(city) {
   // near a deck's end (where it meets the street, often a few metres off the terrain) the van may step up or down.
   // In a tunnel: its road, under the ground, and roof the height of its ceiling
   function surface(x, y, curY) {
-    const g = city.world.heightAt(x, -y) + 0.2
+    const g = city.world.heightAt(x, -y) + 0.2 + (taxi ? taxi.rampAt(x, y) : 0) // (a Rush Fare stunt ramp)
     const r = nearestRoad(x, y, 16, true, false, false, curY - 0.58)
     if (!r) return { y: g, deck: false, end: false }
     const P = r.s.p.pts, m = P.length - 2, end = Math.min(Math.hypot(x - P[0], y - P[1]), Math.hypot(x - P[m], y - P[m + 1])) < 25
@@ -1169,11 +1205,13 @@ export default function drive(city) {
   function input() {
     const L = keys.has('ArrowLeft') || keys.has('KeyA') || touchState.left, R = keys.has('ArrowRight') || keys.has('KeyD') || touchState.right
     const up = keys.has('ArrowUp') || keys.has('KeyW') || touchState.gas, dn = keys.has('ArrowDown') || keys.has('KeyS') || (!onFoot && touchState.brake)
-    return { steer: (L ? 1 : 0) - (R ? 1 : 0), up: up || (onFoot && touchState.brake), down: dn, hand: keys.has('Space') || touchState.hand, run: keys.has('ShiftLeft') || keys.has('ShiftRight') || (onFoot && touchState.brake) }
+    const shiftKey = keys.has('ShiftLeft') || keys.has('ShiftRight')
+    return { steer: (L ? 1 : 0) - (R ? 1 : 0), up: up || (onFoot && touchState.brake), down: dn, hand: keys.has('Space') || touchState.hand, run: shiftKey || (onFoot && touchState.brake), boost: shiftKey || touchState.nos }
   }
   // tyres grip less in the rain and much less in snow (the weather plugin's city.surface), a little less off the tarmac
   const gripNow = () => clamp(1 - 0.3 * (city.surface?.wet || 0) - 0.8 * (city.surface?.snow || 0), 0.3, 1) * (car.kerb ? 1 : 0.9)
   const vin = { up: false, down: false, steer: 0, hand: false }
+  const STILL = { steer: 0, up: false, down: false, hand: false, run: false, boost: false } // no input (a card is up, a countdown)
   function drive(dt, I) {
     // Lane assist: with no steering, a gentle steer along the road the van is on
     let steer = I.steer
@@ -1186,6 +1224,7 @@ export default function drive(city) {
       }
     }
     vin.up = I.up; vin.down = I.down; vin.steer = steer; vin.hand = I.hand
+    car.boost = !!taxi && taxi.boost(I.boost, dt); car.air = car.lift > 0.3
     grip = gripNow()
     stepVan(car, dt, vin, grip)
     // move, then resolve: water stops the van softly, bridge railings and buildings bounce it
@@ -1244,7 +1283,7 @@ export default function drive(city) {
     carVsPeople(performance.now())
     kerbs()
     // stand on the surface: height from the middle, pitch and roll from the wheels
-    const s = surface(car.x, car.y, car.h)
+    const s = surface(car.x, car.y, car.h), h0 = car.h
     car.deck = s.deck; car.roof = s.roof
     car.h += (s.y - car.h) * (1 - Math.exp(-18 * dt))
     const near = (v) => (Math.abs(v - car.h) < 1.5 ? v : car.h) // a wheel over a deck edge or a kerb drop doesn't tip the van
@@ -1255,6 +1294,27 @@ export default function drive(city) {
     car.pitch += (Math.atan2(f - b, wb) - car.pitch) * (1 - Math.exp(-10 * dt))
     car.roll += ((car.deck ? 0 : Math.atan2(near(r + 0.2) - near(l + 0.2), tw * 2)) - car.roll) * (1 - Math.exp(-10 * dt))
     car.spin += (car.speed * dt) / car.V.wheel
+    if (car.V.airYaw) fly(dt, h0)
+  }
+  // an arcade cab can leave the road: where the road falls away faster than gravity (over a crest, off a deck's end)
+  // it flies on, car.lift metres over the road and car.vy up, and lands with a jolt (taxi.js scores the air)
+  function fly(dt, h0) {
+    const sp = Math.abs(car.speed), climb = clamp((car.h - h0) / dt, -sp * 0.35 - 1, sp * 0.35 + 1) // the road's own climb, m/s
+    const was = car.lift
+    car.vy -= 9.8 * dt
+    const Y = h0 + was + car.vy * dt // where the body would be, flying
+    if (Y <= car.h || car.roof != null) { // on the road (in a tunnel always)
+      if (was > 0 && car.airT > 0.12) { // landing
+        const hit = clamp((climb - car.vy) / 9, 0, 1)
+        jolt(car, clamp(hit, 0.15, 0.9), 1, 0); sfx.kerb(clamp(hit + 0.3, 0.3, 1)); buzz(Math.round(20 + 40 * hit)); shake = Math.max(shake, 0.1 + 0.3 * hit)
+        taxi?.landed(car.airT, car.airMax, car.airDeck)
+      }
+      car.lift = 0; car.vy = climb; car.airT = 0; car.airMax = 0
+      return
+    }
+    if (!was) { car.airDeck = car.deck; if (car.vy > 0) car.vy *= 1.15 } // take-off: an arcade kick
+    car.lift = Y - car.h; car.airT += dt; car.airMax = Math.max(car.airMax, car.lift)
+    car.pitch += (-Math.atan2(car.vy, Math.max(6, sp)) * 0.7 - car.pitch) * (1 - Math.exp(-3 * dt)) // the nose follows the arc
   }
   // kerbs: leaving the carriageway of a street with sidewalks (or coming back onto it) the wheels hop the kerb
   function kerbs() {
@@ -1390,7 +1450,7 @@ export default function drive(city) {
   }
   // E: in and out of the van
   function nearVan() { return hasVan && onFoot && !man.board && !errand && Math.hypot(man.x - car.x, man.y - car.y) < 7 }
-  function canGetOut() { return !onFoot && !game && Math.abs(car.speed) < 1.5 }
+  function canGetOut() { return !onFoot && !game && !taxi && Math.abs(car.speed) < 1.5 }
   // where the courier steps out: the driver's door; if that is a wall or water, the other side, else behind
   function doorSpot() {
     const rx = Math.cos(car.yaw), ry = Math.sin(car.yaw), fx = fwdX(car.yaw), fy = fwdY(car.yaw)
@@ -1473,7 +1533,7 @@ export default function drive(city) {
   function place() {
     if (hasVan) {
       const V = vehicle, U = V.userData
-      V.position.set(car.x, car.h - 0.02 + car.hz - car.kneel * 0.06, -car.y) // (a bus kneels at the kerb, doors open)
+      V.position.set(car.x, car.h + (car.lift || 0) - 0.02 + car.hz - car.kneel * 0.06, -car.y) // (a bus kneels at the kerb, doors open; a cab flies)
       V.rotation.set(0, 0, 0)
       V.rotateY(car.yaw); V.rotateX(car.pitch + car.bp); V.rotateZ(car.roll + car.br - car.kneel * 0.025)
       for (const w of U.wheels) { w.spin.rotation.x = -car.spin; if (w.front) w.steer.rotation.y = car.steer }
@@ -1499,7 +1559,7 @@ export default function drive(city) {
     if (!r) return
     let yaw = yawFromDir(r.dir)
     if (Math.abs(wrap(yaw - car.yaw)) > Math.PI / 2) yaw = wrap(yaw + Math.PI)
-    Object.assign(car, { x: r.px, y: r.py, yaw, speed: 0, lat: 0, steer: 0, kick: 0, gear: 1 })
+    Object.assign(car, { x: r.px, y: r.py, yaw, speed: 0, lat: 0, steer: 0, kick: 0, gear: 1, lift: 0, vy: 0, airT: 0 })
     car.h = r.z != null ? r.z + 0.58 : city.world.heightAt(r.px, -r.py) + 0.2
     car.deck = r.z != null; car.roof = r.s.p.tunnel ? r.z + r.s.p.tunnel : undefined
     resetTrailer()
@@ -1694,7 +1754,7 @@ export default function drive(city) {
         if (state === 'out') return finish()
         state = 'play'
         ui.btns.hidden = false
-        if (deliver) ui.co.hidden = false; else if (!hike && !game) ui.read.hidden = false
+        if (deliver) ui.co.hidden = false; else if (!hike && !game && !taxi) ui.read.hidden = false
         ui.touch.hidden = false
         showHelp()
         if (!onFoot) assistHint()
@@ -1706,7 +1766,7 @@ export default function drive(city) {
     }
     if (state !== 'play' || !(dt > 0)) return
     dt = Math.min(dt, 0.05)
-    const I = ui.sheet.hidden ? input() : { steer: 0, up: false, down: false, hand: false, run: false }
+    const I = ui.sheet.hidden && !taxi?.frozen ? input() : STILL
     if (onFoot) { walk(dt, I); if (hasVan) drive(dt, { steer: 0, up: false, down: false, hand: true }) } else drive(dt, I)
     engineNote()
     publish()
@@ -1735,6 +1795,7 @@ export default function drive(city) {
     // the job
     let t = null
     if (game) { game.settle(busSpawn); game.frame(dt, now, time); t = game.goal() }
+    if (taxi) { taxi.frame(dt, now, time); t = taxi.goal() }
     if (deliver) {
       if (!run && now > jobRetry) { if (!newRun()) jobRetry = now + 1000 }
       t = target()
@@ -1774,6 +1835,7 @@ export default function drive(city) {
     if (now - skyAt > 1000) { skyAt = now; atmosphere(1) }
   }
   function hud(t) {
+    if (taxi) { ui.tact.hidden = ui.act.hidden = ui.job.hidden = ui.hrn.hidden = true; ui.hb.hidden = ui.assist.hidden = false; ui.brk.textContent = 'Brake'; return } // the rest is taxi.js's
     if (game) { // E: the doors (or the trolley poles); the bus's own cards are route.js's
       const lab = game.actionLabel()
       ui.tact.hidden = !lab; ui.tact.textContent = lab
@@ -1844,13 +1906,13 @@ export default function drive(city) {
   // ---------------------------------------------------------------- keys
   const CONTROL = new Set([...MOVE_KEYS, 'ShiftLeft', 'ShiftRight'])
   function onKey(e) {
-    if (typing(e) || e.metaKey || e.ctrlKey || e.altKey) return
+    if (typing(e) || e.metaKey || e.ctrlKey || e.altKey || garage) return // (the garage has its own keys)
     if (state === 'off') { if (e.code === 'KeyD' && !e.repeat && !e.shiftKey) startPick('deliver'); return }
     if (e.code === 'Escape') { exit(!ui.sheet.hidden); return }
     if (state !== 'play') return
     if (CONTROL.has(e.code)) { keys.add(e.code); e.preventDefault() }
     if (e.repeat) return
-    if (e.code === 'KeyE') { if (game) game.action(); else if (errand) hurry(); else toggleFoot() }
+    if (e.code === 'KeyE') { if (taxi) return; if (game) game.action(); else if (errand) hurry(); else toggleFoot() }
     else if (e.code === 'KeyR' && !onFoot) resetToRoad()
     else if (e.code === 'KeyH' && !onFoot) hornOn()
     else if (e.code === 'KeyM') setMuted(!muted)
@@ -1868,11 +1930,12 @@ export default function drive(city) {
 
   // ?drivedebug: the state, for tests in a browser (window.driveDebug)
   if (location.search.includes('drivedebug')) window.driveDebug = { car, man, goal, get run() { return run }, get hike() { return hike }, get errand() { return errand }, get shift() { return shift }, get state() { return state }, startHike: (id) => startHike(HIKES.find((h) => h.id === id)), propsNear, nearestRoad, wallHit, railPast,
-    get game() { return game }, get horn() { return !!horn }, input, secs, start: (kind, x, y, yaw = 0) => start(kind, { x, y, yaw }, { x, y }), startBus: (name, dir = 0, from = 'first') => loadLines().then(({ man }) => { const ri = man.routes.findIndex((r) => r.name === name); return startBus({ ri, r: man.routes[ri], dir, from, man }) }) }
+    get game() { return game }, get horn() { return !!horn }, get taxi() { return taxi }, showGarage, startTaxi: (x, y, c = { cab: 0, livery: 0, driver: 0 }) => { taxiChoice = c; start('taxi', carSpawn(x, y) || { x, y, yaw: 0 }, { x, y }) }, input, secs, start: (kind, x, y, yaw = 0) => start(kind, { x, y, yaw }, { x, y }), startBus: (name, dir = 0, from = 'first') => loadLines().then(({ man }) => { const ri = man.routes.findIndex((r) => r.name === name); return startBus({ ri, r: man.routes[ri], dir, from, man }) }) }
   return {
     dispose() {
       cancelPick()
-      if (state !== 'off') { traffic()?.setObstacle('player-van', null); traffic()?.setObstacle('player-walker', null); state = 'out'; finish() }
+      garage?.close(); garage = null
+      if (state !== 'off') { traffic()?.setObstacle('player-van', null); traffic()?.setObstacle('player-walker', null); taxi?.dispose(); taxi = null; state = 'out'; finish() }
       for (const f of offTiles) f()
       removeEventListener('keydown', onKey); removeEventListener('keyup', onKeyUp); removeEventListener('blur', onBlur); removeEventListener('resize', onResize)
       document.removeEventListener('visibilitychange', onVis)

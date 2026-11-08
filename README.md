@@ -71,7 +71,8 @@ that the ground, roads and wall feet look up. `public/core/quality.js` picks Hig
 (About → Graphics: Auto, High, Low) and the frame loop lowers the resolution while frames run late. Everything else is a plugin (`public/plugins/`):
 lo-fi music, live weather and sun, TransLink transit on its timetable, live aircraft, ships, landmarks and iconic
 bridges, and driving (parcel deliveries too, or a bus on a real TransLink route and timetable, with a GPS line, stops, riders and
-trolley wires), walking, hiking real trails and sailing through it all. See
+trolley wires, or Rush Fare: an arcade cab shift against the clock with six cabs, nitro, drifts and stunt ramps), walking,
+hiking real trails and sailing through it all. See
 [PLUGINS.md](PLUGINS.md) to write one.
 
 Locally, `docker compose up --build` serves the site at http://localhost:48500 with `public/` mounted (edits show on

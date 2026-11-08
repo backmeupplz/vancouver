@@ -557,7 +557,7 @@ export default function life(city) {
       if (!obsT) obsT = setTimeout(sendObstacles, Math.max(0, 100 - (performance.now() - obsAt)))
     },
     // the player hit car `id`: it stops for a few seconds
-    bump(id) { worker.postMessage({ type: 'bump', id }) },
+    bump(id, impulse, shove = 0) { worker.postMessage({ type: 'bump', id, shove }) }, // shove: metres it is knocked to its right (−: left), easing back into its lane
     // people within r metres of (x, z), into `out` (cleared; its objects are reused, read them right away):
     // { id, x, y, z, heading } (they face (sin, 0, cos) of heading, like the cars). Not the cyclists.
     people(x, z, r, out = []) {

@@ -175,11 +175,11 @@ Plugins may import from `core/` (relative paths, e.g. `'../../core/util.js'`):
   Both views get wet or snowy ground through `city.surface`.
 - **Traffic** (`plugins/life`): `city.traffic.nearby(x, z, r)` → `[{ id, x, y, z, heading, length, width, speed }]`
   (forward = `(sin heading, 0, cos heading)`), `city.traffic.setObstacle(id, obj | null)` (a player's vehicle or walker
-  `{ x, z, heading, length, width, speed, y }` that cars brake for; see Traffic below), `city.traffic.bump(id, impulse)` (a car was hit),
+  `{ x, z, heading, length, width, speed, y }` that cars brake for; see Traffic below), `city.traffic.bump(id, impulse, shove)` (a car was hit; `shove`: metres it is knocked aside),
   `city.traffic.people(x, z, r, out)` and `city.traffic.poles(x, z, r, out)` (the people and the traffic signal poles
   there), `city.traffic.knock(id, dx, dz, speed)` (a person was bumped into: they stumble, or fall over and get up).
 - **The player** (`plugins/drive`, `plugins/sail`): while the user drives, walks, hikes, drives a bus or sails, `city.player = { mode: 'car' |
-  'foot' | 'bus' | 'boat', x, y, z, heading, speed, colour, vehicle: 'van' | 'bus' | 'boat' }` (updated every frame, read it when you
+  'foot' | 'bus' | 'boat', x, y, z, heading, speed, colour, vehicle: 'van' | 'bus' | 'boat' | 'taxi' }` (a Rush Fare cab is mode `'car'`) (updated every frame, read it when you
   need it), else `null`; `'player'` is emitted on enter, leave and car ⇄ foot. `city.models.van(colour)`,
   `city.models.person(colour)`, `city.models.bus()` (a 12 m city bus, its middle at the origin) and `city.models.boat(colour)` return the same low-poly models (forward −z, origin on the
   ground or the waterline; `update(dt, speed)` runs the walk cycle or bobs the boat), so other players look alike.
@@ -217,7 +217,8 @@ being `(sin(heading), 0, cos(heading))`.
   bridge deck leaves the street below alone. Call it as often as you like (it reaches the simulation at most 10
   times a second); `setObstacle(id, null)` removes it. Within 250 m of an obstacle no car appears or vanishes: cars
   come and go out of sight (one reaching a dead end in sight waits there).
-- `city.traffic.bump(id)`: the player hit car `id`; it stops for a few seconds, then drives on.
+- `city.traffic.bump(id, impulse, shove = 0)`: the player hit car `id`; it stops for a few seconds, then drives on. With
+  `shove` it is knocked that many metres to its right (negative: left) and eases back into its lane (the taxi game's cabs).
 - `city.traffic.people(x, z, r, out = [])`: the people on foot within `r` metres (walking, waiting, on benches; not the
   cyclists), `[{ id, x, y, z, heading }]` (they face `(sin heading, 0, cos heading)`). Empty while people are hidden
   (zoomed out, switched off). The array `out` is cleared and filled with objects that are reused on the next call, so

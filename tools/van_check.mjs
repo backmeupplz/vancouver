@@ -43,3 +43,25 @@ for (const V of [BUS, ARTIC]) {
   assert(r > 8 && r < 14, `bus turning radius ${r.toFixed(1)} m`)
   console.log(`ok: ${V === BUS ? '12 m' : '18 m'} bus 0-50 km/h ${tb.toFixed(1)} s, top ${(b.speed * 3.6).toFixed(0)} km/h, stop from 50 ${d.toFixed(1)} m, turning radius ${r.toFixed(1)} m`)
 }
+// the Rush Fare cabs (arcade): quick, a nitro boost past the top speed, a handbrake that drifts and keeps the speed,
+// no grip in the air
+import { CABS } from '../public/plugins/drive/cabs.js'
+import { taxiSpec } from '../public/plugins/drive/van.js'
+for (const cab of CABS) {
+  const V = taxiSpec(cab.stats), c = newVan(V)
+  let t1 = 0
+  run(c, go, 1, 30, (c) => { t1 += DT; return c.speed > 22.2 })
+  assert(t1 < 6, `${cab.id} 0-80 km/h in ${t1.toFixed(1)} s`)
+  run(c, go, 1, 40)
+  assert(Math.abs(c.speed - V.vmax) < 1.5, `${cab.id} top ${c.speed.toFixed(1)} m/s vs ${V.vmax}`)
+  c.boost = true; run(c, go, 1, 20); c.boost = false
+  assert(c.speed > V.vmax * 1.25 && c.speed < 70 / 1.2, `${cab.id} nitro top ${c.speed.toFixed(1)} m/s (the server allows 70)`)
+  const d = newVan(V); d.speed = 20; d.gear = 3
+  run(d, { up: true, down: false, steer: 1, hand: true }, 1, 0.8)
+  const ang = Math.atan2(Math.abs(d.lat), d.speed)
+  assert(ang > 0.2 && ang < 0.9 && Math.hypot(d.speed, d.lat) > 17, `${cab.id} handbrake drift: ${(ang * 57).toFixed(0)}° at ${Math.hypot(d.speed, d.lat).toFixed(1)} m/s`)
+  const a = newVan(V); a.speed = 30; a.gear = 5; a.air = true
+  run(a, { up: false, down: true, steer: 0, hand: false }, 1, 1)
+  assert(a.speed > 29, `${cab.id} in the air: no brakes (${a.speed.toFixed(1)})`)
+  console.log(`ok: ${cab.name} 0-80 km/h ${t1.toFixed(1)} s, top ${(V.vmax * 3.6).toFixed(0)} km/h, nitro ${(c.speed * 3.6).toFixed(0)} km/h, drift ${(ang * 57).toFixed(0)}°`)
+}

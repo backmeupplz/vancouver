@@ -66,7 +66,7 @@ onmessage = ({ data: m }) => {
     blockSegs()
   } else if (m.type === 'bump') {
     const car = cars.find((c) => c.id === m.id)
-    if (car) { car.v = 0; car.hold = simT + 2 + Math.random() * 2 }
+    if (car) { car.v = 0; car.hold = simT + 2 + Math.random() * 2; if (m.shove) car.shove = { d: Math.max(-2.6, Math.min(2.6, m.shove)), t: simT } }
   } else if (m.type === 'knock') { // { id, dx, dy (the push, x and north), v (m/s) }: a stumble, or a fall and up again
     const p = peds.find((q) => q.id === m.id) || statics.find((q) => q.id === m.id)
     if (p && !p.fall) {
@@ -1480,7 +1480,8 @@ function output(buf) {
     // the front bumper on its way (changing lanes: shifted right by lat, towards where it came from), and the rear
     // axle trailing it on a tow bar (a tractrix): the body turns as a car does, through junctions, across lanes and
     // over short pieces of road (placed on the way behind, it jumped where that ran back over two or three of them)
-    const lat = car.lc ? car.lc.d * (1 - ease(Math.min(1, car.lc.t + (car.v * rem) / car.lc.run))) : 0
+    let lat = car.lc ? car.lc.d * (1 - ease(Math.min(1, car.lc.t + (car.v * rem) / car.lc.run))) : 0
+    if (car.shove) { const k = (simT + rem - car.shove.t) / 3.5; if (k >= 1) car.shove = null; else lat += car.shove.d * (1 - ease(k)) } // knocked aside by a player, easing back
     posOn(car, s, tmp); const fx = tmp.x + tmp.ty * lat, fy = tmp.y - tmp.tx * lat, fh = tmp.h
     const W = car.L * AXLE
     let dx = fx - car.rx, dy = fy - car.ry, l = Math.hypot(dx, dy)
