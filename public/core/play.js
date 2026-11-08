@@ -75,7 +75,7 @@ export function dive(pcam, opts, S, E, k, nearMin, atmosphere) {
 
 // ---------------------------------------------------------------- sky and fog at street level
 // The weather plugin publishes the street-level look (city.weather.atmosphere); without it, a fair day.
-const FAIR = { horizon: 0xcfe2ec, zenith: 0x84b7dc, fogNear: 140, fogFar: 850 }
+const FAIR = { horizon: 0xcfe2ec, zenith: 0x84b7dc, fogNear: 2000, fogFar: 24000 }
 export function streetSky() {
   const cv = document.createElement('canvas'); cv.width = 2; cv.height = 128
   const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace
@@ -89,9 +89,10 @@ export function streetSky() {
     apply(city, D, k, bg, vista = 0) {
       const A = city.weather?.atmosphere || FAIR
       ca.setHex(A.horizon); cb.setHex(A.zenith)
-      this.far = A.fogFar + 13000 * vista
+      const s = Math.min(1, (city.quality?.tier.view ?? Infinity) / A.fogFar) // the quality tier's reach: a nearer haze
+      this.far = A.fogFar * s + 13000 * vista
       fog.color.copy(ca)
-      fog.near = A.fogNear + 3500 * vista + (D * 4 + 2000) * (1 - k); fog.far = this.far + (D * 8 + 4000) * (1 - k)
+      fog.near = A.fogNear * s + 3500 * vista + (D * 4 + 2000) * (1 - k); fog.far = this.far + (D * 8 + 4000) * (1 - k)
       city.scene.fog = fog // from the start of the dive (far away at first), so materials switch to fog only once
       const kk = `${A.horizon} ${A.zenith} ${k.toFixed(2)}`
       if (kk !== key) {

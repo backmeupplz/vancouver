@@ -116,7 +116,9 @@ the map camera back exactly where it was. `opts` is read every frame, so keep mo
 
 - `opts.focus` (`Vector3`, required): the ground point the map streams around, usually a little ahead of the player.
 - `opts.radius` (metres, default 900): tiles load within this square around the focus; 1100 or less loads the
-  detail tiles (and their `graph`, `footprints`, `water`), more shows the overview tiles.
+  detail tiles (and their `graph`, `footprints`, `water`), more shows the overview tiles. Past it a perspective camera
+  sees the overview tiles out to the quality tier's `overview` (4 km on High, 1.8 km on Low; streamed after the detail
+  tiles, left out where those show) and the whole map's base layer beyond, as far as its `far` plane.
 - `opts.shadowRadius` (metres, default 300): the sharp sun shadows cover this square around the focus. With a
   perspective camera the square follows the camera instead, reaching from just behind it to 1.5× the radius ahead,
   and is redrawn each time the camera has moved on a fifth of it, so give moving things a blob shadow instead of
@@ -127,7 +129,8 @@ perspective camera the ink outlines are found from depth properly linearised and
 `THREE.Fog` you set on `city.scene` is used by the map and the trees alike). While your camera is active,
 `city.view.zoom` is the map zoom that shows the focus at the same scale, `center` is the focus and `bounds` the
 streamed square, and `'view'` fires as the focus moves. A perspective camera also gets what street level needs:
-trees within ~190 m are real 3D trees (the billboards beyond stand upright), and those trees and the building faces between the camera and `city.player` (see below) dissolve so the player stays in view, fog fades into the sky texture you set
+trees within ~190 m are real 3D trees (the billboards beyond stand upright, pictures of the same forms turned and lit
+the same way, fading in over the last ~30 m), and those trees and the building faces between the camera and `city.player` (see below) dissolve so the player stays in view, fog fades into the sky texture you set
 as `scene.background` rather than one flat colour, detail tiles stay up while new ones arrive past the fog, and
 when frames keep coming late the view is drawn at a lower resolution (down to 0.75 CSS px per pixel; `release()`
 restores it). Its ink lines are smoothed by FXAA below 1.5x pixel ratio (`view.setAA('auto' | 'fxaa' | 'msaa' | 'off')`
@@ -158,7 +161,9 @@ Plugins may import from `core/` (relative paths, e.g. `'../../core/util.js'`):
 - **Weather** (`plugins/weather`): `city.weather = { kind, intensity, isNight, hour, live, wind, atmosphere }`, re-emitted
   as `'weather'` on change. `wind` is `[x, z]` m/s (towards); `atmosphere = { horizon, zenith, fogNear, fogFar }` (hex
   colours, metres) is the street-level look a plugin with a perspective camera applies as its sky gradient and
-  `THREE.Fog` (`fogNear` can be below zero: three.js fades fog in with a smoothstep, so that veils the middle
+  `THREE.Fog` (`core/play.js` `streetSky` does it, bringing the far end in to the quality tier's `view`: 24 km on High
+  in clear air, where the mountains stand in the haze, 2.4 km on Low; fog and rain close in to a few hundred metres;
+  `fogNear` can be below zero: three.js fades fog in with a smoothstep, so that veils the middle
   distance in fog and rain). Under such a camera the weather plugin draws, by itself: a sky dome in `city.scene`
   (inside the camera's far plane, only where nothing else is; its horizon follows `scene.fog.color`; it fades in as
   the camera's `fov` passes 14°–40°, so a dive from the map looks like the map first) with the sun or moon and

@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { MapControls } from './vendor/MapControls.js'
 import { createCity, loadPlugins } from './city.js'
-import { Tiles } from './core/tiles.js'
+import { Tiles, holed, holedTrees } from './core/tiles.js'
 import { groundMaterial, roadMaterial, buildingMaterial, treeAtlas, treeMaterial, night, surface, occluder } from './core/materials.js'
 import { Trees3D } from './core/trees3d.js'
 import { createQuality } from './core/quality.js'
@@ -72,8 +72,10 @@ scene.add(sun, sun.target)
 
 // ---------- the map ----------
 const mats = { ground: groundMaterial(), road: roadMaterial(), paint: roadMaterial(true), building: buildingMaterial(), tree: treeMaterial(treeAtlas(renderer)) }
+// the overview tiles' own (tiles.js holed): a street-level view sees them past the detail tiles, and not where those show
+const farMats = { ground: holed(groundMaterial()), road: holed(roadMaterial()), paint: mats.paint, building: holed(buildingMaterial()), tree: holedTrees(mats.tree) }
 const tiles = new Tiles({
-  scene, treeScene, mats,
+  scene, treeScene, mats, farMats,
   // shadows follow new tiles at most twice a second; a tile that loads hidden changes neither them nor the picture
   onChange: (shown = true) => { dirty = true; if (shown) { shadowStale = true; trees3d?.changed() } },
   onLoad: (t) => city?.emit('tile:load', tileInfo(t)),
@@ -233,7 +235,7 @@ rt.depthTexture = new THREE.DepthTexture(1, 1)
 const ink = new THREE.ShaderMaterial({
   uniforms: { tColor: { value: rt.texture }, tDepth: { value: rt.depthTexture }, sat: { value: 1.2 }, gain: { value: new THREE.Vector3(1, 1, 1) }, tint: { value: new THREE.Vector3(1, 1, 1) },
     desat: { value: 0 }, px: { value: new THREE.Vector2() }, uvs: { value: new THREE.Vector2(1, 1) }, off: { value: new THREE.Vector2() }, lim: { value: new THREE.Vector2(1, 1) }, range: { value: 1 }, thr: { value: 1 }, ink: { value: 0 },
-    cnear: { value: 1 }, cfar: { value: 2 }, fade: { value: new THREE.Vector2(1e9, 2e9) }, tSky: { value: null }, fogCol: { value: new THREE.Color() },
+    cnear: { value: 1 }, cfar: { value: 2 }, fade: { value: new THREE.Vector2(1e9, 2e9) }, inkFade: { value: new THREE.Vector2(1e9, 2e9) }, tSky: { value: null }, fogCol: { value: new THREE.Color() },
     zenCol: { value: new THREE.Color() }, domeK: { value: 0 }, projInv: { value: new THREE.Matrix4() }, camWorld: { value: new THREE.Matrix4() } },
   vertexShader: `varying vec2 vUv;
     #ifdef SKYFOG
@@ -246,14 +248,15 @@ const ink = new THREE.ShaderMaterial({
       #endif
     }`,
   // orthographic: depth is linear, edges are jumps in metres. PERSP (a plugin's perspective camera): 1/distance is
-  // linear across a plane, so edges are jumps in 1/distance relative to it, faded out from fade.x to fade.y metres
+  // linear across a plane, so edges are jumps in 1/distance relative to it, faded out from inkFade.x to .y metres (the
+  // fog's fade.x to .y swaps the fog colour for the sky behind)
   // The scene may fill only part of the target (adaptive resolution): uvs is that part, lim its last texel centre,
   // off the sub-texel shift of a map camera snapped to the texel grid.
   // NOINK (quality tier ink: 'off'): the grade only, no depth taps.
   fragmentShader: `uniform sampler2D tColor, tDepth; uniform vec2 px, uvs, off, lim; uniform float range, thr, ink, sat, desat; uniform vec3 gain, tint; varying vec2 vUv;
     vec2 uv;
     #ifdef PERSP
-    uniform float cnear, cfar; uniform vec2 fade;
+    uniform float cnear, cfar; uniform vec2 fade, inkFade;
     #ifdef SKYFOG
     uniform sampler2D tSky; uniform vec3 fogCol, zenCol; uniform float domeK; varying vec3 vRay;
     #endif
@@ -284,7 +287,7 @@ const ink = new THREE.ShaderMaterial({
       #endif
       float e = smoothstep(thr, thr * 6.0, lap) * ink;
       #ifdef PERSP
-      e *= 1.0 - smoothstep(fade.x, fade.y, 1.0 / c);
+      e *= 1.0 - smoothstep(inkFade.x, inkFade.y, 1.0 / c);
       #endif
       #endif
       vec3 cc = mix(col.rgb, col.rgb * vec3(0.16, 0.18, 0.22), e);
@@ -386,6 +389,8 @@ function draw(scale = res) {
     const d = v1.copy(own.opts.focus).sub(C.position).dot(C.getWorldDirection(v2)) // metres to the focus
     u.cnear.value = C.near; u.cfar.value = C.far; u.thr.value = Math.min(0.004, Math.max(0.35 / (K * zoom), 0.9) / Math.max(1, d))
     if (scene.fog?.isFog) u.fade.value.set(scene.fog.near, scene.fog.far); else u.fade.value.set(1e9, 2e9)
+    // the outlines fade out within ~1.5 km even in a long clear view: far off they would be all there is of a building
+    u.inkFade.value.set(Math.min(u.fade.value.x, 600), Math.min(u.fade.value.y, 1600))
   } else u.thr.value = Math.max(0.35 / (K * cam.zoom), 0.9)
   u.ink.value = THREE.MathUtils.smoothstep(zoom, 0.05, 0.16)
   // a light grade: the materials carry natural, map-like colours of their own (a strong blue gain read as neon)
@@ -413,7 +418,10 @@ function draw(scale = res) {
   if (snap) { C.position.copy(v2); C.updateMatrixWorld() }
   renderer.setRenderTarget(smooth ? aa : null); renderer.render(postScene, postCam)
   const tm = mats.tree.uniforms
-  tm.sat.value = ink.uniforms.sat.value * 0.88; tm.gain.value.copy(ink.uniforms.gain.value); tm.tint.value.copy(ink.uniforms.tint.value); tm.desat.value = ink.uniforms.desat.value
+  // the billboards are lit and graded as the 3D trees are (the map's a little less saturated)
+  tm.sat.value = ink.uniforms.sat.value * (tm.cyl.value ? 1 : 0.88); tm.gain.value.copy(ink.uniforms.gain.value); tm.tint.value.copy(ink.uniforms.tint.value); tm.desat.value = ink.uniforms.desat.value
+  tm.sunDir.value.subVectors(sun.position, sun.target.position).normalize(); tm.sunCol.value.copy(sun.color).multiplyScalar(sun.visible ? sun.intensity : 0)
+  tm.sky.value.copy(hemi.color).multiplyScalar(hemi.intensity); tm.gnd.value.copy(hemi.groundColor).multiplyScalar(hemi.intensity)
   renderer.autoClear = false
   renderer.render(treeScene, C)
   if (overlay.children.length) renderer.render(overlay, C)
@@ -465,7 +473,7 @@ function loop(now) {
   drew = true
   dirty = false
   if (own) {
-    tiles.update(own.camera, own.opts.focus, own.opts.radius)
+    tiles.update(own.camera, own.opts.focus, own.opts.radius, own.camera.isPerspectiveCamera ? Math.min(own.camera.far, quality.tier.overview) : 0)
     tiles.setDetail(quality.tier.detail, true)
     if (own.opts.focus.distanceTo(ownSeen) > 20) { ownSeen.copy(own.opts.focus); city?.emit('view', city.view) }
   } else {

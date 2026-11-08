@@ -22,6 +22,36 @@ const WORKERS = Math.min(4, Math.max(2, (navigator.hardwareConcurrency || 4) - 2
 // the season's colours (?season=spring|summer|autumn|winter to see another): the tiles carry autumn's
 const SEASON = new URLSearchParams(location.search).get('season') || ['winter', 'winter', 'spring', 'spring', 'summer', 'summer', 'summer', 'summer', 'summer', 'autumn', 'autumn', 'winter'][new Date().getMonth()]
 const SEASONAL = { winter: [0, 8, 8, 8, 8, 5, 6, 7, 8, 8], spring: [0, 0, 0, 0, 0, 5, 6, 7, 0, 10], summer: [0, 0, 0, 0, 0, 5, 6, 7, 0, 0], autumn: null }[SEASON]
+// Under a perspective camera the overview tiles reach past the detail tiles (Tiles.update's `far`) and both show at
+// once: the overview tiles' materials (holed) leave out every 1 km cell where a detail tile shows. holeMap has a
+// texel per detail tile of the map (255: shown), holeAt its first cell and size (i0, j0, width, height).
+export const holes = { holeMap: { value: null }, holeAt: { value: new THREE.Vector4() } }
+export const HOLE_GLSL = `uniform sampler2D holeMap; uniform vec4 holeAt;
+  bool holed(vec2 xz) { // world x, z
+    ivec2 c = ivec2(floor(vec2(xz.x, -xz.y) / 1024.0) - holeAt.xy);
+    return c.x >= 0 && c.y >= 0 && c.x < int(holeAt.z) && c.y < int(holeAt.w) && texelFetch(holeMap, c, 0).r > 0.5;
+  }`
+// an overview tile's copy of a map material (core/materials.js): no fragments where a detail tile shows
+export function holed(m) {
+  const before = m.onBeforeCompile, key = m.customProgramCacheKey
+  m.onBeforeCompile = (s, r) => {
+    before.call(m, s, r)
+    Object.assign(s.uniforms, holes)
+    s.vertexShader = s.vertexShader.replace('#include <common>', '#include <common>\nvarying vec2 vHole;')
+      .replace('#include <project_vertex>', '#include <project_vertex>\nvHole = (modelMatrix * vec4(transformed, 1.0)).xz;')
+    s.fragmentShader = s.fragmentShader.replace('#include <common>', `#include <common>\nvarying vec2 vHole;\n${HOLE_GLSL}`)
+      .replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\nif (holed(vHole)) discard;')
+  }
+  m.customProgramCacheKey = () => `${key.call(m)}-holed`
+  return m
+}
+// the billboards' copy (materials.js treeMaterial), sharing its uniforms: no trees standing where a detail tile shows
+export function holedTrees(m) {
+  const h = m.clone()
+  h.uniforms = { ...m.uniforms, ...holes }
+  h.vertexShader = HOLE_GLSL + m.vertexShader.replace('void main() {', 'void main() {\n  if (holed((modelMatrix * vec4(iPos, 1.0)).xz)) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }')
+  return h
+}
 const HULLS = [0xf2f1ec, 0x2c3c58, 0x30483a, 0x3c6a96] // white, navy, dark green, blue
 
 // a boat 1 long along +x (bow east), its waterline at 0: a pointed hull, a deck and cabin, a mast (sailboats)
@@ -37,8 +67,8 @@ function boatGeos() {
 }
 
 export class Tiles {
-  constructor({ scene, treeScene, mats, base = 'tiles/', onLoad, onUnload, onChange }) {
-    Object.assign(this, { scene, treeScene, mats, onLoad, onUnload, onChange })
+  constructor({ scene, treeScene, mats, farMats = mats, base = 'tiles/', onLoad, onUnload, onChange }) {
+    Object.assign(this, { scene, treeScene, mats, farMats, onLoad, onUnload, onChange })
     this.base = new URL(base, location.href).href // absolute: workers resolve relative URLs against their own path
     this.tiles = new Map() // "level/i_j" -> tile
     this.byIJ = new Map() // numeric ij(level, i, j) -> tile, for lookups many times a frame (no key strings)
@@ -65,6 +95,14 @@ export class Tiles {
     const idx = await fetch(this.base + 'index.json', { cache: 'no-cache' }).then((r) => r.json())
     this.index = idx
     this.have = [new Set(idx.l0), new Set(idx.l1)]
+    { // the hole map (holes): a texel per detail tile
+      const ij = idx.l0.map((k) => k.split('_').map(Number)), i0 = Math.min(...ij.map((c) => c[0])), j0 = Math.min(...ij.map((c) => c[1]))
+      const w = Math.max(...ij.map((c) => c[0])) - i0 + 1, h = Math.max(...ij.map((c) => c[1])) - j0 + 1
+      const tex = new THREE.DataTexture(new Uint8Array(w * h), w, h, THREE.RedFormat)
+      tex.needsUpdate = true
+      holes.holeMap.value = tex; holes.holeAt.value.set(i0, j0, w, h)
+      this.shown = new Uint8Array(w * h)
+    }
     // a coarse height grid of the whole map (tools/heights.py), so heights are right before tiles arrive
     try {
       const r = await fetch(`${this.base}heights.bin?v=${idx.built || 0}`)
@@ -147,7 +185,8 @@ export class Tiles {
     return { x0: cx - hw - pad, x1: cx + hw + pad, y0: y0 - pad, y1: y1 + pad }
   }
 
-  update(camera, target, radius = 900) {
+  // far (a perspective camera): the overview tiles show out to this far, beyond the detail tiles within radius
+  update(camera, target, radius = 900, far = 0) {
     if (!this.index) return
     this.frame++
     const r = this.viewRect(camera, target, radius)
@@ -161,17 +200,17 @@ export class Tiles {
     if (lx > 0) r.x1 += lx; else r.x0 += lx
     if (ly > 0) r.y1 += ly; else r.y0 += ly
     const wantDetail = camera.isPerspectiveCamera ? radius <= 1100 : camera.zoom >= DETAIL_ZOOM
+    const R = camera.isPerspectiveCamera && far > radius ? this.viewRect(camera, target, far) : r // the overview tiles' square
     const need = []
-    const range = (lvl) => { const s = SIZES[lvl]; return [Math.floor(r.x0 / s), Math.floor(r.x1 / s), Math.floor(r.y0 / s), Math.floor(r.y1 / s)] }
-    const [a0, a1, b0, b1] = range(1)
     const cx = (r.x0 + r.x1) / 2, cy = (r.y0 + r.y1) / 2
-    for (let i = a0; i <= a1; i++) for (let j = b0; j <= b1; j++) {
+    for (let i = Math.floor(R.x0 / 4096); i <= Math.floor(R.x1 / 4096); i++) for (let j = Math.floor(R.y0 / 4096); j <= Math.floor(R.y1 / 4096); j++) {
       if (!this.have[1].has(`${i}_${j}`)) continue
       const p = this.get(1, i, j)
       p.used = this.frame
       if (p.state === 'new') need.push([p, Math.hypot((i + 0.5) * 4096 - cx, (j + 0.5) * 4096 - cy)])
-      let kidsReady = wantDetail, any = false, shown = false
-      if (wantDetail) {
+      const inner = (i + 1) * 4096 >= r.x0 && i * 4096 <= r.x1 && (j + 1) * 4096 >= r.y0 && j * 4096 <= r.y1
+      let kidsReady = wantDetail && inner, any = false, shown = false
+      if (wantDetail && inner) {
         for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) {
           const ki = i * 4 + a, kj = j * 4 + b
           if (!this.have[0].has(`${ki}_${kj}`)) continue
@@ -187,7 +226,9 @@ export class Tiles {
       // falling back to the overview tile there would flash the whole 4 km of it, every time a pan reaches a new
       // row of detail tiles. Zooming out, they stay until the overview tile has arrived.
       const fine = wantDetail && any && (kidsReady || shown), up = p.state === 'ready' || p.state === 'missing'
-      this.show(p, !fine)
+      this.show(p, !fine || R !== r) // past the detail tiles: both, the overview tile holed where they show
+      // (and then not in the sun's shadow map, which a perspective camera keeps near it, over the detail tiles)
+      if (p.group && p.cast !== (R === r)) { p.cast = R === r; p.group.traverse((o) => { if (o.isMesh && o.material === this.farMats.building) o.castShadow = p.cast }) }
       for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) {
         const k = this.tiles.get(this.key(0, i * 4 + a, j * 4 + b))
         if (!k) continue
@@ -199,6 +240,24 @@ export class Tiles {
     need.sort((x, y) => x[1] - y[1])
     for (const [t] of need) this.load(t)
     this.evict()
+    this.updateHoles()
+  }
+
+  // the hole map from the detail tiles that show now (uploaded when it changed)
+  updateHoles() {
+    const H = holes.holeAt.value, next = this.shown.fill(0)
+    for (const t of this.tiles.values()) {
+      if (t.level || !t.visible || t.state !== 'ready') continue
+      const a = t.i - H.x, b = t.j - H.y
+      if (a >= 0 && b >= 0 && a < H.z && b < H.w) next[b * H.z + a] = 255
+    }
+    const tex = holes.holeMap.value
+    if (tex && next.some((v, k) => v !== tex.image.data[k])) { tex.image.data.set(next); tex.needsUpdate = true }
+  }
+  // is (x, y) (world metres, y north) in a cell where a detail tile shows
+  inHole(x, y) {
+    const H = holes.holeAt.value, a = Math.floor(x / 1024) - H.x, b = Math.floor(y / 1024) - H.y
+    return a >= 0 && b >= 0 && a < H.z && b < H.w && holes.holeMap.value.image.data[b * H.z + a] > 0
   }
 
   get(level, i, j) {
@@ -238,7 +297,7 @@ export class Tiles {
     const alive = (t) => this.tiles.get(this.key(t.level, t.i, t.j)) === t
     let spent = 0
     do {
-      const t = this.warming[0]
+      const t = this.warming.find((w) => !w.level) || this.warming[0] // detail tiles first: the far overview tiles wait
       if (t) { // upload the next mesh of the first made tile
         const m = alive(t) && t.warm.at(-1)
         if (m) {
@@ -246,7 +305,7 @@ export class Tiles {
           if (spent && spent + b > 3e6) return
           t.warm.pop(); spent += b; this.upload(renderer, m); continue
         }
-        this.warming.shift()
+        this.warming.splice(this.warming.indexOf(t), 1)
         if (!alive(t)) continue
         t.state = 'ready'; t.warm = null
         t.group.visible = t.visible; if (t.trees) t.trees.visible = t.visible
@@ -254,7 +313,7 @@ export class Tiles {
         this.onChange?.(t.visible) // a tile that shows changes the picture (and the shadows); a hidden one only the plan
         if (!this.rush) return
       }
-      const n = this.made.shift() // else make the next tile; its buffers go up from the next frame
+      const n = this.made.splice(Math.max(0, this.made.findIndex((m) => !m.level)), 1)[0] // else make the next tile (detail first); its buffers go up from the next frame
       if (!n) return
       if (n.state !== 'loading' || !alive(n)) continue
       this.make(n, n.res); n.res = null
@@ -282,7 +341,7 @@ export class Tiles {
   }
 
   make(t, res) {
-    const g = new THREE.Group()
+    const g = new THREE.Group(), mt = t.level ? this.farMats : this.mats
     g.position.set(t.ox, 0, -t.oy)
     g.visible = t.visible
     t.terrain = res.terrain
@@ -301,16 +360,16 @@ export class Tiles {
       geo.setAttribute('cls', new THREE.BufferAttribute(res.ground.cls, 1))
       geo.setIndex(new THREE.BufferAttribute(res.ground.index, 1))
       geo.setAttribute('normal', new THREE.BufferAttribute(res.ground.normal, 3, true))
-      t.ground = add(geo, this.mats.ground, { receiveShadow: true }, res.ground.box)
+      t.ground = add(geo, mt.ground, { receiveShadow: true }, res.ground.box)
       if (res.ground.coarse) { // the same vertices, fewer triangles: the map further out (setDetail)
         const cg = new THREE.BufferGeometry()
         for (const k of ['position', 'cls', 'normal']) cg.setAttribute(k, geo.attributes[k])
         cg.setIndex(new THREE.BufferAttribute(res.ground.coarse, 1))
-        t.coarse = add(cg, this.mats.ground, { receiveShadow: true }, res.ground.box)
+        t.coarse = add(cg, mt.ground, { receiveShadow: true }, res.ground.box)
         t.ground.visible = this.fine; t.coarse.visible = !this.fine
       }
     }
-    for (const [r, mat] of [[res.roads, this.mats.road], [res.paint, this.mats.paint]]) { // bridge surfaces; paint on the ground
+    for (const [r, mat] of [[res.roads, mt.road], [res.paint, mt.paint]]) { // bridge surfaces; paint on the ground
       if (!r) continue
       const geo = new THREE.BufferGeometry()
       geo.setAttribute('position', new THREE.BufferAttribute(r.position, 3))
@@ -318,7 +377,7 @@ export class Tiles {
       geo.setAttribute('aRoad2', new THREE.BufferAttribute(r.aRoad2, 4))
       geo.setIndex(new THREE.BufferAttribute(r.index, 1))
       geo.setAttribute('normal', new THREE.BufferAttribute(r.normal, 3, true))
-      add(geo, mat, { receiveShadow: true, renderOrder: mat === this.mats.paint ? 1 : 0 }, r.box)
+      add(geo, mat, { receiveShadow: true, renderOrder: mat === mt.paint ? 1 : 0 }, r.box)
     }
     const bgeo = (b) => {
       const geo = new THREE.BufferGeometry()
@@ -335,10 +394,10 @@ export class Tiles {
       const step = Math.ceil(1.5e6 / (arrays.reduce((s, [, a]) => s + a.byteLength, 0) / nv) / 3) * 3 // whole triangles
       for (let v = 0; v < nv; v += step) {
         const e = Math.min(nv, v + step), part = Object.fromEntries(arrays.map(([k, a]) => [k, a.subarray(v * a.length / nv, e * a.length / nv)]))
-        add(bgeo(part), this.mats.building, { castShadow: true, receiveShadow: true }, B.box)
+        add(bgeo(part), mt.building, { castShadow: true, receiveShadow: true }, B.box)
       }
     }
-    if (res.balconies) { t.balcony = add(bgeo(res.balconies), this.mats.building, { castShadow: true, receiveShadow: true }, res.balconies.box); t.balcony.visible = this.balconies }
+    if (res.balconies) { t.balcony = add(bgeo(res.balconies), mt.building, { castShadow: true, receiveShadow: true }, res.balconies.box); t.balcony.visible = this.balconies }
     if (res.units) {
       const n = res.units.length / 7, m = new THREE.InstancedMesh(this.unitGeo, this.unitMat, n), M = new THREE.Matrix4(), c = new THREE.Color()
       for (let i = 0; i < n; i++) {
@@ -364,12 +423,15 @@ export class Tiles {
     }
     this.scene.add(g)
     t.group = g
-    if (res.trees) t.trees = this.makeTrees(t, res.trees)
+    if (res.trees) t.trees = this.makeTrees(t, res.trees, mt.tree)
   }
 
-  makeTrees(t, { pos, info }) {
+  makeTrees(t, { pos, info }, mat) {
     const n = pos.length / 3
-    const P = new Float32Array(n * 3), S = new Float32Array(n * 2), C = new Float32Array(n * 3), V = new Float32Array(n)
+    const P = new Float32Array(n * 3), S = new Float32Array(n * 2), C = new Float32Array(n * 3), V = new Float32Array(n), CL = new Float32Array(n)
+    // does a crown of radius r round tile-local (x, y north) reach over a carriageway or cycle track (the tile's 1 m mask)
+    const R = t.carriage, on = (x, y) => { if (!R || x < 0 || y < 0 || x >= R.n || y >= R.n) return false; const k = Math.floor(y) * R.n + Math.floor(x); return !!(R.bits[k >> 3] & (1 << (k & 7))) }
+    const over = (x, y, r) => { for (let a = 0; a < 8; a++) if (on(x + Math.cos(a * 0.785) * r, y + Math.sin(a * 0.785) * r)) return true; return on(x, y) }
     // per form (treeforms.js): the crown's width at least / at most by the tree's height (columns and conifers stay
     // slim however much canopy they own, a spreading tree stays wide); old tiles without crown widths: its usual width
     const MINW = [0.5, 0.18, 0.75, 0.6, 0.22, 0.3, 0.4, 0.35, 0.65], MAXW = [1.3, 0.42, 1.7, 1.3, 0.45, 0.6, 0.95, 0.8, 1.5]
@@ -379,7 +441,14 @@ export class Tiles {
       P[i * 3] = pos[i * 3]; P[i * 3 + 1] = pos[i * 3 + 1]; P[i * 3 + 2] = pos[i * 3 + 2]
       // the crown's width from the LiDAR canopy (tools/tiles.py crown_q), in the colour byte's high nibble
       const fm = Math.min(FORMS - 1, shape), w = cq ? Math.min(Math.max(2 + cq * 1.4, h * MINW[fm]), h * MAXW[fm]) : h / ASPECT[fm]
-      S[i * 2] = Math.min(30, Math.max(1.2, w)); S[i * 2 + 1] = h * 0.866
+      // street trees are pruned up (the 3D trees and the billboards alike): leaves at least 2.5 m up over sidewalks, 4.5 m
+      // where the crown reaches over a carriageway; a young tree too small for that keeps its crown off the street instead
+      let cw = Math.min(30, Math.max(1.2, w)), clear = fm === 7 ? 0 : 2.5
+      if (clear && over(pos[i * 3], -pos[i * 3 + 2], cw * 0.45)) {
+        if (h >= 7.5) clear = 4.5
+        else while (cw > 2 && over(pos[i * 3], -pos[i * 3 + 2], cw * 0.45)) cw -= 0.75
+      }
+      S[i * 2] = cw; S[i * 2 + 1] = h * 0.866; CL[i] = Math.min(0.7, clear / h)
       const f = FAMILY[fam] || FAMILY[0], c = f[Math.floor(seed * f.length) % f.length]
       const v = 0.94 + seed * 0.12
       C[i * 3] = c.r * v; C[i * 3 + 1] = c.g * v; C[i * 3 + 2] = c.b * v
@@ -390,9 +459,10 @@ export class Tiles {
     g.instanceCount = n
     g.setAttribute('iPos', new THREE.InstancedBufferAttribute(P, 3)); g.setAttribute('iSize', new THREE.InstancedBufferAttribute(S, 2))
     g.setAttribute('iCol', new THREE.InstancedBufferAttribute(C, 3)); g.setAttribute('iVar', new THREE.InstancedBufferAttribute(V, 1))
+    g.setAttribute('iClear', new THREE.InstancedBufferAttribute(CL, 1))
     const s = SIZES[t.level]
     g.boundingSphere = new THREE.Sphere(new THREE.Vector3(s / 2, (lo + hi) / 2, -s / 2), s * 0.75 + (hi - lo))
-    const m = new THREE.Mesh(g, this.mats.tree)
+    const m = new THREE.Mesh(g, mat)
     m.position.set(t.ox, 0, -t.oy)
     m.renderOrder = t.oy // northern tiles first: billboards overlap far to near
     m.visible = t.visible

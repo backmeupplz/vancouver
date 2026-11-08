@@ -75,7 +75,7 @@ export class Trees3D {
     if (!this.group.parent) return
     this.group.removeFromParent()
     this.at.set(Infinity, 0, 0)
-    this.treeMaterial.uniforms.near3d.value.set(0, 0, 0)
+    this.treeMaterial.uniforms.near3d.value.set(0, 0, 0, 0)
   }
   // a tile came or went: rebuild on the next update
   changed() { this.dirty = true }
@@ -93,11 +93,6 @@ export class Trees3D {
     this.grids.set(t, g)
     return g
   }
-  // does a crown of radius r round (x, y) (world metres, y north) reach over a carriageway or cycle track?
-  over(x, y, r) {
-    for (let a = 0; a < 8; a++) if (this.tiles.onRoad(x + Math.cos(a * 0.785) * r, y + Math.sin(a * 0.785) * r)) return true
-    return this.tiles.onRoad(x, y)
-  }
   cell(P, i, k) { return Math.min(k - 1, Math.max(0, Math.floor(-P[i * 3 + 2] / CELL))) * k + Math.min(k - 1, Math.max(0, Math.floor(P[i * 3] / CELL))) }
 
   rebuild(cx, cz) {
@@ -113,7 +108,7 @@ export class Trees3D {
       for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
         for (let q = g.start[j * g.k + i]; q < g.start[j * g.k + i + 1]; q++) {
           const e = g.idx[q], dx = P[e * 3] - lx, dy = -P[e * 3 + 2] - ly, d2 = dx * dx + dy * dy
-          if (d2 >= R2) continue
+          if (d2 >= R2 || (t.level && this.tiles.inHole(t.ox + P[e * 3], t.oy - P[e * 3 + 2]))) continue // a detail tile has it
           const r = near[n] || (near[n] = [0, null, 0])
           r[0] = d2; r[1] = t; r[2] = e; n++
         }
@@ -129,23 +124,14 @@ export class Trees3D {
     for (let k = 0; k < n; k++) {
       const [d2, t, e] = near[k], A = t.trees.geometry.attributes
       const shape = Math.min(FORMS - 1, A.iVar.array[e] | 0), m = shape * 2 + (d2 < L2 ? 0 : 1), mesh = this.meshes[m], h = A.iSize.array[e * 2 + 1] / 0.866
-      let w = A.iSize.array[e * 2]
-      const x = A.iPos.array[e * 3], y = A.iPos.array[e * 3 + 1], z = A.iPos.array[e * 3 + 2]
-      const seed = (x * 0.37 + z * 0.73) % 6.283
-      // clearance: leaves at least 2.5 m up over sidewalks, 4.5 m where the crown reaches over a carriageway; a young
-      // tree too small for that keeps its crown off the street instead
-      const wx = t.ox + x, wy = t.oy - z
-      let clear = shape === 7 ? 0 : 2.5
-      if (clear && this.over(wx, wy, w * 0.45)) {
-        if (h >= 7.5) clear = 4.5
-        else { while (w > 2 && this.over(wx, wy, w * 0.45)) w -= 0.75 }
-      }
+      const w = A.iSize.array[e * 2], x = A.iPos.array[e * 3], y = A.iPos.array[e * 3 + 1], z = A.iPos.array[e * 3 + 2]
+      const seed = (x * 0.37 + z * 0.73) % 6.283 // (the billboards turn and deepen their pictures alike, materials.js)
       p.set(t.ox + x, y - 0.1, -t.oy + z)
       q.setFromAxisAngle(UP, seed)
       s.set(w, h, w * (0.88 + 0.24 * Math.abs(Math.sin(seed * 3.1))))
       const i = counts[m]++
       mesh.setMatrixAt(i, M.compose(p, q, s))
-      mesh.geometry.attributes.iBase.setXY(i, mesh.userData.b0, Math.min(0.7, clear / h))
+      mesh.geometry.attributes.iBase.setXY(i, mesh.userData.b0, A.iClear.array[e]) // pruned up (tiles.js makeTrees)
       c.fromArray(A.iCol.array, e * 3) // the billboard's colour
       mesh.setColorAt(i, c)
     }
@@ -153,8 +139,9 @@ export class Trees3D {
       m.count = counts[i]; m.visible = counts[i] > 0
       for (const a of [m.instanceMatrix, m.instanceColor, m.geometry.attributes.iBase]) { a.clearUpdateRanges(); a.addUpdateRange(0, counts[i] * a.itemSize); a.needsUpdate = true }
     })
-    // the billboards inside the circle step aside
-    this.treeMaterial.uniforms.near3d.value.set(cx, cz, R)
+    // the billboards inside the circle step aside; over its last stretch they fade in over the 3D trees (and the camera
+    // moves on up to STEP before the next rebuild: they are whole by then)
+    this.treeMaterial.uniforms.near3d.value.set(cx, cz, R - STEP, (R - STEP) * 0.15)
   }
 }
 const UP = new THREE.Vector3(0, 1, 0)

@@ -10,6 +10,14 @@ const COMMON = `
   float fbm(vec2 p) { return noise(p) * 0.5 + noise(p * 2.03) * 0.25 + noise(p * 4.1) * 0.125 + noise(p * 8.3) * 0.0625; }
   // 1 inside [lo, hi], antialiased by the screen-space footprint fw
   float band(float x, float lo, float hi, float fw) { return smoothstep(lo - fw, lo + fw, x) * (1.0 - smoothstep(hi - fw, hi + fw, x)); }
+  // how much of a pixel fw wide at x lies in [lo, hi] (a box filter): a line thinner than a pixel fades with its width
+  // instead of breaking up, however far off
+  float cover(float x, float lo, float hi, float fw) { return clamp((min(x + fw * 0.5, hi) - max(x - fw * 0.5, lo)) / fw, 0.0, 1.0); }
+  // the same for stripes on along the first \`duty\` of every unit of x (fw in units): far off they even out to the duty, no moire
+  float stripes(float x, float duty, float fw) {
+    fw = max(fw, 1e-3); float a = x - fw * 0.5, b = x + fw * 0.5;
+    return clamp((floor(b) - floor(a)) * duty / fw + (min(fract(b), duty) - min(fract(a), duty)) / fw, 0.0, 1.0);
+  }
 `
 
 // Weather on the ground (city.surface): wet darkens paved and planted ground and gives it a sheen of the sky at
@@ -129,7 +137,7 @@ export function roadMaterial(decal = false) {
       .replace('#include <color_fragment>', `#include <color_fragment>
         float s = vR.x, t = vR.y, w = vR.z; int kind = int(vR.w + 0.5);
         float at = abs(t), fs = max(fwidth(s), 1e-3), ft = max(fwidth(t), 1e-3);
-        float detail = 1.0 - smoothstep(0.25, 0.7, max(fs, ft)); // markings fade out before they shimmer
+        float detail = 1.0 - smoothstep(0.25, 0.7, max(fs, ft)); // texture (not markings) fades out before it shimmers
         vec3 col; float dPaint = 0.0; vec3 dCol = vec3(1.0);
         float grain = 0.94 + 0.08 * noise(vW.xz * 2.3) + 0.04 * noise(vW.xz * 0.2);
         if (kind == 101) { // bridge deck fascia and underside
@@ -144,19 +152,19 @@ export function roadMaterial(decal = false) {
           col *= 1.0 - 0.08 * detail * (1.0 - smoothstep(0.0, 0.05, abs(fract(s / 1.5) - 0.5) - 0.47)); // joints
         } else if (kind == 14 || kind == 15) { // rail: ballast, sleepers, steel
           col = srgb(vec3(0.55, 0.50, 0.45)) * grain;
-          float sleeper = band(fract(s / 0.65), 0.0, 0.35, fs) * band(at, 0.0, 1.3, ft);
-          col = mix(col, srgb(vec3(0.42, 0.32, 0.24)), sleeper * detail);
-          float rail = band(at, 0.66, 0.78, ft);
+          float sleeper = stripes(s / 0.65, 0.35, fs / 0.65) * cover(at, -1.0, 1.3, ft);
+          col = mix(col, srgb(vec3(0.42, 0.32, 0.24)), sleeper);
+          float rail = cover(at, 0.66, 0.78, ft);
           col = mix(col, srgb(vec3(0.62, 0.62, 0.64)), rail);
-          dPaint = max(sleeper * detail * 0.9, rail); dCol = rail > 0.5 ? srgb(vec3(0.62, 0.62, 0.64)) : srgb(vec3(0.42, 0.32, 0.24));
+          dPaint = max(sleeper * 0.9, rail); dCol = rail > 0.5 ? srgb(vec3(0.62, 0.62, 0.64)) : srgb(vec3(0.42, 0.32, 0.24));
         } else if (kind == 102) { // a crosswalk, kerb to kerb (s): continental bars centred on the road, or two lines (vR2.x 1)
           col = srgb(vec3(0.94, 0.94, 0.9));
-          dPaint = (vR2.x > 0.5 ? band(at, w * 0.5 - 0.3, w * 0.5, ft) : band(fract((s - 0.5 * vR2.w) / 1.1 + 0.25), 0.0, 0.5, fs / 1.1)) * band(s, 0.3, vR2.w - 0.3, fs); dCol = col;
+          dPaint = (vR2.x > 0.5 ? cover(at, w * 0.5 - 0.3, w * 0.5, ft) : stripes((s - 0.5 * vR2.w) / 1.1 + 0.25, 0.5, fs / 1.1)) * cover(s, 0.3, vR2.w - 0.3, fs); dCol = col;
         } else if (kind >= 9 && kind <= 13) { // footway, cycleway, path, steps, track
           col = kind == 10 ? srgb(vec3(0.40, 0.42, 0.44)) : kind == 11 || kind == 13 ? srgb(vec3(0.72, 0.64, 0.50)) : srgb(vec3(0.71, 0.70, 0.67));
           col *= grain;
-          if (kind == 10) col = mix(col, srgb(vec3(0.95, 0.95, 0.9)), band(at, 0.0, 0.06, ft) * band(fract(s / 4.0), 0.0, 0.5, fs) * detail);
-          if (kind == 12) col *= 1.0 - 0.18 * band(fract(s / 0.35), 0.0, 0.18, fs) * detail;
+          if (kind == 10) col = mix(col, srgb(vec3(0.95, 0.95, 0.9)), cover(at, -1.0, 0.06, ft) * stripes(s / 4.0, 0.5, fs / 4.0));
+          if (kind == 12) col *= 1.0 - 0.18 * stripes(s / 0.35, 0.18, fs / 0.35);
         } else { // carriageways, runways, taxiways
           float lanes = mod(vR2.x, 32.0), oneway = step(31.5, vR2.x);
           float dA = vR2.y, dB = vR2.z, len = vR2.w;
@@ -168,35 +176,35 @@ export function roadMaterial(decal = false) {
           if (kind <= 4 && lanes >= 2.0) {
             float lw = w / max(lanes, 1.0);
             if (oneway < 0.5) { // double yellow centre line, white dashes between lanes in each direction
-              float c2 = band(at, 0.08, 0.2, ft);
+              float c2 = cover(at, 0.08, 0.2, ft);
               paint = max(paint, c2); if (c2 > 0.0) pc = yellow;
-              float k = (at) / lw, onLine = band(abs(fract(k) - 0.5), 0.5 - 0.09 / lw, 0.5, ft / lw) * step(1.0, k + 0.02) * step(k, lanes * 0.5 - 0.5);
-              paint = max(paint, onLine * band(fract(s / 12.0), 0.0, 0.25, fs / 12.0));
+              float k = (at) / lw, onLine = stripes(k + 0.09 / lw, 0.18 / lw, ft / lw) * step(1.0, k + 0.02) * step(k, lanes * 0.5 - 0.5);
+              paint = max(paint, onLine * stripes(s / 12.0, 0.25, fs / 12.0));
             } else {
-              float k = (t + w * 0.5) / lw, onLine = band(abs(fract(k) - 0.5), 0.5 - 0.09 / lw, 0.5, ft / lw) * step(0.98, k) * step(k, lanes - 0.98);
-              paint = max(paint, onLine * band(fract(s / 12.0), 0.0, 0.25, fs / 12.0));
+              float k = (t + w * 0.5) / lw, onLine = stripes(k + 0.09 / lw, 0.18 / lw, ft / lw) * step(0.98, k) * step(k, lanes - 0.98);
+              paint = max(paint, onLine * stripes(s / 12.0, 0.25, fs / 12.0));
             }
-            if (kind <= 1) paint = max(paint, band(at, w * 0.5 - 0.55, w * 0.5 - 0.4, ft)); // edge lines
+            if (kind <= 1) paint = max(paint, cover(at, w * 0.5 - 0.55, w * 0.5 - 0.4, ft)); // edge lines
             paint *= junctionFade;
           }
           if (kind <= 4) { // stop lines just outside junctions (crosswalks are mapped ones, drawn separately)
             for (int e = 0; e < 2; e++) {
               float d = e == 0 ? dA : dB;
               if (d > 20.0) continue;
-              float stop = band(d, 5.0, 5.45, fs) * step(0.0, oneway > 0.5 ? 1.0 : (e == 0 ? -t : t)) * step(at, w * 0.5 - 0.3);
+              float stop = cover(d, 5.0, 5.45, fs) * step(0.0, oneway > 0.5 ? 1.0 : (e == 0 ? -t : t)) * step(at, w * 0.5 - 0.3);
               paint = max(paint, stop);
             }
           }
           if (kind == 16) { // runway: centre dashes, edge lines, threshold piano keys
-            paint = max(paint, band(at, 0.0, 0.45, ft) * band(fract(s / 60.0), 0.0, 0.5, fs / 60.0));
-            paint = max(paint, band(at, w * 0.5 - 1.5, w * 0.5 - 0.6, ft));
+            paint = max(paint, cover(at, -1.0, 0.45, ft) * stripes(s / 60.0, 0.5, fs / 60.0));
+            paint = max(paint, cover(at, w * 0.5 - 1.5, w * 0.5 - 0.6, ft));
             float th = min(s, len - s);
-            paint = max(paint, band(th, 6.0, 36.0, fs) * band(abs(fract(t / 3.6) - 0.5), 0.0, 0.25, ft / 3.6) * step(at, w * 0.5 - 3.0));
+            paint = max(paint, cover(th, 6.0, 36.0, fs) * stripes(t / 3.6 - 0.25, 0.5, ft / 3.6) * step(at, w * 0.5 - 3.0));
           } else if (kind == 17) { // taxiway: yellow centre line
-            float c2 = band(at, 0.0, 0.2, ft); paint = max(paint, c2); if (c2 > 0.0) pc = yellow;
+            float c2 = cover(at, -1.0, 0.2, ft); paint = max(paint, c2); if (c2 > 0.0) pc = yellow;
           }
-          col = mix(col, pc, paint * detail);
-          dPaint = paint * detail; dCol = pc;
+          col = mix(col, pc, paint);
+          dPaint = paint; dCol = pc;
         }
         float sheen = 0.0;
         if (wet > 0.0) {
@@ -217,7 +225,7 @@ export function roadMaterial(decal = false) {
         #endif`)
       .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += skyCol * sheen;')
   }
-  m.customProgramCacheKey = () => (decal ? 'road3d' : 'road3')
+  m.customProgramCacheKey = () => (decal ? 'road4d' : 'road4')
   return m
 }
 
@@ -387,117 +395,219 @@ const FAMILY = [ // muted, the way a canopy reads from above in late October
 ].map((f) => f.map((h) => new THREE.Color(h)))
 export { FAMILY }
 
-// The billboards are pictures of the 3D trees' forms (treeforms.js), drawn once at startup: one row as the map camera
-// sees them (30° down, lit by the map's sun), one as a street-level camera sees them far off (upright, a little from
-// above). Red: the light on the surface (times ATL_GAIN), green: 1 on bark (drawn in BARK, not the crown colour), and a
-// dark rim like the ink outlines. frames[row * FORMS + form]: (half width per metre of crown, bottom, top, height) of
-// the picture, in metres for a tree 1 m wide and ASPECT[form] tall, so the billboard covers just what the tree would.
-const ATL_GAIN = 1.6, ROWS = [30, 4]
+// The billboards are pictures of the 3D trees' forms (treeforms.js), drawn once at startup and lit live by the scene's
+// sun and sky the way the 3D trees are (Lambert, the same grade after), so the swap from one to the other doesn't
+// show: one picture of each form as the map camera sees it (30° down), and ANGLES round each coarse form (what the 3D
+// trees are past ~60 m) as a street-level camera sees it far off (4° down), picked and blended by how the camera sees
+// each tree, turned and deepened as trees3d.js turns it. Two textures: `map` the face's normal (x right, y up, z towards
+// the camera, upright) and coverage; `mat` the crown's shade (darker low in it and underneath), bark, and a dark rim
+// like the ink outlines. frames[view * FORMS + form] (view 0 the map, 1 the street, alike at every angle): (half width
+// per metre of crown, bottom, top, height) of the picture, in metres for a tree 1 m wide and ASPECT[form] tall, so the
+// billboard covers just what the tree would; base[form]: where the coarse form's leaves start (share of its height).
+const ANGLES = 8, C0 = 256, C1 = 128, PER = (FORMS * C0) / C1, TW = FORMS * C0, TH = C0 + Math.ceil((ANGLES * FORMS) / PER) * C1
 export function treeAtlas(renderer) {
-  const C = 256, SS = 2, W = FORMS * C, H = ROWS.length * C, frames = new Float32Array(FORMS * ROWS.length * 4)
+  const SS = 2, W = TW, H = TH, frames = new Float32Array(FORMS * 2 * 4), base = new Float32Array(FORMS)
   const rt = new THREE.WebGLRenderTarget(W * SS, H * SS) // drawn at twice the size, averaged down
   const mat = new THREE.ShaderMaterial({
-    uniforms: { sun: { value: new THREE.Vector3(-0.55, 0.62, 0.56).normalize() } }, // main.js SUN
-    vertexShader: `attribute vec3 color; attribute float crown; varying vec3 vN; varying float vS, vT;
-      void main() { vN = normalize(mat3(modelMatrix) * normal); vS = mix(1.0, color.g, crown); vT = 1.0 - crown; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-    // Lambert under main.js's hemisphere (sky 0xe8eef8, ground 0x8a8070, 2.0) and sun (2.3)
-    fragmentShader: `uniform vec3 sun; varying vec3 vN; varying float vS, vT;
-      void main() { vec3 n = normalize(vN); float l = (2.0 * mix(0.21, 0.86, 0.5 + 0.5 * n.y) + 2.3 * max(dot(n, sun), 0.0)) / 3.14159 * vS;
-        gl_FragColor = vec4(l / ${ATL_GAIN.toFixed(2)}, vT, 0.0, 1.0); }`,
+    uniforms: { mode: { value: 0 }, right: { value: new THREE.Vector3() }, toward: { value: new THREE.Vector3() }, eye: { value: new THREE.Vector3() } },
+    vertexShader: `attribute vec3 color; attribute float crown; varying vec3 vP; varying float vS, vB;
+      void main() { vP = (modelMatrix * vec4(position, 1.0)).xyz; vS = mix(1.0, color.g, crown); vB = 1.0 - crown; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `uniform float mode; uniform vec3 right, toward, eye; varying vec3 vP; varying float vS, vB;
+      void main() {
+        vec3 n = normalize(cross(dFdx(vP), dFdy(vP))); // flat, as the 3D trees are shaded
+        if (dot(n, eye) < 0.0) n = -n;
+        gl_FragColor = mode < 0.5 ? vec4(vec3(dot(n, right), n.y, dot(n, toward)) * 0.5 + 0.5, 1.0) : vec4(vS, vB, 0.0, 1.0);
+      }`,
   })
-  const scene = new THREE.Scene(), mesh = new THREE.Mesh(undefined, mat), cam = new THREE.OrthographicCamera(), v = new THREE.Vector3()
+  const scene = new THREE.Scene(), mesh = new THREE.Mesh(undefined, mat), cam = new THREE.OrthographicCamera(), v = new THREE.Vector3(), U = mat.uniforms
   scene.add(mesh)
-  const keep = { rt: renderer.getRenderTarget(), c: renderer.getClearColor(new THREE.Color()), a: renderer.getClearAlpha() }
-  renderer.setRenderTarget(rt); renderer.setClearColor(0, 0); renderer.clear()
+  // the views: [form, coarse, elevation°, azimuth, cell x, cell y, cell size]; the picture's frame is the same for all
+  // of a form's street views (the widest), so blending two angles needs one quad
+  const views = []
   for (let f = 0; f < FORMS; f++) {
-    const geo = treeForm(THREE, f), P = geo.attributes.position.array, A = ASPECT[f]
-    mesh.geometry = geo; mesh.scale.set(1, A, 1)
-    ROWS.forEach((deg, r) => {
-      const e = (deg * Math.PI) / 180, ce = Math.cos(e), se = Math.sin(e)
-      let X = 0, y0 = Infinity, y1 = -Infinity
-      for (let i = 0; i < P.length; i += 3) { const y = P[i + 1] * A * ce - P[i + 2] * se; X = Math.max(X, Math.abs(P[i])); y0 = Math.min(y0, y); y1 = Math.max(y1, y) }
-      const span = Math.max(2 * X, y1 - y0) * 1.08, bottom = y0 - span * 0.03
-      cam.left = -span / 2; cam.right = span / 2; cam.bottom = bottom; cam.top = bottom + span; cam.near = 0.1; cam.far = 100
-      cam.position.set(0, se * 50, ce * 50); cam.lookAt(v.set(0, 0, 0)); cam.updateProjectionMatrix()
-      frames.set([span / 2, bottom, bottom + span, A], (r * FORMS + f) * 4)
-      rt.viewport.set(f * C * SS, r * C * SS, C * SS, C * SS); rt.scissor.copy(rt.viewport); rt.scissorTest = true
-      renderer.setRenderTarget(rt); renderer.render(scene, cam)
-    })
-    geo.dispose()
+    views.push([f, false, 30, 0, f * C0, 0, C0])
+    for (let a = 0; a < ANGLES; a++) { const c = a * FORMS + f; views.push([f, true, 4, (a * 2 * Math.PI) / ANGLES, (c % PER) * C1, C0 + Math.floor(c / PER) * C1, C1]) }
   }
-  const big = new Uint8Array(W * SS * H * SS * 4)
-  renderer.readRenderTargetPixels(rt, 0, 0, W * SS, H * SS, big)
+  const geos = Array.from({ length: FORMS * 2 }, (_, k) => treeForm(THREE, k >> 1, !!(k & 1)))
+  for (let f = 0; f < FORMS; f++) { // frames, and where the coarse form's leaves start
+    for (const st of [0, 1]) {
+      const P = geos[f * 2 + st].attributes.position.array, A = ASPECT[f], e = ((st ? 4 : 30) * Math.PI) / 180, ce = Math.cos(e), se = Math.sin(e)
+      let X = 0, y0 = Infinity, y1 = -Infinity
+      for (const b of st ? Array.from({ length: ANGLES }, (_, a) => (a * 2 * Math.PI) / ANGLES) : [0]) {
+        const cb = Math.cos(b), sb = Math.sin(b)
+        for (let i = 0; i < P.length; i += 3) {
+          const x = P[i] * cb - P[i + 2] * sb, z = P[i] * sb + P[i + 2] * cb, y = P[i + 1] * A * ce - z * se
+          X = Math.max(X, Math.abs(x)); y0 = Math.min(y0, y); y1 = Math.max(y1, y)
+        }
+      }
+      const span = Math.max(2 * X, y1 - y0) * 1.08, bottom = y0 - span * 0.03
+      frames.set([span / 2, bottom, bottom + span, A], (st * FORMS + f) * 4)
+    }
+    const g = geos[f * 2 + 1], P = g.attributes.position.array, Cr = g.attributes.crown.array
+    let b0 = 1
+    for (let i = 0; i < Cr.length; i++) if (Cr[i] > 0.5) b0 = Math.min(b0, P[i * 3 + 1])
+    base[f] = Math.max(0.02, b0) // as trees3d.js finds it
+  }
+  const keep = { rt: renderer.getRenderTarget(), c: renderer.getClearColor(new THREE.Color()), a: renderer.getClearAlpha() }
+  const px = [new Uint8Array(W * SS * H * SS * 4), null]
+  for (const mode of [0, 1]) {
+    U.mode.value = mode
+    renderer.setRenderTarget(rt); renderer.setClearColor(0, 0); renderer.clear()
+    for (const [f, coarse, deg, b, cx, cy, C] of views) {
+      const st = coarse ? 1 : 0, fr = frames.subarray((st * FORMS + f) * 4), e = (deg * Math.PI) / 180, A = ASPECT[f]
+      mesh.geometry = geos[f * 2 + st]; mesh.scale.set(1, A, 1)
+      cam.left = -fr[0]; cam.right = fr[0]; cam.bottom = fr[1]; cam.top = fr[2]; cam.near = 0.1; cam.far = 100
+      const sb = Math.sin(b), cb = Math.cos(b)
+      cam.position.set(sb * Math.cos(e) * 50, Math.sin(e) * 50, cb * Math.cos(e) * 50); cam.up.set(0, 1, 0); cam.lookAt(v.set(0, 0, 0)); cam.updateProjectionMatrix()
+      U.right.value.set(cb, 0, -sb); U.toward.value.set(sb, 0, cb); U.eye.value.copy(cam.position).normalize()
+      rt.viewport.set(cx * SS, cy * SS, C * SS, C * SS); rt.scissor.copy(rt.viewport); rt.scissorTest = true
+      renderer.setRenderTarget(rt); renderer.render(scene, cam)
+    }
+    if (mode) px[1] = new Uint8Array(W * SS * H * SS * 4)
+    renderer.readRenderTargetPixels(rt, 0, 0, W * SS, H * SS, px[mode])
+  }
   renderer.setRenderTarget(keep.rt); renderer.setClearColor(keep.c, keep.a)
-  rt.dispose(); mat.dispose()
-  // averaged down (colours weighted by coverage), then a rim 2 px out from the edge
-  const a = new Float32Array(W * H), out = new Uint8Array(W * H * 4)
+  rt.dispose(); mat.dispose(); for (const g of geos) g.dispose()
+  // averaged down (weighted by coverage), then a rim out from the edge (2 px on the map's pictures, 1 on the street's)
+  const a = new Float32Array(W * H), N = new Float32Array(W * H * 3), M = new Float32Array(W * H * 2)
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    let sa = 0, sr = 0, sg = 0
-    for (let j = 0; j < SS; j++) for (let i = 0; i < SS; i++) { const o = ((y * SS + j) * W * SS + x * SS + i) * 4, al = big[o + 3]; sa += al; sr += big[o] * al; sg += big[o + 1] * al }
+    let sa = 0, n0 = 0, n1 = 0, n2 = 0, s = 0, k = 0
+    for (let j = 0; j < SS; j++) for (let i = 0; i < SS; i++) {
+      const o = ((y * SS + j) * W * SS + x * SS + i) * 4, al = px[0][o + 3]
+      sa += al; n0 += px[0][o] * al; n1 += px[0][o + 1] * al; n2 += px[0][o + 2] * al; s += px[1][o] * al; k += px[1][o + 1] * al
+    }
     const p = y * W + x
     a[p] = sa / (255 * SS * SS)
-    if (sa) { out[p * 4] = sr / sa; out[p * 4 + 1] = sg / sa }
+    if (sa) { N[p * 3] = n0 / sa; N[p * 3 + 1] = n1 / sa; N[p * 3 + 2] = n2 / sa; M[p * 2] = s / sa; M[p * 2 + 1] = k / sa }
   }
+  const outA = new Uint8Array(W * H * 4), outB = new Uint8Array(W * H * 4)
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const p = y * W + x
+    const p = y * W + x, r2 = y < C0 ? 5 : 2
     let rim = 0
-    for (let j = -2; j <= 2; j++) for (let i = -2; i <= 2; i++) if (i * i + j * j <= 5 && y + j >= 0 && y + j < H && x + i >= 0 && x + i < W) rim = Math.max(rim, a[p + j * W + i])
-    const ra = rim * 0.85 * (1 - a[p]), al = a[p] + ra
-    if (al > 0) { out[p * 4] = (out[p * 4] * a[p] + 12 * ra) / al; out[p * 4 + 1] = (out[p * 4 + 1] * a[p]) / al }
-    out[p * 4 + 3] = al * 255
+    for (let j = -2; j <= 2; j++) for (let i = -2; i <= 2; i++) if (i * i + j * j <= r2 && y + j >= 0 && y + j < H && x + i >= 0 && x + i < W) rim = Math.max(rim, a[p + j * W + i])
+    const ra = rim * 0.85 * (1 - a[p]), al = a[p] + ra, w = al > 0 ? a[p] / al : 0
+    // empty and rim texels: a normal towards the camera, all rim (so the pictures' edges darken as they get small)
+    outA[p * 4] = N[p * 3] * w + 128 * (1 - w); outA[p * 4 + 1] = N[p * 3 + 1] * w + 128 * (1 - w); outA[p * 4 + 2] = N[p * 3 + 2] * w + 255 * (1 - w); outA[p * 4 + 3] = al * 255
+    outB[p * 4] = w ? M[p * 2] : 200; outB[p * 4 + 1] = M[p * 2 + 1] * w; outB[p * 4 + 2] = 255 * (1 - w); outB[p * 4 + 3] = 255
   }
-  const tex = new THREE.DataTexture(out, W, H)
-  tex.generateMipmaps = true; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter; tex.anisotropy = 4
-  tex.needsUpdate = true
-  tex.userData.frames = frames
-  return tex
+  const tex = (d) => {
+    const t = new THREE.DataTexture(d, W, H)
+    t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter; t.anisotropy = 4
+    t.needsUpdate = true
+    return t
+  }
+  const t = tex(outA)
+  t.userData = { frames, base, mat: tex(outB) }
+  return t
 }
 
+const BARK3 = (h) => new THREE.Color(h).toArray().map((x) => x.toFixed(4)).join(', ')
 export function treeMaterial(atlas) {
   return new THREE.ShaderMaterial({
-    uniforms: { map: { value: atlas }, frames: { value: atlas.userData.frames }, sat: { value: 1.0 }, gain: { value: new THREE.Vector3(1, 1, 1) }, tint: { value: new THREE.Vector3(1, 1, 1) }, desat: { value: 0 }, ...THREE.UniformsLib.fog,
-      // a perspective camera (city.view.useCamera): upright billboards (cyl = 1), and none within near3d.z metres
-      // of (near3d.x, near3d.y) on the ground, where trees3d.js draws real trees
-      cyl: { value: 0 }, near3d: { value: new THREE.Vector3() } },
+    uniforms: { map: { value: atlas }, mat: { value: atlas.userData.mat }, frames: { value: atlas.userData.frames }, base: { value: atlas.userData.base },
+      sat: { value: 1.0 }, gain: { value: new THREE.Vector3(1, 1, 1) }, tint: { value: new THREE.Vector3(1, 1, 1) }, desat: { value: 0 }, ...THREE.UniformsLib.fog,
+      // the light (main.js keeps these the scene's): towards the sun, its colour times intensity; the sky's and ground's
+      sunDir: { value: new THREE.Vector3(-0.55, 0.62, 0.56).normalize() }, sunCol: { value: new THREE.Color(0xfff1dc).multiplyScalar(2.3) },
+      sky: { value: new THREE.Color(0xe8eef8).multiplyScalar(2) }, gnd: { value: new THREE.Color(0x8a8070).multiplyScalar(2) },
+      // a perspective camera (city.view.useCamera): upright billboards (cyl = 1), and none within near3d.z - near3d.w metres
+      // of (near3d.x, near3d.y) on the ground, where trees3d.js draws real trees; over the last near3d.w they fade in
+      cyl: { value: 0 }, near3d: { value: new THREE.Vector4() } },
     fog: true, // linear fog (a THREE.Fog on the scene) mixed in before the grade, like the rest of the map
-    vertexShader: `attribute vec3 iPos; attribute vec2 iSize; attribute vec3 iCol; attribute float iVar;
-      uniform float cyl; uniform vec3 near3d; uniform vec4 frames[${FORMS * ROWS.length}];
-      varying vec2 vUv; varying vec3 vCol;
+    vertexShader: `attribute vec3 iPos; attribute vec2 iSize; attribute vec3 iCol; attribute float iVar; attribute float iClear;
+      uniform float cyl; uniform vec4 near3d; uniform vec4 frames[${FORMS * 2}]; uniform float base[${FORMS}];
+      varying vec2 vUv; flat varying vec3 vCol; flat varying vec4 vCell, vPic, vBase; flat varying mat3 vM0, vM1; flat varying float vTrunk;
       #include <fog_pars_vertex>
+      const float PI2 = 6.2831853;
+      vec2 cell(float a, float form) { float c = a * ${FORMS}.0 + form; return vec2(mod(c, ${PER}.0) * ${C1}.0, ${C0}.0 + floor(c / ${PER}.0) * ${C1}.0) / vec2(${TW}.0, ${TH}.0); }
+      // from a street picture's normals (angle a) to the world's, for a tree turned by (c, s) and stretched by (1, g, 1/k)
+      mat3 frameOf(float a, float c, float s, float g, float k) {
+        float b = a * PI2 / ${ANGLES}.0, cb = cos(b), sb = sin(b);
+        vec2 r = vec2(cb, -sb / k), t = vec2(sb, cb / k);
+        return mat3(vec3(c * r.x + s * r.y, 0.0, -s * r.x + c * r.y), vec3(0.0, g, 0.0), vec3(c * t.x + s * t.y, 0.0, -s * t.x + c * t.y));
+      }
       void main() {
-        float form = min(iVar, ${FORMS - 1}.0), row = cyl > 0.5 ? 1.0 : 0.0, w = iSize.x, h = iSize.y / 0.866;
-        vec4 fr = frames[int(row * ${FORMS}.0 + form)];
-        vUv = vec2((form + uv.x) / ${FORMS}.0, (row + uv.y) / ${ROWS.length}.0);
+        float form = min(iVar, ${FORMS - 1}.0), w = iSize.x, h = iSize.y / 0.866;
+        vec4 fr = frames[int((cyl > 0.5 ? ${FORMS}.0 : 0.0) + form)];
+        vUv = vec2(position.x + 0.5, position.y);
         vCol = iCol;
-        vec2 q = vec2(position.x * 2.0 * fr.x * w, mix(fr.y, fr.z, position.y)); // the picture's corner, for a tree 1 m wide and fr.w tall
-        vec4 mv;
+        vPic = vec4(fr.yzw, form);
+        vTrunk = 0.032 / (2.0 * fr.x); // a trunk's half width, a share of the picture's
+        vec2 q = vec2(position.x * 2.0 * fr.x * w, mix(fr.y, fr.z, position.y)); // the picture's corner, for a tree w wide and fr.w tall
+        vec4 mv, fogMv;
         if (cyl > 0.5) { // standing up in the world, turned to the camera about the vertical
           vec3 p = (modelMatrix * vec4(iPos, 1.0)).xyz;
-          if (distance(p.xz, near3d.xy) < near3d.z) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
+          float d = distance(p.xz, cameraPosition.xz), fade = near3d.w > 0.0 ? smoothstep(near3d.z - near3d.w, near3d.z, d) : 1.0;
+          if (fade <= 0.0) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
+          // as trees3d.js turns the tree (by a seed from where it stands) and deepens it (k), seen from the camera
+          float v = iPos.x * 0.37 + iPos.z * 0.73, seed = sign(v) * mod(abs(v), 6.283), k = 0.88 + 0.24 * abs(sin(seed * 3.1));
           vec2 to = normalize(cameraPosition.xz - p.xz);
-          p += vec3(to.y, 0.0, -to.x) * q.x + vec3(0.0, q.y * h / fr.w, 0.0);
-          mv = viewMatrix * vec4(p, 1.0);
+          float c = cos(seed), s = sin(seed);
+          vec2 dl = vec2(c * to.x - s * to.y, s * to.x + c * to.y), du = normalize(vec2(dl.x, dl.y / k));
+          float b = mod(atan(du.x, du.y) / PI2 * ${ANGLES}.0 + ${ANGLES}.0, ${ANGLES}.0), a0 = floor(b), a1 = mod(a0 + 1.0, ${ANGLES}.0);
+          vCell = vec4(cell(a0, form), cell(a1, form));
+          float g = fr.w * w / h;
+          vM0 = frameOf(a0, c, s, g, k); vM1 = frameOf(a1, c, s, g, k);
+          vBase = vec4(base[int(form)], max(iClear, base[int(form)]), smoothstep(0.25, 0.75, b - a0), fade); // the two nearest angles, blended halfway between
+          vec3 wp = p + vec3(to.y, 0.0, -to.x) * q.x * sqrt(dl.y * dl.y + k * k * dl.x * dl.x) + vec3(0.0, q.y * h / fr.w, 0.0);
+          // drawn nearer by its crown's depth, the same size on screen: in front of its own 3D tree as it fades in over it
+          float D = distance(cameraPosition, p + vec3(0.0, 0.5 * h, 0.0)), off = min(0.6 * w * k, 0.5 * D);
+          mv = viewMatrix * vec4(cameraPosition + (wp - cameraPosition) * ((D - off) / D), 1.0);
+          fogMv = viewMatrix * vec4(wp, 1.0);
         } else { // the map camera: what shows of a tree 30° from above grows with its height and its crown's depth
-          mv = modelViewMatrix * vec4(iPos, 1.0);
+          mv = modelViewMatrix * vec4(iPos, 1.0); fogMv = mv;
           mv.xy += vec2(q.x, q.y * (0.866 * h + 0.35 * w) / (0.866 * fr.w + 0.35));
+          vec2 cell0 = vec2(form * ${C0}.0 / ${TW}.0, 0.0);
+          vCell = vec4(cell0, cell0);
+          vec3 r = normalize(vec3(viewMatrix[0][0], 0.0, viewMatrix[2][0])); // the camera's right, level
+          vM0 = vM1 = mat3(r, vec3(0.0, 1.0, 0.0), vec3(-r.z, 0.0, r.x));
+          vBase = vec4(0.0, 0.0, 0.0, 1.0);
         }
         gl_Position = projectionMatrix * mv;
         #ifdef USE_FOG
-          vFogDepth = -mv.z;
+          vFogDepth = -fogMv.z;
         #endif
       }`,
-    fragmentShader: `uniform sampler2D map; uniform float sat, desat; uniform vec3 gain, tint; varying vec2 vUv; varying vec3 vCol;
+    fragmentShader: `uniform sampler2D map, mat; uniform float sat, desat, cyl; uniform vec3 gain, tint, sunDir, sunCol, sky, gnd;
+      varying vec2 vUv; flat varying vec3 vCol; flat varying vec4 vCell, vPic, vBase; flat varying mat3 vM0, vM1; flat varying float vTrunk;
       #include <fog_pars_fragment>
+      // Lambert under the hemisphere and the sun, as the 3D trees (no shadows), the rim darkened like an ink outline
+      vec3 lit(vec4 n4, vec4 m, mat3 M) {
+        vec3 n = normalize(M * (n4.xyz * 2.0 - 1.0));
+        vec3 albedo = mix(vCol * m.r, vPic.w == 7.0 ? vec3(${BARK3(0x6e5a44)}) : vec3(${BARK3(0x4a3a2e)}), m.g); // a palm's bark (treeforms.js) or the rest's
+        vec3 c = albedo * (mix(gnd, sky, 0.5 + 0.5 * n.y) + sunCol * max(dot(n, sunDir), 0.0)) * 0.3183099;
+        return c * mix(vec3(1.0), vec3(0.16, 0.18, 0.22), m.b);
+      }
+      vec3 grade(vec3 cc) { // as main.js's ink pass grades the scene
+        cc = max(mix(vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), cc, sat), 0.0) * gain;
+        return mix(cc, vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), desat) * tint;
+      }
       void main() {
-        vec4 t = texture2D(map, vUv);
-        if (t.a < 0.04) discard;
-        vec3 cc = mix(vCol, vec3(${new THREE.Color(0x4a3a2e).toArray().map((x) => x.toFixed(4)).join(', ')}), t.g) * t.r * ${ATL_GAIN.toFixed(2)};
+        vec2 uv = vUv;
+        if (vBase.y > vBase.x) { // a pruned street tree (trees3d.js): its crown moved up, a bare trunk under it
+          // (the crown's near rim shows a little below where it starts, seen 4° from above, and its outline 2 texels more)
+          float y = mix(vPic.x, vPic.y, uv.y) / vPic.z, m = (0.035 + (vPic.y - vPic.x) * 2.5 / ${C1}.0) / vPic.z, b0 = vBase.x - m, b = vBase.y - m;
+          if (y < b) {
+            float fw = max(fwidth(uv.x), 1e-4), a = clamp((min(uv.x + fw * 0.5, 0.5 + vTrunk) - max(uv.x - fw * 0.5, 0.5 - vTrunk)) / fw, 0.0, 1.0) * vBase.w;
+            if (a < 0.04 || y < 0.0) discard;
+            vec3 cc = lit(vec4(0.5, 0.5, 1.0, 1.0), vec4(1.0, 1.0, 0.0, 1.0), vM0);
+            #if defined(USE_FOG) && !defined(FOG_EXP2)
+              cc = mix(cc, fogColor, smoothstep(fogNear, fogFar, vFogDepth));
+            #endif
+            gl_FragColor = vec4(grade(cc), a);
+            #include <colorspace_fragment>
+            return;
+          }
+          uv.y = clamp((b0 + (y - b) * (1.0 - b0) / (1.0 - b)) * vPic.z - vPic.x, 0.0, vPic.y - vPic.x) / (vPic.y - vPic.x);
+        }
+        vec2 sz = cyl > 0.5 ? vec2(${C1 / TW}, ${C1 / TH}) : vec2(${C0 / TW}, ${C0 / TH}), u0 = vCell.xy + uv * sz, u1 = vCell.zw + uv * sz;
+        vec4 n0 = texture2D(map, u0), n1 = texture2D(map, u1);
+        float a0 = n0.a * (1.0 - vBase.z), a1 = n1.a * vBase.z, al = a0 + a1;
+        if (al < 0.04) discard;
+        vec3 cc = (lit(n0, texture2D(mat, u0), vM0) * a0 + lit(n1, texture2D(mat, u1), vM1) * a1) / al;
         #if defined(USE_FOG) && !defined(FOG_EXP2)
           cc = mix(cc, fogColor, smoothstep(fogNear, fogFar, vFogDepth));
         #endif
-        cc = max(mix(vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), cc, sat), 0.0) * gain;
-        cc = mix(cc, vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), desat) * tint;
-        gl_FragColor = vec4(cc, t.a);
+        gl_FragColor = vec4(grade(cc), al * vBase.w);
         #include <colorspace_fragment>
       }`,
     transparent: true,

@@ -87,7 +87,7 @@ export function makeKerbs(THREE, segs) {
     }
     if (key === shown) return pending // nothing new
     shown = key
-    if (n > cap) {
+    if (n > cap || !geo.attributes.position) { // (also when the first kerbs found are all empty)
       cap = Math.ceil(n * 1.5)
       geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(cap), 3)); geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(cap), 3))
     }

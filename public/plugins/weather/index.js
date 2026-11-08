@@ -76,9 +76,10 @@ const LOOK = {
   storm: { sun: 0.05, tint: [0.38, 0.42, 0.58], desat: 0.52, haze: 0.08, hazeCol: [0.4, 0.44, 0.54] },
   snow: { sun: 0.3, tint: [0.92, 0.97, 1.08], desat: 0.5, haze: 0.32, hazeCol: [0.95, 0.97, 1] },
 }
-// street-level fog (metres) per weather at full intensity; clear air reaches the far end of the streamed map. three.js
+// street-level fog (metres) per weather at full intensity: in clear air the city hazes out over kilometres and the
+// mountains stand in the haze (the quality tier may bring it nearer, core/play.js). three.js
 // fades fog in with a smoothstep from near to far, so a near below zero is what veils the middle distance
-const FOG = { clear: [160, 900], cloudy: [120, 760], overcast: [60, 560], fog: [-60, 240], drizzle: [20, 480], rain: [-40, 360], storm: [-50, 250], snow: [-40, 280] }
+const FOG = { clear: [2000, 24000], cloudy: [1500, 16000], overcast: [500, 5000], fog: [-60, 240], drizzle: [100, 1500], rain: [-40, 600], storm: [-50, 400], snow: [-40, 450] }
 // street-level sky per weather: day horizon, zenith, night horizon, zenith (the clear sky is pulled towards it), and
 // the clouds' lit and shaded colours by day
 const SKY = {
@@ -366,8 +367,9 @@ export default function weather(city) {
     D.uDeck.value = { overcast: 0.7, drizzle: 0.8, rain: 0.85, storm: 0.9, snow: 0.8 }[c.kind] ?? 0
     D.uCloud.value.setHex(S ? S[4] : 0xf6f8fa).lerp(c3.setHex(0xffc49a), fair ? golden * 0.6 : 0).lerp(c3.setHex(0x4a4650), dark) // by night lit from below by the city
     D.uCloudDk.value.setHex(S ? S[5] : 0xaab4c0).lerp(c3.setHex(0xa08088), fair ? golden * 0.5 : 0).lerp(c3.setHex(0x1e2128), dark)
-    const [n0, f0] = FOG.cloudy, [n1, f1] = FOG[c.kind] || FOG.cloudy, fk = c.kind === 'clear' || c.kind === 'cloudy' || c.kind === 'fog' ? 1 : 0.5 + 0.5 * c.intensity
-    let fogNear = n0 + (n1 - n0) * fk, fogFar = f0 + (f1 - f0) * fk
+    // light rain or snow: part way from an overcast day's (the far end by ratio, as kilometres close to hundreds of metres)
+    const [n0, f0] = fair ? FOG.cloudy : FOG.overcast, [n1, f1] = FOG[c.kind] || FOG.cloudy, fk = fair || c.kind === 'fog' ? 1 : 0.5 + 0.5 * c.intensity
+    let fogNear = n0 + (n1 - n0) * fk, fogFar = f0 * (f1 / f0) ** fk
     if (c.kind === 'fog') { fogNear *= 1.5 - c.intensity; fogFar *= 1.5 - c.intensity }
     fogNear *= 1 - 0.2 * dark; fogFar *= 1 - 0.15 * dark
     const atmosphere = { horizon: ca.getHex(), zenith: cb.getHex(), fogNear: Math.round(fogNear), fogFar: Math.round(fogFar) }
