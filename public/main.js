@@ -204,8 +204,12 @@ function updateShadows() {
   if (own?.camera.isPerspectiveCamera) return perspectiveShadows(own.camera, own.opts.shadowRadius ?? 300)
   const r = own ? own.opts.shadowRadius ?? 300 : Math.hypot(innerWidth, innerHeight * 2) / K / cam.zoom / 2 + 80
   const t = own ? own.opts.focus : controls.target
-  if (Math.hypot(t.x - sh.x, t.z - sh.z) < sh.r * 0.35 && r < sh.r && r > sh.r * 0.4) return
-  sh.x = t.x; sh.y = t.y; sh.z = t.z; sh.r = r * 1.5; sh.persp = false
+  // the fit depends on the view alone, not on the way it got there (a fit kept from an earlier view left the screen's
+  // edges unshadowed, or a zoomed-in view with a blurrier map, #548): its size in steps of 2^¼ from 1.5 r, its centre on a
+  // grid of a quarter of it, so the screen is always inside (at least 1.3 r) and the same view gets the same shadows
+  const R = 2 ** (Math.ceil(4 * Math.log2(r * 1.5)) / 4), g = R / 4, x = Math.round(t.x / g) * g, z = Math.round(t.z / g) * g
+  if (!sh.persp && sh.x === x && sh.z === z && sh.r === R) return
+  Object.assign(sh, { x, y: 0, z, r: R, persp: false })
   fitShadows()
 }
 // A perspective camera sees its shadows mostly close by: a square of half-size r that reaches from just behind the
@@ -500,10 +504,12 @@ function draw(scale = res) {
 // ---------- adaptive resolution: when frames drawn back to back keep coming late (over 20 ms: 60 fps or better is
 // on time), the scene is drawn at a lower share `res` of the canvas resolution, a step at a time down to the quality
 // tier's floor; after a while of on-time frames it probes a step back up (and after a probe that was too much goes
-// straight back and waits twice as long). Auto drops to the low tier when even the floor is late. When the view stops and nothing animates,
+// straight back and waits twice as long; a probe that holds halves the wait again). Auto drops to the low tier when even
+// the floor is late while no tiles stream (their uploads, not the pixels), and goes back up after upMs of on-time frames
+// at full resolution (twice as long each time it had to drop again soon after, #548). When the view stops and nothing animates,
 // one last frame is drawn at full resolution, so a still map is sharp; a view that stops while things animate (traffic,
 // ships, weather) goes straight back to full resolution half a second later, and stays there while its frames are on time.
-let res = 1, lateMs = 0, onTimeMs = 0, probeMs = 3000, probedAt = -1e9, settleAt = Infinity, floorLate = 0, stillAt = 0, seenZoom = 0, probeFrom = 1
+let res = 1, lateMs = 0, onTimeMs = 0, probeMs = 3000, upMs = 20000, promotedAt = -1e9, streamAt = -1e9, probedAt = -1e9, settleAt = Infinity, floorLate = 0, stillAt = 0, seenZoom = 0, probeFrom = 1
 const seen = new THREE.Matrix4()
 function settle() { settleAt = performance.now() + 2500; lateMs = onTimeMs = 0; dirty = true } // a new camera or tier compiles shaders: no measure
 // ms: since the last frame; cpu: the main thread's own work in it (a frame late from building a tile is not one a
@@ -517,8 +523,11 @@ function adaptResolution(ms, cpu, now, C) {
     lateMs = 0
     if (now - probedAt < 3000) { probeMs = Math.min(60000, probeMs * 2); if (res > probeFrom) { res = probeFrom; return } } // a probe too far: straight back
     if (res > quality.tier.minRes + 0.01) res = Math.max(quality.tier.minRes, Math.round(res * 10 - 1) / 10)
-    else if (!tiles.made.length && !tiles.warming.length && ++floorLate >= 3) { floorLate = 0; quality.demote() } // (not while tiles stream: their uploads, not the pixels)
-  } else if (res < 1 && onTimeMs > probeMs) { probeFrom = res; res = Math.min(1, Math.round(res * 10 + 1) / 10); onTimeMs = 0; probedAt = now; floorLate = 0 }
+    else if (now - streamAt > 2000 && ++floorLate >= 3) { floorLate = 0; if (quality.demote() && now - promotedAt < 2 * upMs) upMs = Math.min(600000, upMs * 2) }
+  } else if (res < 1 && onTimeMs > probeMs) {
+    if (now - probedAt > 2 * probeMs) probeMs = Math.max(3000, probeMs / 2) // the last probe held
+    probeFrom = res; res = Math.min(1, Math.round(res * 10 + 1) / 10); onTimeMs = 0; probedAt = now; floorLate = 0
+  } else if (res >= 1 && onTimeMs > upMs && quality.promote()) promotedAt = now
 }
 function applyQuality(t) { // a new tier (core/quality.js)
   PR = Math.min(devicePixelRatio, t.pixelRatio)
@@ -539,6 +548,7 @@ function loop(now) {
   requestAnimationFrame(loop)
   const t0 = performance.now()
   if (!own) controls.update()
+  if (tiles.made.length || tiles.warming.length) streamAt = t0
   tiles.pump(renderer) // new tiles: made and uploaded a little per frame, drawn or not
   const ms = now - lastFrame, dt = Math.min(0.1, ms / 1000 || 0); lastFrame = now
   if (city?.animating) dirty = true

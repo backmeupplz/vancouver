@@ -1,7 +1,7 @@
 // Graphics quality. Two tiers: `high` (the full look) and `low` (weaker GPUs: fewer pixels, no MSAA, a smaller
 // shadow map, no balconies, fewer 3D trees, less traffic and rain). The viewer picks Auto, High or Low (About → Graphics, kept
-// in localStorage); Auto starts from what the GPU is (software, integrated Intel, most phone GPUs: low) and drops to
-// low for the session when the map is still late at its lowest resolution (main.js). Plugins read
+// in localStorage); Auto starts from what the GPU is (software, integrated Intel, most phone GPUs: low), drops to
+// low when the map is still late at its lowest resolution and goes back up once frames are on time again (main.js). Plugins read
 // city.quality.tier and hear city.on('quality', tier) when it changes.
 const KEY = 'vancouver.graphics'
 export const TIERS = {
@@ -40,6 +40,7 @@ export function createQuality(gl, apply) {
       use(s === 'auto' ? guess : s)
     },
     demote() { if (setting === 'auto' && q.tier.name !== 'low') { use('low'); return true } }, // Auto, too slow even so
+    promote() { if (setting === 'auto' && q.tier.name !== guess) { use(guess); return true } }, // Auto, on time again
   }
   const use = (name) => { if (q.tier.name === name) return; q.tier = TIERS[name]; apply(q.tier) }
   return q

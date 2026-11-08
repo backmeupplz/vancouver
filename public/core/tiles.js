@@ -354,7 +354,12 @@ export class Tiles {
   async load(t) {
     t.state = 'loading'
     const res = await this.request({ url: `${this.base}${t.level}/${t.i}_${t.j}.bin?v=${this.ver[t.level].get(`${t.i}_${t.j}`) ?? (this.index.built || 0)}`, level: t.level })
-    if (res.missing || res.error) { t.state = 'missing'; if (res.error) console.warn(res.error); this.onChange?.(); return }
+    if (res.error) { // a network blip or an aborted fetch: again in a few seconds (as 'missing' the cell kept no detail for the session)
+      console.warn(res.error); t.state = 'failed'
+      setTimeout(() => { if (t.state === 'failed') { t.state = 'new'; this.onChange?.() } }, 3000)
+      return
+    }
+    if (res.missing) { t.state = 'missing'; this.onChange?.(); return }
     if (t.state !== 'loading') return // evicted while loading
     t.res = res
     this.made.push(t)
@@ -659,7 +664,8 @@ export class Tiles {
     for (const o of [t.group, ...(t.side || [])]) {
       if (!o) continue
       o.removeFromParent()
-      o.traverse((m) => { if (m.geometry && m.geometry !== this.quad && !m.geometry.userData.shared) m.geometry.dispose() })
+      // (an instanced mesh's own buffers, the instance matrices and colours, go only with its dispose())
+      o.traverse((m) => { if (m.isInstancedMesh) m.dispose(); if (m.geometry && m.geometry !== this.quad && !m.geometry.userData.shared) m.geometry.dispose() })
     }
     this.tiles.delete(this.key(t.level, t.i, t.j))
     this.byIJ.delete(ij(t.level, t.i, t.j))

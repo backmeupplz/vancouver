@@ -39,6 +39,7 @@ look; PLUGINS.md is the plugin contract. Read the parts you need, not the whole 
 
 ## Tools (don't write your own screenshot/perf scripts)
 - Shots: `node tools/shoot.mjs --out /tmp/s --dpr 1 --weather rain --hour 18 map=#13645,11243,0.1295 van=drive:49.2838,-123.1185 sail=sail:49.286,-123.16` (also `walk:`, `taxi:`, `bus:ROUTE:DIR`; `--size phone`, `--tier low`); one line per shot
+- Drift over a long map session (#548): `node tools/soak.mjs --out /tmp/soak --mins 8` (start vs end shots per view, quality/tiles/GPU log)
 - Perf: `node tools/bench.mjs --dpr 2 --tier high --cpu 4 --secs 20 map|drive|sail` prints one JSON line (p50/p95/p99, over33, tris, calls, gpuMs)
 - Look: `uv run --with pillow python3 tools/sheet.py /tmp/s/sheet.jpg /tmp/s/*.png --cols 3` then view only the sheet
 - Both node tools use Playwright from `/Users/borodutch/code/agentboard/`, start their own server, and need `public/tiles` symlinked.
