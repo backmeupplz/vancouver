@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from common import GROUND, GI, xy, extent, L0, L1, KX, KY, LAT_O, LON_O, HR, KINDS, KI, DRIVE, SHOP_AMENITY, line_kind, hnum, densify, all_tiles, HR_CACHE, hr_lookup, tile_args, load_feat, tube_h, SLAB
 from roofs import roof_lookup
 from facades import facade_lookup, NONE as B_NONE, GLASS as B_GLASS, SOLID as B_SOLID
+from lidar_massing import massing_lookup
 
 OUT = os.environ.get('OUT', 'public/tiles')
 VERSION = 2
@@ -869,7 +870,10 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
                     fac=fac, year=start_year(t) or fac.get('year') or None, ring=r)
         gid = rnd.randrange(1, 1 << 30)
         parts = None
-        if chm is not None and not is_part and not mn and np.percentile(chm, 90) > 2.2:
+        ms = massing_lookup(r) if not mn else None  # tools/lidar_massing.py: the 2022 LiDAR's own massing, where it has one
+        if ms and not (tag_h and abs(tag_h - max(p['ridge'] or p['h'] for p in ms)) > max(6, 0.3 * tag_h)):
+            parts = [dict(p, pitch=0, m22=True) for p in ms]
+        if parts is None and chm is not None and not is_part and not mn and np.percentile(chm, 90) > 2.2:
             p97 = float(np.percentile(chm, 97))
             if not (tag_h and abs(tag_h - p97) > max(6, 0.3 * tag_h)):  # else rebuilt since the LiDAR flew: the tags win
                 parts = from_lidar(r, a, z, ok, fx, shape, rnd, roofm)
@@ -1017,6 +1021,7 @@ def apply_sections(out, X0, Y0, rnd, measure, under):
     drop, add = set(), []
     for k, segs in by_g.items():
         b = bases[k]
+        if b.get('m22'): continue  # the 2022 LiDAR's massing is finer
         ps = groups[gids[k]]
         gh = max(p['ridge'] or p['h'] for p in ps)
         cov = sum(ring_area(s[0]) for s in segs) / max(1.0, b['a'])

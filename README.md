@@ -53,6 +53,11 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    window bands on old concrete offices; the heritage register marks the old brick and stone. The city's 2022 LiDAR
    (coloured points, 1 km tiles listed in `data/lidar2022/urls.json`, downloaded by hand into `data/lidar2022/` and
    unzipped into `las/`) gives the storey height from the rhythm of the floors on the walls;
+   the same LiDAR gives the massing where it covers (`uv run --with numpy,scipy,shapely,pyproj,rasterio python3
+   tools/lidar_massing.py` → `data/massing22.npz`, optional; tiles.py falls back to the HRDEM levels): each building
+   sliced every metre up into parts fitted to its outline at that height (setbacks, podiums and towers, chamfers, curves,
+   twists, overhangs such as Harbour Centre's lookout from the wall points), domes and sloped tops, masts and spires,
+   rooftop plant;
    Mapillary street photos (`tools/mapillary.py`, token through the vault, CC BY-SA 4.0) give wall colours seen from
    the street; a short list of landmarks (`LOOKS`) is set by hand from public photos.
 6. `tools/publish.sh` copies the tiles to the server. They are not in git.
