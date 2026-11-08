@@ -9,9 +9,11 @@
 # creases stay). Colours come from the palette in LOOKS below by height (walls and roofs apart; the LiDAR's own point
 # colours clip white in the sun and go navy in the shade, even on roofs); walls carry the facade pattern for materials.js.
 # Far off the plugin draws the footprint massing (data/massing22.npz) instead and loads the mesh when the camera nears.
-# Run: uv run --with numpy,scipy,shapely,pyproj,rasterio,scikit-image,fast-simplification python3 tools/landmark_scan.py [ids]
+# Points: the City of Vancouver 2022 tiles (data/lidar2022: las/, else one zip at a time), outside the City the best
+# open set's few tiles round each landmark (data/lidar_lm/urls.json), fetched, read and deleted.
+# Run: uv run --with numpy,scipy,shapely,pyproj,rasterio,scikit-image,fast-simplification,laspy[lazrs] python3 tools/landmark_scan.py [ids]
 #      ... tools/landmark_scan.py check          (self-test on a synthetic tower with a dome)
-import glob, json, math, os, struct, sys, time
+import glob, json, math, os, re, struct, subprocess, sys, time
 import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 from common import xy, latlon, L1, load_feat
@@ -24,7 +26,7 @@ BELOW = 2.0          # m the mesh goes on under the ground (the map's ground is 
 Q = 0.02             # m: position quantum in the binary
 
 # Landmarks: `at` = points (lat, lon) inside the buildings that make it (the OSM building there, not its parts) or
-# `ids` (OSM ways); `box` = (lat, lon, half size m) for something that isn't a mapped building (a sculpture). Optional:
+# `ids` (OSM ways; `near` (lat, lon) where they are, if not downtown); `box` = (lat, lon, half size m) for something that isn't a mapped building (a sculpture). Optional:
 # tris (target triangles), wall (0xRRGGBB, or [(from height m, colour[, pattern]), ...] up the building), pattern (materials.js:
 # 1 punched windows, 2 curtain wall, 3 glass balconies, 9 glass condo, 10 window bands, -1 none), storey (m),
 # roof (a colour, or bands as wall), extra (other LiDAR classes, 1 unclassified), use (1 homes, 2 work).
@@ -87,7 +89,8 @@ def footprint(spec):
         return [[(x - h, y - h), (x + h, y - h), (x + h, y + h), (x - h, y + h)]], []
     rings, ids = [], []
     for oid in spec.get('ids', []):
-        hit = [o for i in range(-2, 2) for j in range(-2, 2) for k, prs, _ in buildings(i, j) if k == oid for o, _ in prs]
+        ci, cj = (int(v // L1) for v in xy(*spec['near'])) if 'near' in spec else (0, 0)
+        hit = [o for i in range(ci - 2, ci + 2) for j in range(cj - 2, cj + 2) for k, prs, _ in buildings(i, j) if k == oid for o, _ in prs]
         if not hit: raise SystemExit(f'{spec["name"]}: no way {oid}')
         rings.append(hit[0][:-1] if hit[0][0] == hit[0][-1] else hit[0]); ids.append(oid)
     for la, lo in spec.get('at', []):
@@ -100,22 +103,130 @@ def footprint(spec):
 
 
 # ---------------------------------------------------------------- points (straight from the LAS tiles)
-def las_points(boxes):
-    """boxes: {key: (e0, n0, e1, n1)} in UTM -> {key: (x, y, z, class)}: every point in each box"""
+def read_las(path, boxes, got):
+    """the points of one City LAS tile (memory-mapped) in each of the boxes it touches, into got[key]"""
     from lidar_massing import las_header
-    got = {k: [] for k in boxes}
+    off, pf, rl, sc, of, mn, mx = las_header(path)
+    mine = {k: b for k, b in boxes.items() if b[2] >= mn[0] and b[0] <= mx[0] and b[3] >= mn[1] and b[1] <= mx[1]}
+    if not mine: return
+    dt = np.dtype(dict(names=['x', 'y', 'z', 'cls'], formats=['<i4'] * 3 + ['u1'], offsets=[0, 4, 8, 16 if pf >= 6 else 15], itemsize=rl))
+    p = np.memmap(path, dt, 'r', offset=off)
+    X, Y = np.asarray(p['x']), np.asarray(p['y'])
+    for k, (e0, n0, e1, n1) in mine.items():
+        i = np.nonzero((X >= (e0 - of[0]) / sc[0]) & (X <= (e1 - of[0]) / sc[0]) & (Y >= (n0 - of[1]) / sc[1]) & (Y <= (n1 - of[1]) / sc[1]))[0]
+        q = p[i]
+        got[k].append((q['x'] * sc[0] + of[0], q['y'] * sc[1] + of[1], q['z'] * sc[2] + of[2], q['cls'] & 31))
+
+
+def read_laz(path, boxes, got):
+    """the same for any LAZ/COPC/LAS tile (laspy), in whatever CRS it is"""
+    import laspy
+    from pyproj import Transformer
+    with laspy.open(path) as f:
+        crs = f.header.parse_crs()
+        to = None if crs is None or crs.to_epsg() == 3157 else Transformer.from_crs(crs, 'EPSG:3157', always_xy=True)
+        for c in f.chunk_iterator(4_000_000):
+            x, y = np.asarray(c.x), np.asarray(c.y)
+            if to: x, y = to.transform(x, y)
+            for k, (e0, n0, e1, n1) in boxes.items():
+                i = np.flatnonzero((x >= e0) & (x <= e1) & (y >= n0) & (y <= n1))
+                if len(i): got[k].append((x[i], y[i], np.asarray(c.z)[i], np.asarray(c.classification)[i].astype(np.uint8)))
+
+
+def city_points(boxes, got, tmp):
+    """the City of Vancouver 2022 tiles: unzipped ones in LAS, the rest one zip at a time (unzipped to tmp, deleted)"""
+    have = set()
     for path in sorted(glob.glob(f'{LAS}/*.las')):
-        off, pf, rl, sc, of, mn, mx = las_header(path)
-        mine = {k: b for k, b in boxes.items() if b[2] >= mn[0] and b[0] <= mx[0] and b[3] >= mn[1] and b[1] <= mx[1]}
+        read_las(path, boxes, got); have.add(os.path.basename(path)[:-4])
+    for z in sorted(glob.glob(f'{os.path.dirname(LAS)}/*.zip')):
+        name = os.path.basename(z)[:-4]
+        if name in have: continue
+        e, n = map(int, name.split('_'))
+        mine = {k: b for k, b in boxes.items() if b[2] >= e and b[0] <= e + 1000 and b[3] >= n and b[1] <= n + 1000}
         if not mine: continue
-        dt = np.dtype(dict(names=['x', 'y', 'z', 'cls'], formats=['<i4'] * 3 + ['u1'], offsets=[0, 4, 8, 16 if pf >= 6 else 15], itemsize=rl))
-        p = np.memmap(path, dt, 'r', offset=off)
-        X, Y = np.asarray(p['x']), np.asarray(p['y'])
-        for k, (e0, n0, e1, n1) in mine.items():
-            i = np.nonzero((X >= (e0 - of[0]) / sc[0]) & (X <= (e1 - of[0]) / sc[0]) & (Y >= (n0 - of[1]) / sc[1]) & (Y <= (n1 - of[1]) / sc[1]))[0]
-            q = p[i]
-            got[k].append((q['x'] * sc[0] + of[0], q['y'] * sc[1] + of[1], q['z'] * sc[2] + of[2], q['cls'] & 31))
-        del X, Y, p
+        subprocess.run(['unzip', '-j', '-o', '-q', z, '*.las', '-d', tmp], check=True)
+        for f in glob.glob(f'{tmp}/*.las'):
+            read_las(f, mine, got); os.remove(f)
+
+
+# Lower Mainland sets outside the City (data/lidar_lm/urls.json, tools/lidar_stream.py streams them all for the
+# massing): the best source first, as data/lidar_lm/sources.md ranks them
+RANK = ['Coquitlam 2026', 'LidarBC 2025', 'LidarBC 2024', 'MetroVan Watershed 2024', 'LidarBC 2023', 'CanElevation FHIMP_PICAI_BC_South_West_UTM10_2023', 'MetroVan 2022']
+EXTENTS = 'data/lidar_lm/extents.json'
+
+
+def lm_entries():
+    u = json.load(open('data/lidar_lm/urls.json'))['sources']
+    return [(src, dict(url=e) if isinstance(e, str) else e) for src in RANK for e in u.get(src, [])]
+
+
+def curl(e, dest, head=False):
+    """an entry of urls.json (a URL, or a byte range in a big zip, maybe raw-deflated) -> dest (just its header: head)"""
+    rng = e.get('range')
+    if rng:
+        a, b = map(int, rng.split('-'))
+        rng = f'{a}-{min(b, a + 374) if head else b}'
+    elif head: rng = '0-374'
+    cmd = ['curl', '-sSfL', '--retry', '3', '-o', dest + ('.z' if e.get('deflate') else ''), e['url']] + (['-r', rng] if rng else [])
+    subprocess.run(cmd, check=True)
+    if e.get('deflate'):
+        import zlib
+        d = zlib.decompressobj(-15)
+        with open(dest + '.z', 'rb') as fi, open(dest, 'wb') as fo:
+            for blk in iter(lambda: fi.read(1 << 24), b''): fo.write(d.decompress(blk))
+        os.remove(dest + '.z')
+
+
+def lm_extents():
+    """every Lower Mainland tile's extent (UTM; read from its header, cached in EXTENTS)"""
+    if os.path.exists(EXTENTS): return json.load(open(EXTENTS))
+    import tempfile
+    from concurrent.futures import ThreadPoolExecutor
+    tmp = tempfile.mkdtemp()
+    def one(k):
+        src, e = lm_entries()[k]
+        if e.get('deflate'):  # its header is compressed: the name is its 1.5 km tile's corner
+            x, y = map(float, re.findall(r'\d+', e['name'])[:2]); return [x, y, x + 1500, y + 1500]
+        f = f'{tmp}/{k}'
+        try: curl(e, f, head=True); b = open(f, 'rb').read(); os.remove(f)
+        except Exception: return None
+        xmax, xmin, ymax, ymin = struct.unpack('<4d', b[179:211])
+        return [xmin, ymin, xmax, ymax] if 3e5 < xmin < 7e5 and 5.3e6 < ymin < 5.6e6 else None
+    with ThreadPoolExecutor(12) as ex: ext = list(ex.map(one, range(len(lm_entries()))))
+    json.dump(ext, open(EXTENTS, 'w'))
+    return ext
+
+
+def region_points(boxes, got, tmp):
+    """boxes outside the City: for each, the best source whose tiles cover it; each tile fetched once, read, deleted"""
+    import shapely
+    from shapely.geometry import box as sbox
+    ents, ext = lm_entries(), lm_extents()
+    want = {}
+    for k, b in boxes.items():
+        B = sbox(*b)
+        for src in RANK:
+            ts = [i for i, (s_, _) in enumerate(ents) if s_ == src and ext[i] and sbox(*ext[i]).intersects(B)]
+            if ts and shapely.union_all([sbox(*ext[i]) for i in ts]).buffer(1).contains(B):
+                for i in ts: want.setdefault(i, {})[k] = b
+                break
+    for i, mine in want.items():
+        f = f'{tmp}/t{i}' + os.path.splitext(ents[i][1].get('name') or ents[i][1]['url'])[1]
+        print('fetching', ents[i][0], os.path.basename(ents[i][1].get('name') or ents[i][1]['url']), flush=True)
+        curl(ents[i][1], f)
+        try: read_laz(f, mine, got)
+        finally: os.remove(f)
+
+
+def points(boxes):
+    """boxes: {key: (e0, n0, e1, n1)} in UTM -> {key: (x, y, z, class)}: every point in each box"""
+    import tempfile, shutil
+    got = {k: [] for k in boxes}
+    tmp = tempfile.mkdtemp(dir='data')  # the big tiles land on the data disk
+    try:
+        city_points(boxes, got, tmp)
+        region_points({k: b for k, b in boxes.items() if not got[k]}, got, tmp)
+    finally: shutil.rmtree(tmp, ignore_errors=True)
     return {k: tuple(np.concatenate([g[i] for g in v]) for i in range(4)) if v else None for k, v in got.items()}
 
 
@@ -201,7 +312,7 @@ def surface(X, Y, Z, own_poly, other_polys, sculpture=False):
 
 
 def build(key, spec, pts, tr, inv):
-    """one landmark -> (manifest entry, binary)"""
+    """one landmark -> (manifest entry, binary, a quarter as many triangles for the middle distance)"""
     import shapely
     from shapely import affinity
     from shapely.geometry import Polygon
@@ -220,6 +331,8 @@ def build(key, spec, pts, tr, inv):
     gz = Z[g][d < 10]
     if len(gz) < 10: raise SystemExit(f'{key}: no ground round it (outside the LiDAR?)')
     ground = float(np.percentile(gz, 10))
+    near = shapely.contains_xy(own.buffer(REACH), X, Y)
+    if (C[near] == 6).sum() < 300: C = np.where((C == 1) & near, 6, C)  # an open set that doesn't classify buildings
     cls = (6,) + tuple(spec.get('extra', ()))
     keep = np.isin(C, cls) & (Z > ground + (0.3 if sculpture else 1.0))
     if spec.get('extra'):  # unclassified points only inside the outline (cranes and wires round it are not it)
@@ -249,49 +362,57 @@ def build(key, spec, pts, tr, inv):
             others.append(affinity.rotate(affinity.translate(p, -cx, -cy), -ang, origin=(0, 0), use_radians=True))
     V, faces, (x0, y1, nx, ny) = surface(U, W, Z, own_r, others, sculpture)
     n0 = len(faces)
-    target = spec.get('tris', 3000)
-    if len(faces) > target:
-        V, faces = fast_simplification.simplify(V.astype(np.float64), faces.astype(np.int32), target_count=target)
-    # drop the buried bottom and anything that collapsed
-    P = V[faces]
-    nrm = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
-    area = np.linalg.norm(nrm, axis=1)
-    ok = (area > 1e-6) & ~(P[:, :, 2].max(1) < -BELOW + 0.6)
-    faces, nrm, area = faces[ok], nrm[ok], area[ok]
-    nrm = nrm / area[:, None]
-    used = np.unique(faces)
-    remap = np.full(len(V), -1); remap[used] = np.arange(len(used))
-    V, faces = V[used], remap[faces]
-    P = V[faces]
-    cz = P[:, :, 2].mean(1)
-    up = nrm[:, 2] > 0.35
-    face_rgb = np.zeros((len(faces), 3), np.float32)
-    bands = lambda v, d: v if isinstance(v, list) else [(0, v if v is not None else d)]
-    for z0, h in bands(spec.get('roof'), 0xa4a6a4): face_rgb[up & (cz >= z0 - 0.01)] = hexrgb(h)
-    style = np.where(up, 0, spec.get('pattern', 1)).astype(np.int8)
-    for z0, h, *pt in bands(spec.get('wall'), 0x9a9a96):
-        m = ~up & (cz >= z0 - 0.01)
-        face_rgb[m] = hexrgb(h)
-        if pt: style[m] = pt[0]
-    # back to the map's frame: world metres from the anchor, y up
+    alat, alon = inv.transform(cx, cy)[::-1]
+    ax_, ay_ = (round(float(v), 1) for v in xy(alat, alon))  # the anchor: the outline's centre
+    alat, alon = latlon(ax_, ay_)
     cb, sb = math.cos(ang), math.sin(ang)
-    E, N = cx + V[:, 0] * cb - V[:, 1] * sb, cy + V[:, 0] * sb + V[:, 1] * cb
-    lo, la = inv.transform(E, N)
-    wx, wy = xy(la, lo)
-    ax_, ay_ = round(float(np.mean(wx)), 1), round(float(np.mean(wy)), 1)
-    pos = np.round(np.c_[wx - ax_, V[:, 2], -(wy - ay_)] / Q).astype(np.int16)
     st = spec.get('storey', 3.4)
     fq = max(1, min(31, round((st - 2.4) / 0.15)))
-    head = struct.pack('<4sIIf', b'LMS1', len(pos), len(faces), Q)
-    body = pos.tobytes() + faces.astype(np.uint16 if len(pos) < 65536 else np.uint32).tobytes()
-    body += np.clip(face_rgb, 0, 255).astype(np.uint8).tobytes() + style.tobytes()
-    body += b'\0' * (-len(body) % 4)
-    alat, alon = latlon(ax_, ay_)
-    ent = dict(name=spec['name'], wall=main_colour(face_rgb, area, ~up), roof=main_colour(face_rgb, area, up), pattern=spec.get('pattern', 1), at=[round(alat, 7), round(alon, 7)], file=f'{key}.bin', tris=len(faces), h=round(float(V[:, 2].max()), 1),
+    bands = lambda v, d: v if isinstance(v, list) else [(0, v if v is not None else d)]
+
+    def pack(V, faces, target):
+        """decimated to target triangles, coloured, in the map's frame -> (bytes, face colours, areas, up, world x, y, z)"""
+        if len(faces) > target:
+            V, faces = fast_simplification.simplify(V.astype(np.float64), faces.astype(np.int32), target_count=target)
+        # drop the buried bottom and anything that collapsed
+        P = V[faces]
+        nrm = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+        area = np.linalg.norm(nrm, axis=1)
+        ok = (area > 1e-6) & ~(P[:, :, 2].max(1) < -BELOW + 0.6)
+        faces, nrm, area = faces[ok], nrm[ok], area[ok]
+        nrm = nrm / area[:, None]
+        used = np.unique(faces)
+        remap = np.full(len(V), -1); remap[used] = np.arange(len(used))
+        V, faces = V[used], remap[faces]
+        cz = V[faces][:, :, 2].mean(1)
+        up = nrm[:, 2] > 0.35
+        face_rgb = np.zeros((len(faces), 3), np.float32)
+        for z0, h in bands(spec.get('roof'), 0xa4a6a4): face_rgb[up & (cz >= z0 - 0.01)] = hexrgb(h)
+        style = np.where(up, 0, spec.get('pattern', 1)).astype(np.int8)
+        for z0, h, *pt in bands(spec.get('wall'), 0x9a9a96):
+            m = ~up & (cz >= z0 - 0.01)
+            face_rgb[m] = hexrgb(h)
+            if pt: style[m] = pt[0]
+        # back to the map's frame: world metres from the anchor, y up
+        E, N = cx + V[:, 0] * cb - V[:, 1] * sb, cy + V[:, 0] * sb + V[:, 1] * cb
+        lo, la = inv.transform(E, N)
+        wx, wy = xy(la, lo)
+        pos = np.round(np.c_[wx - ax_, V[:, 2], -(wy - ay_)] / Q).astype(np.int16)
+        head = struct.pack('<4sIIf', b'LMS1', len(pos), len(faces), Q)
+        body = pos.tobytes() + faces.astype(np.uint16 if len(pos) < 65536 else np.uint32).tobytes()
+        body += np.clip(face_rgb, 0, 255).astype(np.uint8).tobytes() + style.tobytes()
+        body += b'\0' * (-len(body) % 4)
+        return head + body, face_rgb, area, up, wx, wy, V[:, 2]
+
+    target = spec.get('tris', 3000)
+    hi, face_rgb, area, up, wx, wy, z = pack(V, faces, target)
+    lo_, *_ = pack(V, faces, max(250, target // 4))
+    ent = dict(name=spec['name'], wall=main_colour(face_rgb, area, ~up), roof=main_colour(face_rgb, area, up), pattern=spec.get('pattern', 1),
+               at=[round(alat, 7), round(alon, 7)], tris=len(area), h=round(float(z.max()), 1),
                r=round(float(np.hypot(wx - ax_, wy - ay_).max()), 1), storey=fq, use=spec.get('use', 2),
-               rings=[[round(v, 6) for p in r for v in latlon(*p)] for r in rings], osm=ids, far=far_of(rings, V[:, 2].max()))
-    print(f'{key}: {n0} -> {len(faces)} triangles, {len(head) + len(body)} bytes, top {ent["h"]} m, ground {ground:.1f}', flush=True)
-    return ent, head + body
+               rings=[[round(v, 6) for p in r for v in latlon(*p)] for r in rings], osm=ids, far=far_of(rings, z.max()))
+    print(f'{key}: {n0} -> {len(area)} triangles ({len(hi)} + {len(lo_)} bytes), top {ent["h"]} m, ground {ground:.1f}', flush=True)
+    return ent, hi, lo_
 
 
 def far_of(rings, top):
@@ -329,16 +450,16 @@ def main(keys):
         e, n = tr.transform(lo, la)
         m = REACH + 12
         boxes[k] = (e.min() - m, n.min() - m, e.max() + m, n.max() + m)
-    pts = las_points(boxes)
+    pts = points(boxes)
     print(f'points read {time.time() - t0:.0f}s', flush=True)
     os.makedirs(OUT, exist_ok=True)
     man_path = f'{OUT}/scans.json'
     man = json.load(open(man_path)) if os.path.exists(man_path) else {}
     for k in keys:
         if pts[k] is None: print(k, 'outside the LiDAR'); continue
-        try: ent, b = build(k, LOOKS[k], pts[k], tr, inv)
+        try: ent, hi, lo = build(k, LOOKS[k], pts[k], tr, inv)
         except SystemExit as e: print(e); continue
-        open(f'{OUT}/{k}.bin', 'wb').write(b)
+        open(f'{OUT}/{k}.bin', 'wb').write(hi); open(f'{OUT}/{k}.lo.bin', 'wb').write(lo)
         man[k] = ent
     man = {k: man[k] for k in LOOKS if k in man}
     with open(man_path, 'w') as f: json.dump(man, f, separators=(',', ':'))

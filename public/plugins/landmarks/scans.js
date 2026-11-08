@@ -1,6 +1,7 @@
-// Landmarks scanned from the City of Vancouver's 2022 LiDAR (tools/landmark_scan.py; Open Government Licence -
-// Vancouver): a low-poly mesh each (data/<id>.bin), fetched when the view comes within NEAR m of it. Further off, and
-// until it has loaded, its footprint massing stands there instead (all of them in one mesh). Both wear the generic
+// Landmarks scanned from LiDAR (tools/landmark_scan.py: the City of Vancouver's 2022 set, OGL-Vancouver; outside it
+// LidarBC / CanElevation / Coquitlam / Metro Vancouver open sets): a low-poly mesh each (data/<id>.bin, and .lo.bin
+// with a quarter of the triangles), fetched when the view comes within NEAR m of it. Further off, and until it has
+// loaded, its footprint massing stands there instead (all of them in one mesh). Both wear the generic
 // buildings' facade material (core/materials.js): windows by the storey, lit at night; roofs keep the LiDAR's colours.
 // bin: 'LMS1', vertex count, triangle count, metres per unit (f32); int16 x, y (up, over the ground), z (south) a
 // vertex from the anchor; uint16 (uint32 past 65535 vertices) indices; per triangle sRGB bytes and a facade pattern.
@@ -19,7 +20,7 @@ export default function scans(city) {
   const L = Object.entries(man).map(([id, l], k) => {
     const a = city.world.fromLatLon(...l.at)
     const g = Math.min(...l.rings.flatMap((r) => pairs(r).map(([la, lo]) => { const p = city.world.fromLatLon(la, lo); return city.world.heightAt(p.x, p.z) })))
-    return { id, l, x: a.x, z: a.z, g, seed: ((k * 0.618034) % 1) * 0.98 + 0.01, mesh: null, loading: false, near: false }
+    return { id, l, x: a.x, z: a.z, g, seed: ((k * 0.618034) % 1) * 0.98 + 0.01, mesh: [], loading: [], want: 0, shown: 0 }
   })
   const kind = (pattern, l) => pattern + l.storey / 64
 
@@ -51,7 +52,7 @@ export default function scans(city) {
     return { pos, col, win }
   }
   function buildFar() {
-    const parts = L.filter((s) => !(s.near && s.mesh)).map((s) => (s.far ??= farOf(s)))
+    const parts = L.filter((s) => !s.shown).map((s) => (s.far ??= farOf(s)))
     const cat = (k, n) => { const a = new Float32Array(parts.reduce((t, p) => t + p[k].length, 0)); let o = 0; for (const p of parts) { a.set(p[k], o); o += p[k].length } return new THREE.BufferAttribute(a, n) }
     const pos = cat('pos', 3)
     if (far) { city.scene.remove(far); far.geometry.dispose(); far = null }
@@ -65,10 +66,10 @@ export default function scans(city) {
   }
   function add(m) { m.castShadow = m.receiveShadow = true; m.userData.landmarks = true; city.scene.add(m); return m }
 
-  // ---------- near: the scan ----------
-  async function load(s) {
-    s.loading = true
-    const buf = await fetch(new URL(`./data/${s.l.file}`, import.meta.url)).then((r) => r.arrayBuffer()).catch(() => null)
+  // ---------- near: the scan (level 2), a quarter of its triangles (1) a little further off or zoomed out ----------
+  async function load(s, lv) {
+    s.loading[lv] = true
+    const buf = await fetch(new URL(`./data/${s.id}${lv === 1 ? '.lo' : ''}.bin`, import.meta.url)).then((r) => r.arrayBuffer()).catch(() => null)
     if (!buf || dead) return
     const dv = new DataView(buf), nv = dv.getUint32(4, true), nt = dv.getUint32(8, true), q = dv.getFloat32(12, true)
     const P = new Int16Array(buf, 16, nv * 3), o = 16 + nv * 6
@@ -91,25 +92,32 @@ export default function scans(city) {
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3))
     geo.setAttribute('aWin', new THREE.BufferAttribute(win, 4))
     geo.computeVertexNormals() // not indexed: flat
-    s.mesh = add(new THREE.Mesh(geo, mat))
-    s.mesh.visible = s.near
-    if (s.near) buildFar()
+    s.mesh[lv] = add(new THREE.Mesh(geo, mat))
+    show(s) && buildFar()
     city.requestRender()
+  }
+  // the level it wants if that has loaded, else the other one, else the massing; true when the massing changes
+  function show(s) {
+    const lv = !s.want ? 0 : s.mesh[s.want] ? s.want : s.mesh[3 - s.want] ? 3 - s.want : 0
+    for (const k of [1, 2]) if (s.mesh[k]) s.mesh[k].visible = lv === k
+    const was = s.shown; s.shown = lv
+    return !was !== !lv
   }
 
   let dead = false, t = 0
   function check() {
-    const c = city.view.center, wide = city.view.metresPerPixel > 4
-    let changed = false
+    const c = city.view.center, mpp = city.view.metresPerPixel
+    let changed = false, moved = false
     for (const s of L) {
-      const d = Math.hypot(s.x - c.x, s.z - c.z) - s.l.r
-      const near = !wide && (s.near ? d < NEAR * 1.15 : d < NEAR)
-      if (near === s.near) continue
-      s.near = near; changed = true
-      if (s.mesh) s.mesh.visible = near
-      else if (near && !s.loading) load(s)
+      const d = Math.hypot(s.x - c.x, s.z - c.z) - s.l.r, k = s.want ? 1.15 : 1
+      const want = mpp > 4 || d > NEAR * k ? 0 : mpp < 0.5 * k && d < NEAR * 0.4 * k ? 2 : 1
+      if (want === s.want) continue
+      s.want = want; moved = true
+      if (want && !s.mesh[want] && !s.loading[want]) load(s, want)
+      changed = show(s) || changed
     }
-    if (changed) { buildFar(); city.requestRender() }
+    if (changed) buildFar()
+    if (moved) city.requestRender()
   }
   buildFar()
   check()
@@ -119,7 +127,7 @@ export default function scans(city) {
   return {
     dispose() {
       dead = true; offFrame(); offView()
-      for (const m of [far, ...L.map((s) => s.mesh)]) if (m) { city.scene.remove(m); m.geometry.dispose() }
+      for (const m of [far, ...L.flatMap((s) => s.mesh)]) if (m) { city.scene.remove(m); m.geometry.dispose() }
       mat.dispose()
     },
   }
