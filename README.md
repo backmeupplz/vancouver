@@ -62,6 +62,11 @@ bridges, and driving (parcel deliveries too, or a bus on a real TransLink route 
 trolley wires), walking, hiking real trails and sailing through it all. See
 [PLUGINS.md](PLUGINS.md) to write one.
 
+Locally, `docker compose up --build` serves the site at http://localhost:48500 with `public/` mounted (edits show on
+reload) and the live service (`server/`, visitor counts, multiplayer, chat) behind `/live` as in production.
+`docker compose --profile bake run --rm bake` runs the whole bake (`tools/bake-all.sh`, `PROCS=n`, `FRESH=1`) into
+`public/tiles`.
+
 Map data © OpenStreetMap contributors (ODbL). City of Vancouver Open Data; 2022 orthophoto and LiDAR, property tax
 report and heritage register © City of Vancouver (Open Government Licence – Vancouver). Street photos: Mapillary
 contributors (CC BY-SA 4.0). HRDEM and MRDEM © Natural Resources Canada (Open Government Licence – Canada).

@@ -1,0 +1,44 @@
+# Local development: the site and the live service, as they run in production, on one machine.
+#   docker compose up --build          → http://localhost:48500 (live service also on :48501)
+#   docker compose --profile bake run --rm bake    → bakes the map into public/tiles (long: downloads OSM, LiDAR)
+# public/ is mounted into nginx, so edits show on reload (nginx caches JS for an hour: keep devtools' cache off).
+# Production does not use this file: Tugport builds Dockerfile and server/Dockerfile and mounts the tiles volume.
+services:
+  web:
+    build: .
+    ports: ["48500:80"]
+    volumes:
+      - ./public:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/dev.conf:/etc/nginx/dev.d/dev.conf:ro # /live → the live service; missing tiles → the live site
+    depends_on: [live]
+
+  live:
+    build: ./server
+    ports: ["48501:8080"] # for ?live=ws://127.0.0.1:48501/live/ws against another front end
+    environment:
+      HOLD: ${HOLD:-}
+    volumes:
+      - live-data:/data
+
+  # the map bake (tools/bake-all.sh) in its toolbox; downloads stay in data/ between runs, tiles land in public/tiles
+  bake:
+    profiles: [bake]
+    build:
+      context: ./tools
+      dockerfile: bake.Dockerfile
+    command: sh tools/bake-all.sh
+    environment:
+      PROCS: ${PROCS:-4}
+      FRESH: ${FRESH:-0}
+    volumes:
+      - ./tools:/w/tools:ro
+      - ./data:/w/data
+      - ./public/tiles:/tiles
+      - bake-out:/w/out
+      - bake-cache:/cache
+
+volumes:
+  live-data:
+  bake-out:
+  bake-cache:
