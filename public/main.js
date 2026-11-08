@@ -317,7 +317,9 @@ const ink = new THREE.ShaderMaterial({
       #ifdef NOINK
       float e = 0.0;
       #else
-      float lap = max(abs(d(vec2(1.0, 0.0)) + d(vec2(-1.0, 0.0)) - 2.0 * c), abs(d(vec2(0.0, 1.0)) + d(vec2(0.0, -1.0)) - 2.0 * c));
+      // one-sided: only the nearer side of a depth step (the curvature is positive there) draws the line, so an edge is
+      // one texel wide instead of two (the far side's negative curvature is the same edge again)
+      float lap = max(max(d(vec2(1.0, 0.0)) + d(vec2(-1.0, 0.0)) - 2.0 * c, d(vec2(0.0, 1.0)) + d(vec2(0.0, -1.0)) - 2.0 * c), 0.0);
       #ifdef PERSP
       lap /= c;
       #endif
