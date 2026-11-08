@@ -1,8 +1,9 @@
-# compose.yaml only, included into nginx.conf's server block; the image itself ships without it.
+# compose.yaml only: the nginx image's entrypoint renders this template into /etc/nginx/dev.d/dev.conf, which
+# nginx.conf's server block includes; the image itself ships without it.
 
 # /live (visitor counts, multiplayer WebSocket) → the `live` service, the way the page finds it in production
 location /live/ {
-  resolver 127.0.0.11 valid=10s ipv6=off; # Docker's DNS, so nginx starts (and recovers) while `live` is down
+  resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off; # the container's own DNS (Docker or Podman), so nginx starts (and recovers) while `live` is down
   set $live_upstream live:8080;
   proxy_pass http://$live_upstream;
   proxy_http_version 1.1;

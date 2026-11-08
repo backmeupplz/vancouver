@@ -10,7 +10,11 @@ services:
     volumes:
       - ./public:/usr/share/nginx/html:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./docker/dev.conf:/etc/nginx/dev.d/dev.conf:ro # /live → the live service; missing tiles → the live site
+      - ./docker/dev.conf.template:/etc/nginx/templates/dev.conf.template:ro # /live → the live service; missing tiles → the live site
+    environment:
+      NGINX_ENTRYPOINT_LOCAL_RESOLVERS: "1" # fills NGINX_LOCAL_RESOLVERS from the container's resolv.conf
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx/dev.d
+    tmpfs: [/etc/nginx/dev.d]
     depends_on: [live]
 
   live:
