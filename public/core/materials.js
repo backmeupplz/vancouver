@@ -255,7 +255,22 @@ export function buildingMaterial() {
         ${OCCLUDE}
         ${DISSOLVE}
         float thin(float width, float fw) { return smoothstep(0.6, 1.3, width / fw); }
-        float box(vec2 f, vec2 lo, vec2 hi, vec2 fw) { vec2 a = smoothstep(lo - fw, lo + fw, f) * (1.0 - smoothstep(hi - fw, hi + fw, f)); return a.x * a.y; }`)
+        float box(vec2 f, vec2 lo, vec2 hi, vec2 fw) { vec2 a = smoothstep(lo - fw, lo + fw, f) * (1.0 - smoothstep(hi - fw, hi + fw, f)); return a.x * a.y; }
+        // lit windows at night over a pixel's footprint g +- fw / 2 (in window cells), box-filtered: the lit window area
+        // inside it (up to 2 x 2 cells), so a pick under a pixel fades in and out as the camera moves instead of
+        // flipping. s > 1: blocks of s x s windows lit or dark together, drawn as the mean window coverage, for cells
+        // under a pixel (each its own pick there was noise that crawled and changed with every render scale)
+        vec3 lights(vec2 g, vec2 fw, float s, float share, float seed) {
+          vec2 q = g / s, h = min(fw / s * 1.25, vec2(1.0)) * 0.5, a = q - h, b = q + h, k = vec2(s - 1.0), n = floor(b) - floor(a);
+          vec2 lo = s > 1.0 ? vec2(0.0) : vec2(0.2, 0.3), hi = s > 1.0 ? vec2(1.0) : vec2(0.8, 0.85);
+          vec3 lit = vec3(0.0);
+          for (int i = 0; i < 2; i++) for (int j = 0; j < 2; j++) {
+            if (float(i) > n.x || float(j) > n.y) continue; // a cell the footprint doesn't reach
+            vec2 c = floor(a) + vec2(i, j), o = max(min(b, c + hi) - max(a, c + lo), 0.0);
+            lit += step(hash(c + seed * 57.0 + k * 13.0), share) * mix(vec3(1.0, 0.72, 0.38), vec3(0.85, 0.9, 1.0), step(0.8, hash(c + 11.0 + k * 7.0))) * (o.x * o.y);
+          }
+          return lit * (s > 1.0 ? 0.33 : 1.0) / (4.0 * h.x * h.y);
+        }`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         // a face across the line of sight to the player (an overhang, a skybridge); not walls alongside it
         if (occluder.w > 0.0) dissolve(vWp, occluded(vWp, 0.3) * step(0.35, abs(dot(vWn, normalize(occluder.xyz - cameraPosition)))));
@@ -367,11 +382,15 @@ export function buildingMaterial() {
         if (night > 0.01 && style > 0.5 && style != 6.0 && style != 7.0 && z < 900.0) {
           bool shopF = front > 0.5 && z < gf;
           vec2 cellSz = shopF ? vec2(2.6, gf) : style == 2.0 ? vec2(1.6, storey) : style == 9.0 ? vec2(1.5, storey) : style == 3.0 ? vec2(3.2, storey) : style == 5.0 ? vec2(3.4, storey) : vec2(3.0, storey);
-          vec2 g = vec2(u, shopF ? z : (style == 5.0 || style == 8.0 ? z : zf)) / cellSz, cid = floor(g), f = fract(g), fw = max(fwidth(g), vec2(1e-4));
-          float on = step(hash(cid + seed * 57.0), shopF ? 0.75 : 0.18 + 0.5 * night * hash(vec2(seed, 3.1)));
-          float shape = mix(0.45, box(f, vec2(0.2, 0.3), vec2(0.8, 0.85), fw), clamp(1.6 - 2.5 * max(fw.x, fw.y), 0.0, 1.0));
-          vec3 warm = mix(vec3(1.0, 0.72, 0.38), vec3(0.85, 0.9, 1.0), step(0.8, hash(cid + 11.0)));
-          glow = warm * on * shape * night * 1.3 * step(1.0, z);
+          vec2 g = vec2(u, shopF ? z : (style == 5.0 || style == 8.0 ? z : zf)) / cellSz, fw = max(fwidth(g), vec2(1e-4));
+          float share = shopF ? 0.75 : 0.18 + 0.5 * night * hash(vec2(seed, 3.1));
+          // blocks of 1, 2, 4, 8 windows a side as cells shrink under the pixel, cross-faded, so zooming doesn't pop;
+          // a little brighter far off, so far towers read as lit (as the old 0.45 fill did)
+          float m = max(fw.x, fw.y), L = min(log2(max(m * 1.75, 1.0)), 3.0), l0 = floor(L), t = L - l0;
+          vec3 lit = lights(g, fw, exp2(l0), share, seed);
+          if (t > 0.0) lit = mix(lit, lights(g, fw, exp2(l0 + 1.0), share, seed), t);
+          lit *= mix(1.0, 1.36, smoothstep(0.24, 0.64, m));
+          glow = lit * night * 1.3 * step(1.0, z);
         }`)
     s.fragmentShader = s.fragmentShader
       .replace('uniform vec3 emissive;', 'uniform vec3 emissive;\nuniform float night;')
@@ -379,7 +398,7 @@ export function buildingMaterial() {
       // the glow's strength rides in alpha, so the post pass can keep lit windows warm under a night grade
       .replace('#include <opaque_fragment>', '#include <opaque_fragment>\ngl_FragColor.a = 1.0 - min(1.0, dot(glow, vec3(0.5)));')
   }
-  m.customProgramCacheKey = () => 'building7'
+  m.customProgramCacheKey = () => 'building9'
   return m
 }
 

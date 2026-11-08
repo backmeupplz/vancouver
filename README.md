@@ -54,7 +54,7 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
 volume). `public/main.js` sets up the camera, light, shadows, the ink outline pass and render-on-demand;
 `public/core/` streams tiles for what is on screen, builds their geometry in Web Workers and draws ground, roads,
 facades and trees with procedural shaders, crisp at any zoom. Detail stays where it shows: the ground follows the terrain to
-25 cm on the map and to 5 cm up close (zoom 0.3 and street level), and each wall's balcony fronts and railings are one
+25 cm on the map and to 5 cm up close (zoom 0.3 and street level), its polygons welded where they meet so no crack opens between them, and each wall's balcony fronts and railings are one
 sheet the shader draws every floor on. `public/core/quality.js` picks High or Low graphics
 (About → Graphics: Auto, High, Low) and the frame loop lowers the resolution while frames run late. Everything else is a plugin (`public/plugins/`):
 lo-fi music, live weather and sun, TransLink transit on its timetable, live aircraft, ships, landmarks and iconic

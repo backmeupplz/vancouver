@@ -131,6 +131,7 @@ function ground(t, terr, level) {
   const cell = t.size / (terr.n - 1), cap = hmax - hmin < 2 ? Infinity : cell * 4
   const hz = (x, y, c) => { const h = heightAt(terr, x, y); return c === PIER ? Math.max(h, 0.45) : h }
   const bends = (ax, ay, bx, by, c, tol) => {
+    if (ax > bx || (ax === bx && ay > by)) return bends(bx, by, ax, ay, c, tol) // one way along an edge, whichever side asks
     const L = Math.hypot(bx - ax, by - ay)
     if (L > cap) return true
     if (cap === Infinity || L < 1.5) return false
@@ -155,29 +156,91 @@ function ground(t, terr, level) {
     const cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
     if (cross > 0) out.push(va, vb, vc); else out.push(va, vc, vb)
   }
+  const polys = [] // [class, rings], read first: their borders are welded together before they're triangulated
   for (let r = 0; r < runs; r++) {
     const c = dv.getUint8(o), np = dv.getUint32(o + 1, true); o += 5
-    const lift = c * GROUND_LIFT + 0.02
     for (let p = 0; p < np; p++) {
-      const nr = dv.getUint16(o, true); o += 2
-      const flat = [], holes = []
-      for (let k = 0; k < nr; k++) {
-        const [pts, o2] = readRing(t, o); o = o2
-        if (k) holes.push(flat.length / 2)
-        for (const v of pts) flat.push(v)
-      }
-      const tri = earcut(flat, holes)
-      for (let i = 0; i < tri.length; i += 3) {
-        const a = tri[i] * 2, b = tri[i + 1] * 2, d = tri[i + 2] * 2
-        emit(idx, GROUND_TOL[level], c, lift, flat[a], flat[a + 1], flat[b], flat[b + 1], flat[d], flat[d + 1], 0)
-        if (coarse) emit(coarse, GROUND_COARSE, c, lift, flat[a], flat[a + 1], flat[b], flat[b + 1], flat[d], flat[d + 1], 0)
-      }
+      const nr = dv.getUint16(o, true), rings = []; o += 2
+      for (let k = 0; k < nr; k++) { const [pts, o2] = readRing(t, o); o = o2; rings.push(pts) }
+      polys.push([c, rings])
+    }
+  }
+  const W = weld(polys.flatMap(([, rings]) => rings), t.size, t.k * 1.5)
+  let ri = 0
+  for (const [c, rings] of polys) {
+    const lift = c * GROUND_LIFT + 0.02, flat = [], holes = []
+    for (let k = 0; k < rings.length; k++) {
+      const ring = W.rings[ri++]
+      if (ring.length < 3 || (k && !flat.length)) continue // welded down to nothing (a sliver of a ring)
+      if (k) holes.push(flat.length / 2)
+      for (const i of ring) flat.push(W.xy[i * 2], W.xy[i * 2 + 1])
+    }
+    const tri = flat.length ? earcut(flat, holes) : []
+    for (let i = 0; i < tri.length; i += 3) {
+      const a = tri[i] * 2, b = tri[i + 1] * 2, d = tri[i + 2] * 2
+      emit(idx, GROUND_TOL[level], c, lift, flat[a], flat[a + 1], flat[b], flat[b + 1], flat[d], flat[d + 1], 0)
+      if (coarse) emit(coarse, GROUND_COARSE, c, lift, flat[a], flat[a + 1], flat[b], flat[b + 1], flat[d], flat[d + 1], 0)
     }
   }
   const nv = pos.length / 3
   if (!nv) return null
   const P = new Float32Array(pos), I = nv > 65535 ? Uint32Array : Uint16Array
   return { position: P, normal: normals(terr, P), cls: new Uint8Array(cls), index: new I(idx), coarse: coarse && new I(coarse) }
+}
+
+// The bake's ground polygons meet along shared borders, but not always point for point: one side has a point the other
+// lacks (a T-junction: between them the two sides follow the terrain differently), or the two round a corner to
+// different 6 cm steps (a sliver). Either opens a hairline crack that shows the base map below, and the ink pass
+// outlines it: dotted dark lines along kerbs, lawns and road edges. So points closer than tol become one (those on
+// the tile's edge stay put: the next tile's ground meets them there), and each ring edge takes in the points within
+// tol of it, so both sides of a border run through the same points and their triangles share edges.
+// Returns the points (xy) and each ring as point indices.
+function weld(rings, size, tol) {
+  const C = Math.max(2, size / 1024), cells = new Map(), xy = [], tol2 = tol * tol
+  const cell = (x, y) => (Math.floor(x / C) + 1024) * 4096 + Math.floor(y / C) + 1024
+  const find = (x, y) => {
+    for (let i = Math.floor((x - tol) / C); i <= Math.floor((x + tol) / C); i++) for (let j = Math.floor((y - tol) / C); j <= Math.floor((y + tol) / C); j++) {
+      for (const p of cells.get((i + 1024) * 4096 + j + 1024) || []) if ((xy[p * 2] - x) ** 2 + (xy[p * 2 + 1] - y) ** 2 <= tol2) return p
+    }
+    return -1
+  }
+  const add = (x, y) => { let p = find(x, y); if (p < 0) { p = xy.length / 2; xy.push(x, y); const k = cell(x, y); if (!cells.has(k)) cells.set(k, []); cells.get(k).push(p) } return p }
+  const edge = (x, y) => x < tol || y < tol || x > size - tol || y > size - tol
+  const ids = rings.map((r) => new Int32Array(r.length / 2))
+  for (const pass of [true, false]) rings.forEach((r, n) => { for (let i = 0; i < r.length; i += 2) if (edge(r[i], r[i + 1]) === pass) ids[n][i / 2] = add(r[i], r[i + 1]) })
+  // the welded points in a flat grid of cells (CSR), and each edge walked a column of cells at a time along its longer axis
+  const G = Math.ceil(size / C) + 3, np = xy.length / 2, start = new Int32Array(G * G + 1), list = new Int32Array(np)
+  const at = (i, j) => Math.min(G - 1, Math.max(0, i + 1)) * G + Math.min(G - 1, Math.max(0, j + 1))
+  for (let p = 0; p < np; p++) start[at(Math.floor(xy[p * 2] / C), Math.floor(xy[p * 2 + 1] / C)) + 1]++
+  for (let c = 0; c < G * G; c++) start[c + 1] += start[c]
+  const fill = start.slice(0, G * G)
+  for (let p = 0; p < np; p++) list[fill[at(Math.floor(xy[p * 2] / C), Math.floor(xy[p * 2 + 1] / C))]++] = p
+  const out = ids.map((ring) => {
+    const res = []
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length]
+      if (a === b) continue
+      res.push(a)
+      const ax = xy[a * 2], ay = xy[a * 2 + 1], dx = xy[b * 2] - ax, dy = xy[b * 2 + 1] - ay, L2 = dx * dx + dy * dy, on = []
+      const sw = Math.abs(dy) > Math.abs(dx), au = sw ? ay : ax, av = sw ? ax : ay, du = sw ? dy : dx, dv = sw ? dx : dy
+      const u0 = Math.min(au, au + du), u1 = Math.max(au, au + du)
+      for (let ci = Math.floor((u0 - tol) / C); ci <= Math.floor((u1 + tol) / C); ci++) {
+        const lo = Math.max(u0, ci * C - tol), hi = Math.min(u1, (ci + 1) * C + tol), v0 = av + (dv * (lo - au)) / du, v1 = av + (dv * (hi - au)) / du
+        for (let cj = Math.floor((Math.min(v0, v1) - tol) / C); cj <= Math.floor((Math.max(v0, v1) + tol) / C); cj++) {
+          const c = sw ? at(cj, ci) : at(ci, cj)
+          for (let q = start[c]; q < start[c + 1]; q++) {
+            const p = list[q]
+            if (p === a || p === b) continue
+            const px = xy[p * 2] - ax, py = xy[p * 2 + 1] - ay, f = (px * dx + py * dy) / L2
+            if (f > 0 && f < 1 && (px - f * dx) ** 2 + (py - f * dy) ** 2 <= tol2) on.push(f, p)
+          }
+        }
+      }
+      if (on.length) { const o = []; for (let j = 0; j < on.length; j += 2) o.push([on[j], on[j + 1]]); o.sort((u, v) => u[0] - v[0]); for (const [, p] of o) if (p !== res[res.length - 1]) res.push(p) }
+    }
+    return res
+  })
+  return { xy, rings: out }
 }
 
 // detail tiles: a WATER_N x WATER_N mask (1 = water), cell (i east, j north) from the tile's SW corner
