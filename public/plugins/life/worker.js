@@ -20,6 +20,9 @@ const LC = { T: 3, run: 20, p: 0.3, th: 0.3, bias: 0.2, zone: 120, bsafe: 3, bmu
 const MARGIN = 1.5
 const SEEN = 250 // metres: no car appears or vanishes this close to the player (an obstacle)
 const AXLE = 0.6 // the rear axle trails the front bumper by this share of the car's length
+// the width cars parked along each kerb take (core/tile-worker.js parkSide, which places them: keep the two in step):
+// residential and living streets and two-lane tertiaries (kinds 5, 7, 4) where the lanes keep 2.1 m each beside them
+const parkSide = (p) => (p.kind === 5 || p.kind === 7 || p.kind === 4 && p.lanes <= 2) && p.w - 3.8 >= 2.1 * Math.max(2, p.lanes) ? 1.9 : 0
 // by road kind: motorway, trunk, primary, secondary, tertiary, residential, service, living
 const V0 = [24, 19, 14, 13.5, 12.5, 10, 5, 4.2] // free speed, m/s
 const DENS = [22, 20, 40, 34, 24, 4, 0.8, 0.8] // cars per lane-km at the evening rush
@@ -217,7 +220,7 @@ function* buildCars() {
     const c = centre(p), tl = [p.turns?.f?.length ? p.turns.f : null, p.turns?.b?.length ? p.turns.b : null]
     const lanes0 = Math.max(1, p.lanes || 1), half = Math.max(1, lanes0 >> 1)
     const pers = p.oneway ? [tl[0]?.length || lanes0] : [tl[0]?.length || half, tl[1]?.length || half]
-    const total = tl[0] || tl[1] ? pers.reduce((a, b) => a + b) : p.oneway ? lanes0 : Math.max(2, lanes0), lw = p.w / total
+    const total = tl[0] || tl[1] ? pers.reduce((a, b) => a + b) : p.oneway ? lanes0 : Math.max(2, lanes0), lw = (p.w - 2 * parkSide(p)) / total // (cars parked along both kerbs)
     const lift = 0.18 + (18 - p.kind) * 0.004 + (c.deck ? 0.35 : 0)
     for (const dir of p.oneway ? [0] : [0, 1]) {
       const from = dir ? p.nb : p.na, to = dir ? p.na : p.nb, per = pers[dir]

@@ -2,7 +2,7 @@
 // A plugin is an ES module whose default export is `(city) => ({ dispose() })` (dispose optional).
 import * as THREE from 'three'
 
-export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll, toLatLon, sun, hemi, setSun, post, requestRender, data, tiles, night, surface, suppressBuildings, ownCamera, quality }) {
+export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll, toLatLon, sun, hemi, setSun, post, requestRender, data, tiles, night, late, surface, suppressBuildings, ownCamera, quality }) {
   const handlers = new Map()
   const own = () => ownCamera?.active
   let animators = 0
@@ -54,6 +54,8 @@ export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll
       sun, hemi, setSunDirection: setSun,
       get night() { return night?.value ?? 0 }, // 0 day .. 1 night: lights windows
       set night(v) { if (night) { night.value = Math.max(0, Math.min(1, v)); requestRender() } },
+      get late() { return late?.value ?? 0 }, // 0 evening .. 1 the small hours: fewer windows lit
+      set late(v) { if (late) { late.value = Math.max(0, Math.min(1, v)); requestRender() } },
     },
     // weather on the ground: wet (0..1) darkens it and mirrors `sky` (a THREE.Color) in the wet paving, snow (0..1)
     // whitens flat ground, roofs and, less, the roads

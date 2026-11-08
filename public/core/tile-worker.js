@@ -1,5 +1,7 @@
 // Turns a streamed map tile (tools/tiles.py) into ready-to-draw geometry buffers, off the page's thread.
 // Coordinates in the buffers are local to the tile: x east, y up, z south, metres from the tile's SW corner.
+// Walls by what they face and the single-arm street lights follow Slop Toronto's rules (MIT, © 2026 Mr.doob, © 2026 John
+// Fewell; THIRD_PARTY.md).
 import earcut from '../vendor/earcut.js'
 import { mulberry32 as mulberry, inPoly, sampleGrid } from './util.js'
 const GROUND_LIFT = 0 // the ground is one non-overlapping layer (tools/tiles.py), so no class needs lifting
@@ -18,15 +20,16 @@ globalThis.onmessage = async ({ data }) => { // (globalThis: tools/crosswalk_che
     const buf = await new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer()
     const t = parse(buf)
     const out = build(t, level)
-    for (const g of [out.ground, out.roads, out.paint, out.buildings, out.balconies]) if (g?.position) g.box = box(g.position)
+    for (const g of [out.ground, out.roads, out.paint, out.buildings, out.balconies, out.ao]) if (g?.position) g.box = box(g.position)
+    if (out.lights) out.lights.box = box(out.lights.pos, 4)
     postMessage({ id, ...out }, transferables(out))
   } catch (e) { postMessage({ id, error: String(e) }) }
 }
 
 // bounds of a position buffer, so the page doesn't loop over it (min x, y, z, max x, y, z)
-function box(p) {
+function box(p, stride = 3) {
   const b = new Float32Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity])
-  for (let i = 0; i < p.length; i += 3) for (let k = 0; k < 3; k++) { const v = p[i + k]; if (v < b[k]) b[k] = v; if (v > b[k + 3]) b[k + 3] = v }
+  for (let i = 0; i < p.length; i += stride) for (let k = 0; k < 3; k++) { const v = p[i + k]; if (v < b[k]) b[k] = v; if (v > b[k + 3]) b[k + 3] = v }
   return b
 }
 
@@ -77,9 +80,14 @@ function build(t, level) {
   out.roads = rd.surf; out.paint = rd.paint
   out.graph = graph(t, lines)
   out.graph.pois = ps
-  const b = buildings(t, terr, level, lines)
-  out.buildings = b.walls; out.balconies = b.balconies; out.units = b.units
-  if (level === 0) { out.footprints = b.footprints; out.water = water(t); out.carriage = roadMask(t); out.boats = boats(t, terr) }
+  const carriage = level === 0 ? roadMask(t) : null
+  const b = buildings(t, terr, level, lines, carriage)
+  out.buildings = b.walls; out.balconies = b.balconies; out.ao = b.ao
+  if (level === 0) {
+    out.water = water(t); out.carriage = carriage; out.boats = boats(t, terr); out.lights = lights(t, terr, lines, ps, b)
+    out.parked = parked(t, terr, lines, ps, b.footprints)
+    out.footprints = withCars(b.footprints, out.parked.lot, t)
+  }
   out.trees = trees(t, terr)
   return out
 }
@@ -258,10 +266,31 @@ function roadMask(t) {
 }
 // an n x n mask of the ground classes in `want`: the cells whose centres are inside their polygons, or null if none
 function raster(t, want, n) {
+  const c = t.size / n, mask = new Uint8Array(n * n)
+  let any = false
+  eachPoly(t, want, (flat, holes) => {
+    const tri = earcut(flat, holes)
+    for (let q = 0; q < tri.length; q += 3) { // fill the cells whose centres are inside the triangle
+      const ax = flat[tri[q] * 2] / c - 0.5, ay = flat[tri[q] * 2 + 1] / c - 0.5, bx = flat[tri[q + 1] * 2] / c - 0.5, by = flat[tri[q + 1] * 2 + 1] / c - 0.5
+      const cx = flat[tri[q + 2] * 2] / c - 0.5, cy = flat[tri[q + 2] * 2 + 1] / c - 0.5
+      const det = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+      if (Math.abs(det) < 1e-9) continue
+      const i0 = Math.max(0, Math.ceil(Math.min(ax, bx, cx))), i1 = Math.min(n - 1, Math.floor(Math.max(ax, bx, cx)))
+      const j0 = Math.max(0, Math.ceil(Math.min(ay, by, cy))), j1 = Math.min(n - 1, Math.floor(Math.max(ay, by, cy)))
+      for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+        const u = ((bx - i) * (cy - j) - (by - j) * (cx - i)) / det, v = ((cx - i) * (ay - j) - (cy - j) * (ax - i)) / det
+        if (u >= -1e-6 && v >= -1e-6 && u + v <= 1 + 1e-6) { mask[j * n + i] = 1; any = true }
+      }
+    }
+  })
+  return any ? mask : null
+}
+// fn(flat, holes) for each ground polygon of a class in `want` (tile-local x, north pairs; holes: earcut's hole starts)
+function eachPoly(t, want, fn) {
   const s = t.sections.GRND
-  if (!s) return null
-  const dv = t.dv, c = t.size / n, mask = new Uint8Array(n * n)
-  let o = s.off, any = false
+  if (!s) return
+  const dv = t.dv
+  let o = s.off
   const runs = dv.getUint16(o, true); o += 2
   for (let r = 0; r < runs; r++) {
     const cls = dv.getUint8(o), np = dv.getUint32(o + 1, true); o += 5
@@ -274,23 +303,9 @@ function raster(t, want, n) {
         if (k) holes.push(flat.length / 2)
         for (const v of pts) flat.push(v)
       }
-      if (!want.has(cls) || !flat.length) continue
-      const tri = earcut(flat, holes)
-      for (let q = 0; q < tri.length; q += 3) { // fill the cells whose centres are inside the triangle
-        const ax = flat[tri[q] * 2] / c - 0.5, ay = flat[tri[q] * 2 + 1] / c - 0.5, bx = flat[tri[q + 1] * 2] / c - 0.5, by = flat[tri[q + 1] * 2 + 1] / c - 0.5
-        const cx = flat[tri[q + 2] * 2] / c - 0.5, cy = flat[tri[q + 2] * 2 + 1] / c - 0.5
-        const det = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
-        if (Math.abs(det) < 1e-9) continue
-        const i0 = Math.max(0, Math.ceil(Math.min(ax, bx, cx))), i1 = Math.min(n - 1, Math.floor(Math.max(ax, bx, cx)))
-        const j0 = Math.max(0, Math.ceil(Math.min(ay, by, cy))), j1 = Math.min(n - 1, Math.floor(Math.max(ay, by, cy)))
-        for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
-          const u = ((bx - i) * (cy - j) - (by - j) * (cx - i)) / det, v = ((cx - i) * (ay - j) - (cy - j) * (ax - i)) / det
-          if (u >= -1e-6 && v >= -1e-6 && u + v <= 1 + 1e-6) { mask[j * n + i] = 1; any = true }
-        }
-      }
+      if (want.has(cls) && flat.length) fn(flat, holes)
     }
   }
-  return any ? mask : null
 }
 
 function readLines(t) {
@@ -584,10 +599,40 @@ const hex = (h) => [((h >> 16) & 255) / 255, ((h >> 8) & 255) / 255, (h & 255) /
 const lin = (h) => hex(h).map((c) => c ** 1.8) // a little lighter than linear: the stylized map reads brighter than a photo
 const shade = (c, f) => [Math.min(1, c[0] * f), Math.min(1, c[1] * f), Math.min(1, c[2] * f)]
 
-function buildings(t, terr, level, lines) {
+// one building record of a tile's BLDG section at byte o (tools/tiles.py) -> its fields, its ring ([x, north], tile-local)
+// and the next record's offset
+function readBuilding(t, o) {
+  const dv = t.dv
+  const fl = dv.getUint8(o), style0 = dv.getUint8(o + 1), base = dv.getInt16(o + 2, true) / 10, h = dv.getUint16(o + 4, true) / 10
+  o += 6
+  let mn = 0, roofShape = 0, ridge = 0, wallHex = 0, roofHex = 0, gid = 0, gH = h
+  if (fl & 1) { mn = dv.getUint16(o, true) / 10; o += 2 }
+  if (fl & 2) { roofShape = dv.getUint8(o); ridge = dv.getUint16(o + 1, true) / 10; o += 3 }
+  const roofBits = roofShape & 48; roofShape &= 15 // 16: ridge along the short axis, 32: a shed roof's high side flipped
+  if (fl & 4) { wallHex = dv.getUint32(o, true) | 0x1000000; o += 4 }
+  if (fl & 8) { roofHex = dv.getUint32(o, true) | 0x1000000; o += 4 }
+  if (fl & 16) { gH = dv.getUint16(o, true) / 10; gid = dv.getUint32(o + 2, true); o += 6 }
+  let fh = 0, bits = 0, plant = null // storey height; bits 1 storefront, 2 residential, 4 planted roof, 8 rooftop pool, 16 solar panels; rooftop plant the LiDAR saw
+  if (fl & 32) { fh = dv.getUint8(o) / 20; bits = dv.getUint8(o + 1); o += 2 }
+  let fx = 0, facing = 0 // the building's own facade (tools/facades.py): balcony kind | pattern << 4, balcony facing octants
+  if (fl & 128) { fx = dv.getUint8(o); facing = dv.getUint8(o + 1); o += 2 }
+  if (fl & 64) {
+    const nu = dv.getUint8(o); o += 1; plant = []
+    for (let k = 0; k < nu; k++, o += 8) plant.push([dv.getInt16(o, true) * t.k, dv.getInt16(o + 2, true) * t.k, dv.getUint8(o + 4) / 10, dv.getUint8(o + 5) / 10, dv.getUint8(o + 6) / 20, (dv.getUint8(o + 7) / 256) * Math.PI])
+  }
+  const [flat, o2] = readRing(t, o)
+  const pts = []
+  for (let p = 0; p < flat.length / 2; p++) pts.push([flat[p * 2], flat[p * 2 + 1]])
+  return { fl, style0, base, h, mn, roofShape, roofBits, ridge, wallHex, roofHex, gid, gH, fh, bits, fx, facing, plant, pts, o: o2 }
+}
+
+// carriage: the detail tile's 1 m carriageway mask (roadMask), for the light storefronts spill onto the street
+function buildings(t, terr, level, lines, carriage) {
   const s = t.sections.BLDG
   const W = { pos: [], nor: [], col: [], win: [] }, Bal = { pos: [], nor: [], col: [], win: [] }
-  const units = [], fp = [], fpStart = [0] // footprints: world x, north pairs; ring i is fp[fpStart[i]..fpStart[i+1])
+  const fp = [], fpStart = [0] // footprints: world x, north pairs; ring i is fp[fpStart[i]..fpStart[i+1])
+  const spill = [] // tile-local x, north: where a lit shop window throws light on the sidewalk
+  const AO = { P: [], T: [], I: [] } // the shade on the ground round the walls' feet (skirt)
   if (!s) return {}
   if (level === 0) tubes(W, lines)
   if (level === 0) railings(W, Bal, lines, terr) // (a road on a roof has the building's parapet)
@@ -595,28 +640,21 @@ function buildings(t, terr, level, lines) {
   let o = s.off
   const n = dv.getUint32(o, true); o += 4
   const detail = level === 0
-  for (let bi = 0; bi < n; bi++) {
-    const fl = dv.getUint8(o), style0 = dv.getUint8(o + 1), base = dv.getInt16(o + 2, true) / 10, h = dv.getUint16(o + 4, true) / 10
-    o += 6
-    let mn = 0, roofShape = 0, ridge = 0, wallHex = 0, roofHex = 0, gid = 0, gH = h
-    if (fl & 1) { mn = dv.getUint16(o, true) / 10; o += 2 }
-    if (fl & 2) { roofShape = dv.getUint8(o); ridge = dv.getUint16(o + 1, true) / 10; o += 3 }
-    const roofBits = roofShape & 48; roofShape &= 15 // 16: ridge along the short axis, 32: a shed roof's high side flipped
-    if (fl & 4) { wallHex = dv.getUint32(o, true) | 0x1000000; o += 4 }
-    if (fl & 8) { roofHex = dv.getUint32(o, true) | 0x1000000; o += 4 }
-    if (fl & 16) { gH = dv.getUint16(o, true) / 10; gid = dv.getUint32(o + 2, true); o += 6 }
-    let fh = 0, bits = 0, plant = null // storey height; bits 1 storefront, 2 residential; rooftop plant the LiDAR saw
-    if (fl & 32) { fh = dv.getUint8(o) / 20; bits = dv.getUint8(o + 1); o += 2 }
-    let fx = 0, facing = 0 // the building's own facade (tools/facades.py): balcony kind | pattern << 4, balcony facing octants
-    if (fl & 128) { fx = dv.getUint8(o); facing = dv.getUint8(o + 1); o += 2 }
-    if (fl & 64) {
-      const nu = dv.getUint8(o); o += 1; plant = []
-      for (let k = 0; k < nu; k++, o += 8) plant.push([dv.getInt16(o, true) * t.k, dv.getInt16(o + 2, true) * t.k, dv.getUint8(o + 4) / 10, dv.getUint8(o + 5) / 10, dv.getUint8(o + 6) / 20, (dv.getUint8(o + 7) / 256) * Math.PI])
-    }
-    const [flatPts, o2] = readRing(t, o); o = o2
-    const np = flatPts.length / 2
-    let pts = []
-    for (let p = 0; p < np; p++) pts.push([flatPts[p * 2], flatPts[p * 2 + 1]])
+  const recs = []
+  for (let bi = 0; bi < n; bi++) { const b = readBuilding(t, o); o = b.o; recs.push(b) }
+  // which walls a neighbour covers (party walls: windowless), from every footprint of the tile (detail tiles)
+  const G = 16, grid = new Map(), gk = (i, j) => i * 4096 + j
+  if (detail) for (const b of recs) {
+    const [x0, y0, x1, y1] = bbox(b.pts)
+    for (let i = Math.floor(x0 / G); i <= Math.floor(x1 / G); i++) for (let j = Math.floor(y0 / G); j <= Math.floor(y1 / G); j++) { const k = gk(i, j); if (!grid.has(k)) grid.set(k, []); grid.get(k).push(b) }
+  }
+  // a wall from y0 to y1, (x, y) just outside it and (ix, iy) just inside: covered for at least half its height by a
+  // neighbour standing beside it (not one overlapping it: a part over a bigger outline, a duplicate)
+  const covered = (self, x, y, ix, iy, y0, y1) => grid.get(gk(Math.floor(x / G), Math.floor(y / G)))?.some((b) => b !== self && b.base + b.mn < y0 + 2 && b.base + b.h >= y0 + 0.6 * (y1 - y0) && inPoly(x, y, b.pts) && !inPoly(ix, iy, b.pts))
+  for (const rec of recs) {
+    const { fl, style0, base, h, mn, roofShape, roofBits, ridge, wallHex, roofHex, gH, fh, bits, fx, facing, plant, pts } = rec
+    let { gid } = rec
+    const np = pts.length
     if (MASKS.length) {
       let cx = 0, cy = 0
       for (const [x, y] of pts) { cx += x / np; cy += y / np }
@@ -646,6 +684,8 @@ function buildings(t, terr, level, lines) {
     const fq = Math.max(1, Math.min(31, Math.round(((fh || 3.2) - 2.4) / 0.15)))
     const styleW = style + (fq + (front && style !== 6 && style !== 7 ? 32 : 0)) / 64
     const storey = 2.4 + fq * 0.15
+    // what the windows light up for (materials.js): 1 homes, 2 work (offices, shops, civic), 0 not known; it rides on the seed
+    const use = bits & 2 || style0 === 0 || style0 === 1 || style0 === 6 || style0 >= 11 ? 1 : style0 === 2 || style0 === 4 || style0 === 5 || style0 === 7 || style0 === 9 ? 2 : 0
     const bk = fx & 15 // balconies: 1 none, 2 glass, 3 solid fronts; 0: by the pattern
     const balc = detail && h - mn > 9 && np <= 120 && (bk ? bk > 1 : fl & 32 ? bits & 2 && (style === 3 || style === 9 || style0 === 7 && tower) : style === 3)
     const pal = PALETTES[style0] || PALETTES[4]
@@ -653,21 +693,33 @@ function buildings(t, terr, level, lines) {
     const ownRoof = !roofShape || style0 === 8 || style0 >= 11
     const roofC = shade(roofHex & 0x1000000 ? lin(roofHex & 0xffffff) : lin(pick(ownRoof ? pal.roof : PALETTES[0].roof)), 0.96 + gr() * 0.08)
     const y0 = base + mn, y1 = base + h
-    // walls
+    if (front && carriage && mn < 2.5) shopSpill(pts, carriage, spill)
+    if (detail && mn < 0.5 && np <= 120) skirt(AO, pts, terr, base)
+    // walls, each by what it faces (after Slop Toronto's footprint edges): on the low and mid-rise walls of brick, siding
+    // and punched windows (rows of shops and houses; not glass towers) a wall a neighbour covers for 60% of its height or
+    // more, or a sliver, is a windowless party wall; a storefront only where the wall looks onto a street (all of
+    // them where the tile can't tell: the overview); the rest keep the building's pattern
+    const rowWalls = detail && y1 - y0 < 25 && (style === 1 || style === 5 || style === 8 || style === 10) // brick, siding, punched: not glass towers
+    const shopEdges = front && carriage ? pts.map((a, i) => streetSide(a, pts[(i + 1) % np], carriage)) : null
     let u = 0
     for (let i = 0; i < np; i++) {
       const a = pts[i], p = pts[(i + 1) % np], len = Math.hypot(p[0] - a[0], p[1] - a[1]) || 1
       const nx = (p[1] - a[1]) / len, nz = (p[0] - a[0]) / len // outward in (x, z=-y)
-      const w = (uu, yy) => [styleW, uu, yy - base, seed]
+      const mx = (a[0] + p[0]) / 2, my = (a[1] + p[1]) / 2
+      const party = rowWalls && (len < 2 || covered(rec, mx + nx * 0.8, my - nz * 0.8, mx - nx * 0.8, my + nz * 0.8, y0, y1))
+      const kind = party ? fq / 64 : shopEdges && !shopEdges[i] && styleW % 1 >= 0.5 ? styleW - 0.5 : styleW
+      const w = (uu, yy) => [kind, uu, yy - base, seed + use]
       quad(W, [a[0], y0, -a[1]], [p[0], y0, -p[1]], [p[0], y1, -p[1]], [a[0], y1, -a[1]], wall, [nx, 0, nz], w(u, y0), w(u + len, y0), w(u + len, y1), w(u, y1))
       u += len
     }
     const flat = !roofShape || !ridge || ridge <= h
     if (flat) {
-      const tris = earcut2(pts)
+      // a planted roof (the bake's bit 4: the orthophoto or OSM; else a green roof colour) gets its planting drawn
+      const green = !!(bits & 4) || (roofC[1] > roofC[0] * 1.15 && roofC[1] > roofC[2] * 1.05)
+      const rw = green ? [15, 0, 999, seed] : ROOFW(seed), tris = earcut2(pts)
       for (let i = 0; i < tris.length; i += 3) {
         const A = pts[tris[i]], B = pts[tris[i + 1]], C = pts[tris[i + 2]]
-        tri(W, [A[0], y1, -A[1]], [B[0], y1, -B[1]], [C[0], y1, -C[1]], roofC, [0, 1, 0], ROOFW(seed))
+        tri(W, [A[0], y1, -A[1]], [B[0], y1, -B[1]], [C[0], y1, -C[1]], roofC, [0, 1, 0], rw)
       }
       // parapet and rooftop plant on the bigger flat roofs
       if (detail && h >= 5 && np <= 60) {
@@ -678,18 +730,8 @@ function buildings(t, terr, level, lines) {
           quad(W, [a[0], y1, -a[1]], [p[0], y1, -p[1]], [p[0], y1 + par, -p[1]], [a[0], y1 + par, -a[1]], wall, [nx, 0, nz], ROOFW(seed))
           quad(W, [a[0], y1, -a[1]], [p[0], y1, -p[1]], [p[0], y1 + par, -p[1]], [a[0], y1 + par, -a[1]], inC, [-nx, 0, -nz], ROOFW(seed))
         }
-        const bb = bbox(pts), ar = (bb[2] - bb[0]) * (bb[3] - bb[1])
-        if (plant) { // what the LiDAR saw up there
-          for (const [ux, uy, su, sv, uh, ang] of plant) box3(Bal, ux, uy, y1, su, sv, uh, ang, shade([0.86, 0.88, 0.9], 0.85 + gr() * 0.2))
-        } else if (ar > 120) {
-          const want = Math.min(7, Math.round(ar / 260) + (gr() < 0.5 ? 1 : 0))
-          for (let tries = 0, got = 0; tries < want * 4 && got < want; tries++) {
-            const ux = bb[0] + gr() * (bb[2] - bb[0]), uy = bb[1] + gr() * (bb[3] - bb[1]), sx = 1.4 + gr() * 3, sy = 1.2 + gr() * 2.2
-            if (![[ux, uy], [ux + sx, uy], [ux - sx, uy], [ux, uy + sy], [ux, uy - sy]].every(([x, y]) => inPoly(x, y, pts))) continue
-            const g = 0.75 + gr() * 0.25
-            units.push(ux, y1, -uy, sx, 0.8 + gr() * 1.4, sy, g); got++
-          }
-        }
+        if (plant) for (const [ux, uy, su, sv, uh, ang] of plant) box3(Bal, ux, uy, y1, su, sv, uh, ang, shade([0.86, 0.88, 0.9], 0.85 + gr() * 0.2)) // what the LiDAR saw up there
+        rooftop(Bal, pts, y1, gr, { bits, green, plant, tower, wall, shed: style0 === 4 || style0 === 8 || style0 === 9 || style0 === 2 && h < 15 })
       }
     } else roof(W, pts, y1, base + ridge, roofShape, roofBits, roofC, wall, seed)
     // balconies: a slab and a railing (glass, or concrete on the older towers) on every floor, all the way round.
@@ -710,10 +752,207 @@ function buildings(t, terr, level, lines) {
       }
     }
   }
-  return { walls: pack(W), balconies: Bal.pos.length ? pack(Bal) : null, units: units.length ? new Float32Array(units) : null,
-    footprints: fpStart.length > 1 ? { pts: new Float32Array(fp), start: new Uint32Array(fpStart) } : null }
+  return { walls: pack(W), balconies: Bal.pos.length ? pack(Bal) : null,
+    footprints: fpStart.length > 1 ? { pts: new Float32Array(fp), start: new Uint32Array(fpStart) } : null, spill,
+    ao: AO.P.length ? { position: new Float32Array(AO.P), t: new Float32Array(AO.T), index: AO.P.length / 3 > 65535 ? new Uint32Array(AO.I) : new Uint16Array(AO.I) } : null }
+}
+// ambient occlusion where the walls meet the ground: a strip 3 m out from the foot of every wall, darkest at the wall
+// (materials.js aoMaterial multiplies the ground under it); courtyards and the gaps between buildings get it twice
+const SKIRT = 3
+function skirt(B, pts, terr, base) {
+  const out = offset(pts, SKIRT), n = pts.length
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n, v = B.P.length / 3
+    for (const [q, t] of [[pts[i], 0], [pts[j], 0], [out[j], 1], [out[i], 1]]) { B.P.push(q[0], (t ? heightAt(terr, q[0], q[1]) : base) + 0.06, -q[1]); B.T.push(t) }
+    B.I.push(v, v + 2, v + 1, v, v + 3, v + 2)
+  }
+}
+const onMask = (R, x, y) => { const i = Math.floor(x), j = Math.floor(y); if (i < 0 || j < 0 || i >= R.n || j >= R.n) return false; const k = j * R.n + i; return !!(R.bits[k >> 3] & (1 << (k & 7))) }
+// does the wall a -> p (a counter-clockwise ring's) look onto a street: 3 m long or more, a carriageway within 18 m straight out
+function streetSide(a, p, R) {
+  const len = Math.hypot(p[0] - a[0], p[1] - a[1])
+  if (len < 3) return false
+  const nx = (p[1] - a[1]) / len, ny = -(p[0] - a[0]) / len, mx = (a[0] + p[0]) / 2, my = (a[1] + p[1]) / 2
+  for (let d = 3; d <= 18; d += 3) if (onMask(R, mx + nx * d, my + ny * d)) return true
+  return false
+}
+// a storefront's walls that face a street (a carriageway within 18 m straight out): a light every 3.5 m along them,
+// 2.2 m out on the sidewalk
+function shopSpill(pts, R, out) {
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], p = pts[(i + 1) % pts.length], len = Math.hypot(p[0] - a[0], p[1] - a[1])
+    if (!streetSide(a, p, R)) continue
+    const ex = (p[0] - a[0]) / len, ey = (p[1] - a[1]) / len, nx = ey, ny = -ex
+    const n = Math.max(1, Math.round(len / 3.5))
+    for (let k = 0; k < n; k++) { const f = (k + 0.5) / n; out.push(a[0] + ex * len * f + nx * 2.2, a[1] + ey * len * f + ny * 2.2) }
+  }
+}
+
+// ---------------------------------------------------------------- parked cars
+// In the parking lots (the ground's parking polygons): rows of stalls 2.6 m wide either side of 6.5 m aisles, square
+// to the lot's long side, a car in most, none under a building; along the kerbs of the residential and smaller streets,
+// one every 6.5 m a side in about half the spaces (where the street has a parking lane: parkSide), facing the way
+// traffic runs there, not by junctions, crossings, signals and stops. -> { lot, kerb }: 5 floats a car: tile-local x, ground height, z, heading (about +y from +x), seed
+const PARKING = 14, CAR_L = 4.6, CAR_W = 1.9
+// a parking lane along both kerbs: residential and living streets and two-lane tertiaries (arterials stay clear), where
+// the travel lanes keep at least 2.1 m each beside the parked cars. The life plugin's traffic narrows its lanes the same
+// way (plugins/life/worker.js parkSide: keep the two in step), so it passes them instead of through them
+const parkSide = (kind, lanes, w) => (kind === K.residential || kind === K.living || kind === K.tertiary && lanes <= 2) && w - 2 * CAR_W >= 2.1 * Math.max(2, lanes) ? CAR_W : 0
+const rnd01 = (x, y) => { const v = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453; return v - Math.floor(v) }
+function parked(t, terr, lines, ps, fp) {
+  const size = t.size, lot = [], kerb = []
+  const G = 16, grid = new Map(), gk = (i, j) => i * 4096 + j // building footprints by cell, for "under a building"
+  if (fp) for (let r = 0; r < fp.start.length - 1; r++) {
+    const ring = []
+    for (let q = fp.start[r]; q < fp.start[r + 1]; q += 2) ring.push([fp.pts[q] - t.ox, fp.pts[q + 1] - t.oy])
+    const [x0, y0, x1, y1] = bbox(ring)
+    for (let i = Math.floor(x0 / G); i <= Math.floor(x1 / G); i++) for (let j = Math.floor(y0 / G); j <= Math.floor(y1 / G); j++) { const k = gk(i, j); if (!grid.has(k)) grid.set(k, []); grid.get(k).push(ring) }
+  }
+  const built = (x, y) => grid.get(gk(Math.floor(x / G), Math.floor(y / G)))?.some((r) => inPoly(x, y, r))
+  const inside = (x, y) => x >= 0 && y >= 0 && x < size && y < size
+  const car = (out, x, y, ex, ey) => out.push(x, heightAt(terr, x, y), -y, Math.atan2(ey, ex), rnd01(y, x))
+  eachPoly(t, new Set([PARKING]), (flat, holes) => {
+    const rings = []
+    for (let k = 0; k <= holes.length; k++) { const a = k ? holes[k - 1] : 0, b = k < holes.length ? holes[k] : flat.length / 2, r = []; for (let i = a; i < b; i++) r.push([flat[i * 2], flat[i * 2 + 1]]); rings.push(r) }
+    if (Math.abs(area(rings[0])) < 150) return
+    const { cx, cy, a, hl, hw } = obb(rings[0]), ca = Math.cos(a), sa = Math.sin(a)
+    const on = (x, y) => inPoly(x, y, rings[0]) && !rings.slice(1).some((h) => inPoly(x, y, h))
+    // across the long side: stall row (nose to the aisle), aisle, stall row, then the next pair back to back
+    for (let v = -hw + CAR_L / 2 + 0.4, k = 0; v < hw - CAR_L / 2; v += k % 2 ? CAR_L + 0.6 : CAR_L + 6.5, k++) {
+      const face = k % 2 ? -1 : 1 // towards the aisle
+      for (let u = -hl + 1.6; u < hl - 1.3; u += 2.6) {
+        const x = cx + ca * u - sa * v, y = cy + sa * u + ca * v
+        if (!inside(x, y) || rnd01(x, y) > 0.72) continue
+        const fx = -sa * face, fy = ca * face, ok = [[1, 1], [1, -1], [-1, 1], [-1, -1]].every(([p, q]) => on(x + fx * p * CAR_L / 2 + fy * q * CAR_W / 2, y + fy * p * CAR_L / 2 - fx * q * CAR_W / 2))
+        if (ok && !built(x, y)) car(lot, x, y, fx, fy)
+      }
+    }
+  })
+  const deg = new Map()
+  for (const L of lines) for (const n of [L.a, L.b]) deg.set(n, (deg.get(n) || 0) + 1)
+  const stops = new Map(), sk = (x, y) => Math.floor(x / 10) * 100003 + Math.floor(y / 10)
+  for (const p of ps) if (p.kind !== 3 && p.kind !== 4) stops.set(sk(p.x - t.ox, p.y - t.oy), 1)
+  const nearStop = (x, y) => { for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) if (stops.has(sk(x + i * 10, y + j * 10))) return true; return false }
+  for (const L of lines) {
+    if (!parkSide(L.kind, L.lanes, L.w) || L.z || L.layer < 0 || L.crossing) continue
+    const P = L.pts, off = L.w / 2 - 0.95
+    let total = 0
+    for (let i = 0; i < P.length / 2 - 1; i++) total += Math.hypot(P[i * 2 + 2] - P[i * 2], P[i * 2 + 3] - P[i * 2 + 1])
+    const s0 = (deg.get(L.a) || 0) >= 3 ? 12 : 3, s1 = total - ((deg.get(L.b) || 0) >= 3 ? 12 : 3)
+    let run = 0, s = s0
+    for (let i = 0; i < P.length / 2 - 1; i++) {
+      const x0 = P[i * 2], y0 = P[i * 2 + 1], len = Math.hypot(P[i * 2 + 2] - x0, P[i * 2 + 3] - y0)
+      if (len < 1e-3) continue
+      const ex = (P[i * 2 + 2] - x0) / len, ey = (P[i * 2 + 3] - y0) / len
+      for (; s < Math.min(run + len, s1); s += 6.5) {
+        const f = s - run
+        for (const side of [-1, 1]) { // right of a → b (side -1) faces a → b; the left side the other way, unless one-way
+          const x = x0 + ex * f - ey * off * side, y = y0 + ey * f + ex * off * side
+          if (!inside(x, y) || rnd01(x, y) > 0.5 || nearStop(x, y) || built(x, y)) continue
+          const d = side < 0 || L.oneway ? 1 : -1
+          car(kerb, x, y, ex * d, ey * d)
+        }
+      }
+      run += len
+    }
+  }
+  return { lot: lot.length ? new Float32Array(lot) : null, kerb: kerb.length ? new Float32Array(kerb) : null }
+}
+
+// ---------------------------------------------------------------- lights at night (lights.js draws them)
+// Street lamps: OpenStreetMap's where mapped, else along the streets, the sides taking turns, on the sidewalk 1.2 m
+// past the kerb: brighter and closer together on the bigger streets (not where a mapped lamp stands within 14 m, nor
+// out where no building stands within ~50 m: the farms and the parks stay dark; motorways and arterials are lit); and
+// the storefronts' spill.
+// -> { pos: tile-local x, height, z, brightness per light, lamps first; lamps: how many }
+const ARM = 1.8 // a single-arm street light's reach over the road (its pool and head are there)
+const LAMP = [[1, 18], [1, 18], [1, 18], [0.85, 20], [0.85, 22], [0.75, 34], null, [0.75, 34], [0.7, 24]] // brightness, step by kind (to pedestrian)
+function lights(t, terr, lines, ps, b) {
+  const size = t.size, G = 25, gn = Math.ceil(size / G), built = new Uint8Array(gn * gn), mapped = new Map()
+  const cell = (x, y) => Math.floor(y / G) * gn + Math.floor(x / G)
+  const fpp = b.footprints?.pts
+  if (fpp) for (let i = 0; i < fpp.length; i += 2) { const x = fpp[i] - t.ox, y = fpp[i + 1] - t.oy; if (x >= 0 && y >= 0 && x < size && y < size) built[cell(x, y)] = 1 }
+  const near = (x, y) => { const i = Math.floor(x / G), j = Math.floor(y / G); for (let dj = -2; dj <= 2; dj++) for (let di = -2; di <= 2; di++) { const a = i + di, c = j + dj; if (a >= 0 && c >= 0 && a < gn && c < gn && built[c * gn + a]) return true } return false }
+  const key = (x, y) => Math.floor(x / 14) * 100003 + Math.floor(y / 14)
+  const pos = []
+  const poles = [] // tile-local x, ground, z, the arm's heading (about +y from +x; NaN: a post-top lamp)
+  for (const p of ps) if (p.kind === 3) { const x = p.x - t.ox, y = p.y - t.oy; if (x < 0 || y < 0 || x >= size || y >= size) continue; const g = heightAt(terr, x, y); pos.push(x, g, -y, 0.8); poles.push(x, g, -y, NaN); mapped.set(key(x, y), 1) }
+  const taken = (x, y) => { for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) if (mapped.has(key(x + di * 14, y + dj * 14))) return true; return false }
+  for (const L of lines) {
+    const lit = LAMP[L.kind]
+    if (!lit || L.layer < 0 || L.crossing) continue
+    const P = L.pts, off = L.w / 2 + 1.2, big = L.kind <= K.primary, [bright, step] = lit
+    let s = L.a % step, k = 0, run = 0 // the same lamps whichever tile draws the street
+    for (let i = 0; i < P.length / 2 - 1; i++) {
+      const x0 = P[i * 2], y0 = P[i * 2 + 1], x1 = P[i * 2 + 2], y1 = P[i * 2 + 3], len = Math.hypot(x1 - x0, y1 - y0)
+      if (len < 1e-3) continue
+      const ex = (x1 - x0) / len, ey = (y1 - y0) / len
+      for (; s < run + len; s += step, k++) {
+        const f = (s - run) / len, side = k & 1 ? 1 : -1
+        const x = x0 + (x1 - x0) * f - ey * off * side, y = y0 + (y1 - y0) * f + ex * off * side
+        if (x < 0 || y < 0 || x >= size || y >= size || taken(x, y) || (!big && !near(x, y))) continue
+        const z = L.z ? L.z[i] + (L.z[i + 1] - L.z[i]) * f : heightAt(terr, x, y), ax = ey * side, ay = -ex * side // the arm reaches over the kerb lane
+        pos.push(x + ax * ARM, z, -(y + ay * ARM), bright); poles.push(x, z, -y, Math.atan2(ay, ax))
+      }
+      run += len
+    }
+  }
+  const lamps = pos.length / 4
+  const sp = b.spill || []
+  for (let i = 0; i < sp.length; i += 2) { const x = sp[i], y = sp[i + 1]; if (x >= 0 && y >= 0 && x < size && y < size) pos.push(x, heightAt(terr, x, y), -y, 1) }
+  if (!pos.length) return null
+  return { pos: new Float32Array(pos), lamps, poles: poles.length ? new Float32Array(poles) : null }
+}
+// the parked cars in the lots are footprints too (plugins bump into them; the kerbs' are left out, traffic passes them)
+function withCars(fp, cars, t) {
+  if (!cars) return fp
+  const pts = fp ? [...fp.pts] : [], start = fp ? [...fp.start] : [0]
+  for (let i = 0; i < cars.length; i += 5) {
+    const x = cars[i] + t.ox, y = -cars[i + 2] + t.oy, fx = Math.cos(cars[i + 3]), fy = Math.sin(cars[i + 3]), l = CAR_L / 2, w = CAR_W / 2
+    for (const [p, q] of [[1, 1], [-1, 1], [-1, -1], [1, -1]]) pts.push(x + fx * p * l + fy * q * w, y + fy * p * l - fx * q * w)
+    start.push(pts.length)
+  }
+  return { pts: new Float32Array(pts), start: new Uint32Array(start) }
 }
 const ROOFW = (seed) => [0, 0, 999, seed]
+// What stands on a flat roof, seen from the map's 30° (detail tiles, close zooms): small HVAC units the LiDAR's 2 m grid
+// misses, as many as the roof is big (fewer on a planted roof or beside the plant the LiDAR saw); a mechanical
+// penthouse on towers no LiDAR measured; rows of skylights on big commercial and industrial roofs; and from the
+// bake (tools/tiles.py bits): a pool on its deck (8) and rows of solar panels (16). All in the roof's own frame,
+// on the roof, not on each other; deterministic per building (gr).
+function rooftop(B, pts, y, gr, o) {
+  const { cx, cy, a, hl, hw } = obb(pts), ca = Math.cos(a), sa = Math.sin(a), ar = Math.abs(area(pts)), taken = []
+  const at = (u, v) => [cx + ca * u - sa * v, cy + sa * u + ca * v]
+  // a box su x sv at (u, v) in the roof's frame, if it is on the roof and clear of the others (pad m around them)
+  const put = (u, v, su, sv, uh, col, pad = 0.6, top) => {
+    if (taken.some((r) => Math.abs(r[0] - u) < (r[2] + su) / 2 + pad && Math.abs(r[1] - v) < (r[3] + sv) / 2 + pad)) return false
+    for (const [du, dv] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) { const [x, yy] = at(u + du * (su / 2 + 0.4), v + dv * (sv / 2 + 0.4)); if (!inPoly(x, yy, pts)) return false }
+    const [x, yN] = at(u, v)
+    box3(B, x, yN, y, su, sv, uh, a, col, top)
+    taken.push([u, v, su, sv])
+    return true
+  }
+  if (o.bits & 8 && hl > 6 && hw > 4) { // a pool on its deck
+    const L = Math.min(hl * 0.6, 12), Wd = Math.min(hw * 0.45, 5), u = (gr() - 0.5) * (hl - L) , v = (gr() - 0.5) * (hw - Wd)
+    if (put(u, v, L + 2.4, Wd + 2.4, 0.12, [0.72, 0.7, 0.66], 0.6)) box3(B, ...at(u, v), y + 0.12, L, Wd, 0.06, a, [0.3, 0.6, 0.7], [13, 0, 999, 0.5])
+  }
+  if (o.bits & 16) for (let v = -hw + 1.6; v < hw - 1.6; v += 2.3) { // solar panels in rows
+    const L = 2 * hl - 3.2, top = (s, t) => [14, s, t, 0.5]
+    if (L > 3) put(0, v, L, 1.2, 0.35, [0.1, 0.12, 0.2], 0.4, top)
+  }
+  if (o.tower && !o.plant && ar > 250) { const su = Math.min(hl, 14), sv = Math.min(hw, 9); put((gr() - 0.5) * (hl - su), (gr() - 0.5) * (hw - sv), su, sv, 3.2, shade(o.wall, 0.9), 0.8) }
+  if (o.shed && !o.green && ar > 400) for (let u = -hl + 4; u < hl - 4; u += 6) for (let v = -hw + 4; v < hw - 4; v += 8) put(u, v, 1.6, 3.2, 0.4, [0.5, 0.62, 0.7], 0.3)
+  if (ar > 900 && !o.green) put((gr() - 0.5) * hl, (gr() - 0.5) * hw, 4 + gr() * 2, 2.4 + gr(), 1.7, [0.6, 0.62, 0.64], 1) // an air handler
+  let n = Math.min(10, Math.max(1, Math.round(ar / 140)))
+  if (o.green) n = Math.ceil(n / 3); else if (o.plant?.length) n = Math.ceil(n / 2)
+  for (let tries = 0, got = 0; tries < n * 5 && got < n; tries++) { // in twos and threes, side by side
+    const su = 1.4 + gr() * 1.8, sv = 1.1 + gr() * 1.2, uh = 0.8 + gr() * 0.8, g = gr() < 0.3 ? 0.42 : 0.62 + gr() * 0.12, col = [g, g * 1.01, g * 1.03]
+    const u = (gr() * 2 - 1) * hl, v = (gr() * 2 - 1) * hw, k = gr() < 0.5 ? 1 : gr() < 0.5 ? 2 : 3
+    if (!put(u, v, su, sv, uh, col)) continue
+    for (let i = 1; i < k; i++) put(u + i * (su + 0.5), v, su, sv, uh, col, 0.2)
+    got++
+  }
+}
 // per point of a centre line (x, north pairs): the unit normal to its left, stretched to mitre the bends, and the
 // unit tangent
 function sides(P) {
@@ -873,12 +1112,13 @@ function roof(W, pts, y1, yr, shape, bits, rc, wall, seed) {
     else tri(W, at(s * L, Wd, y1), at(s * L, -Wd, y1), at(s * r, 0, yr), rc, [end[0], 1, end[2]], pw)
   }
 }
-// a box standing on a roof at y, centred on (x, y north), su along angle a, sv across it, uh tall
-function box3(B, x, yN, y, su, sv, uh, a, col) {
+// a box standing on a roof at y, centred on (x, y north), su along angle a, sv across it, uh tall; topW: the top's aWin,
+// one for all corners or a function (along, across) of each corner
+function box3(B, x, yN, y, su, sv, uh, a, col, topW) {
   const ca = Math.cos(a), sa = Math.sin(a), pw = ROOFW(0.5)
   const c = (s, t, h) => [x + ca * s - sa * t, y + h, -(yN + sa * s + ca * t)]
-  const u = su / 2, v = sv / 2, top = shade(col, 1.08)
-  quad(B, c(-u, -v, uh), c(u, -v, uh), c(u, v, uh), c(-u, v, uh), top, [0, 1, 0], pw)
+  const u = su / 2, v = sv / 2, top = shade(col, 1.08), tw = typeof topW === 'function' ? topW : () => topW || pw
+  quad(B, c(-u, -v, uh), c(u, -v, uh), c(u, v, uh), c(-u, v, uh), top, [0, 1, 0], tw(-u, -v), tw(u, -v), tw(u, v), tw(-u, v))
   quad(B, c(-u, -v, 0), c(u, -v, 0), c(u, -v, uh), c(-u, -v, uh), col, [sa, 0, ca], pw)
   quad(B, c(u, v, 0), c(-u, v, 0), c(-u, v, uh), c(u, v, uh), col, [-sa, 0, -ca], pw)
   quad(B, c(u, -v, 0), c(u, v, 0), c(u, v, uh), c(u, -v, uh), shade(col, 0.92), [ca, 0, -sa], pw)

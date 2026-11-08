@@ -2,7 +2,8 @@
 // replace a medium tile once every detail tile of it that is on screen has arrived (so there are never holes).
 // Decoding and geometry building happen in workers; this file only makes three.js objects from their buffers.
 import * as THREE from 'three'
-import { FAMILY } from './materials.js'
+import { FAMILY, night } from './materials.js'
+import { kit, kitMaterial } from './kit.js'
 import { FORMS, ASPECT } from './treeforms.js'
 import { sampleGrid } from './util.js'
 
@@ -53,6 +54,28 @@ export function holedTrees(m) {
   return h
 }
 const HULLS = [0xf2f1ec, 0x2c3c58, 0x30483a, 0x3c6a96] // white, navy, dark green, blue
+// parked cars: mostly white, silver, grey and black, as on the street
+const PAINT = [0xe8e8e6, 0xe8e8e6, 0xb4b8bc, 0xb4b8bc, 0x6e7378, 0x26282b, 0x26282b, 0x2a3a5a, 0x9a2a26, 0x3a5a8a, 0xb8ad94, 0x3c5a48]
+// a street light: a pole 6.6 m tall, an arm along +x and its head
+function poleGeo() {
+  const k = kit(THREE)
+  k.c(0x4a4e54).cyl(0.1, 0.07, 6.6, 6, 1)
+  k.c(0x4a4e54).box(0, 1.9, 6.45, 6.55, -0.05, 0.05)
+  k.c(0xfff0d0).box(1.5, 2.0, 6.3, 6.45, -0.14, 0.14)
+  const g = k.geometry(true)
+  g.userData.shared = true
+  return g
+}
+// a parked car, forward +x, on the ground: a body, a glass cabin under a roof in the paint (the instance colour)
+function carGeo() {
+  const k = kit(THREE)
+  k.c(null).box(-2.25, 2.25, 0.22, 0.85, -0.9, 0.9)
+  k.c(0x2b3a4a).box(-1.25, 1.05, 0.85, 1.32, -0.84, 0.84, 0.84, 0.86)
+  k.c(null).box(-1.05, 0.8, 1.32, 1.4, -0.7, 0.7)
+  const g = k.geometry(true)
+  g.userData.shared = true
+  return g
+}
 
 // a boat 1 long along +x (bow east), its waterline at 0: a pointed hull, a deck and cabin, a mast (sailboats)
 function boatGeos() {
@@ -67,8 +90,9 @@ function boatGeos() {
 }
 
 export class Tiles {
-  constructor({ scene, treeScene, mats, farMats = mats, base = 'tiles/', onLoad, onUnload, onChange }) {
-    Object.assign(this, { scene, treeScene, mats, farMats, onLoad, onUnload, onChange })
+  // lights: core/lights.js (night lights; optional)
+  constructor({ scene, treeScene, mats, farMats = mats, lights, base = 'tiles/', onLoad, onUnload, onChange }) {
+    Object.assign(this, { scene, treeScene, mats, farMats, lights, onLoad, onUnload, onChange })
     this.base = new URL(base, location.href).href // absolute: workers resolve relative URLs against their own path
     this.tiles = new Map() // "level/i_j" -> tile
     this.byIJ = new Map() // numeric ij(level, i, j) -> tile, for lookups many times a frame (no key strings)
@@ -80,10 +104,11 @@ export class Tiles {
     let seq = 0
     this.request = (msg) => new Promise((ok) => { const id = ++seq; this.pending.set(id, ok); this.workers[id % WORKERS].postMessage({ id, ...msg }) })
     for (const w of this.workers) w.onmessage = ({ data }) => { const ok = this.pending.get(data.id); this.pending.delete(data.id); ok?.(data) }
-    this.unitGeo = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0)
     this.unitMat = new THREE.MeshLambertMaterial()
     this.quad = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0)
     this.boatGeo = boatGeos()
+    this.carGeo = carGeo(); this.carMat = kitMaterial(THREE, night); this.poleGeo = poleGeo()
+    this.cars = 2 // parked cars shown: 0 none, 1 in the lots (not the kerbs'), 2 all (setDetail)
     this.balconies = true; this.fine = true
     this.made = [] // worker results waiting to become three.js objects, one tile per frame (pump)
     this.warming = [] // tiles whose buffers are being uploaded to the GPU, a few MB per frame, before they show
@@ -270,7 +295,7 @@ export class Tiles {
   show(t, on) {
     if (t.visible === on) return
     t.visible = on
-    if (t.group && t.state !== 'warming') { t.group.visible = on; t.trees && (t.trees.visible = on) } // else once uploaded
+    if (t.group && t.state !== 'warming') this.showAll(t, on) // else once uploaded
     this.onChange?.()
   }
 
@@ -308,7 +333,7 @@ export class Tiles {
         this.warming.splice(this.warming.indexOf(t), 1)
         if (!alive(t)) continue
         t.state = 'ready'; t.warm = null
-        t.group.visible = t.visible; if (t.trees) t.trees.visible = t.visible
+        this.showAll(t, t.visible)
         this.onLoad?.(t)
         this.onChange?.(t.visible) // a tile that shows changes the picture (and the shadows); a hidden one only the plan
         if (!this.rush) return
@@ -318,9 +343,9 @@ export class Tiles {
       if (n.state !== 'loading' || !alive(n)) continue
       this.make(n, n.res); n.res = null
       n.state = 'warming'; n.warm = []
-      n.group.visible = false; if (n.trees) n.trees.visible = false
+      this.showAll(n, false)
       n.group.traverse((o) => { if (o.isMesh) n.warm.push(o) })
-      if (n.trees) n.warm.push(n.trees)
+      for (const o of n.side) n.warm.push(o)
       this.warming.push(n)
       if (!this.rush) return
     } while (this.rush || spent < 3e6)
@@ -398,16 +423,18 @@ export class Tiles {
       }
     }
     if (res.balconies) { t.balcony = add(bgeo(res.balconies), mt.building, { castShadow: true, receiveShadow: true }, res.balconies.box); t.balcony.visible = this.balconies }
-    if (res.units) {
-      const n = res.units.length / 7, m = new THREE.InstancedMesh(this.unitGeo, this.unitMat, n), M = new THREE.Matrix4(), c = new THREE.Color()
-      for (let i = 0; i < n; i++) {
-        const u = res.units.subarray(i * 7, i * 7 + 7)
-        m.setMatrixAt(i, M.makeScale(u[3], u[4], u[5]).setPosition(u[0], u[1], u[2])); m.setColorAt(i, c.setRGB(u[6] * 0.92, u[6] * 0.95, u[6]))
-      }
-      m.castShadow = true; m.receiveShadow = true
-      m.computeBoundingSphere()
-      t.units = m; g.add(m); m.visible = this.balconies
+    if (res.ao) { // after the paint
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(res.ao.position, 3)); geo.setAttribute('t', new THREE.BufferAttribute(res.ao.t, 1)); geo.setIndex(new THREE.BufferAttribute(res.ao.index, 1))
+      add(geo, this.mats.ao, { renderOrder: 2 }, res.ao.box)
     }
+    if (res.lights?.poles) { // the street lights' poles, up close
+      const P = res.lights.poles, n = P.length / 4, m = new THREE.InstancedMesh(this.poleGeo, this.carMat, n), M = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), v = new THREE.Vector3(), sc = new THREE.Vector3()
+      for (let i = 0; i < n; i++) { const a = P[i * 4 + 3]; m.setMatrixAt(i, M.compose(v.set(P[i * 4], P[i * 4 + 1], P[i * 4 + 2]), q.setFromAxisAngle(up, Number.isNaN(a) ? 0 : a), sc.set(1, 1, 1))) }
+      m.castShadow = true; m.receiveShadow = true; m.matrixAutoUpdate = false; m.computeBoundingSphere()
+      t.poles = m; g.add(m); m.visible = this.balconies
+    }
+    if (res.parked) for (const k of ['lot', 'kerb']) if (res.parked[k]) { t[k] = this.parkedCars(res.parked[k]); g.add(t[k]); t[k].visible = this.cars > (k === 'lot' ? 0 : 1) }
     if (res.boats) { // berthed boats: hull (instance colour), deck and cabin, a mast on the sailboats
       const B = res.boats, n = B.length / 6, M = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), sc = new THREE.Vector3(), c = new THREE.Color(), up = new THREE.Vector3(0, 1, 0)
       const sails = []
@@ -423,7 +450,26 @@ export class Tiles {
     }
     this.scene.add(g)
     t.group = g
-    if (res.trees) t.trees = this.makeTrees(t, res.trees, mt.tree)
+    t.side = [] // drawn elsewhere than the tile's group (trees and lamp heads after the ink pass, lights.js), shown with it
+    if (res.trees) t.side.push(t.trees = this.makeTrees(t, res.trees, mt.tree))
+    if (res.lights && this.lights) {
+      const { pool, head } = this.lights.meshes(t, res.lights, g.position)
+      this.lights.scene.add(pool); t.side.push(pool)
+      if (head) { this.treeScene.add(head); t.side.push(head) }
+    }
+  }
+
+  showAll(t, on) { t.group.visible = on; for (const o of t.side) o.visible = on }
+
+  parkedCars(A) { // 5 floats a car (tile-worker.js parked)
+    const n = A.length / 5, m = new THREE.InstancedMesh(this.carGeo, this.carMat, n), M = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), one = new THREE.Vector3(1, 1, 1), up = new THREE.Vector3(0, 1, 0), c = new THREE.Color()
+    for (let i = 0; i < n; i++) {
+      m.setMatrixAt(i, M.compose(p.set(A[i * 5], A[i * 5 + 1], A[i * 5 + 2]), q.setFromAxisAngle(up, A[i * 5 + 3]), one))
+      m.setColorAt(i, c.setHex(PAINT[Math.floor(A[i * 5 + 4] * PAINT.length)]))
+    }
+    m.castShadow = true; m.receiveShadow = true; m.matrixAutoUpdate = false
+    m.computeBoundingSphere()
+    return m
   }
 
   makeTrees(t, { pos, info }, mat) {
@@ -493,12 +539,15 @@ export class Tiles {
   forEach(fn) { for (const t of this.tiles.values()) if (t.state === 'ready') fn(t) }
 
   // what close views get: balconies and rooftop plant (`balconies`), the ground to 5 cm instead of 25 (`fine`)
-  setDetail(balconies, fine) {
-    if (balconies === this.balconies && fine === this.fine) return
-    this.balconies = balconies; this.fine = fine
+  // and the parked cars: 0 none, 1 in the lots (a street-level view: traffic drives where the kerbs' stand), 2 all
+  setDetail(balconies, fine, cars = 2) {
+    if (balconies === this.balconies && fine === this.fine && cars === this.cars) return
+    this.balconies = balconies; this.fine = fine; this.cars = cars
     for (const t of this.tiles.values()) {
       if (t.balcony) t.balcony.visible = balconies
-      if (t.units) t.units.visible = balconies
+      if (t.poles) t.poles.visible = balconies
+      if (t.lot) t.lot.visible = cars > 0
+      if (t.kerb) t.kerb.visible = cars > 1
       if (t.coarse) { t.ground.visible = fine; t.coarse.visible = !fine }
     }
   }
@@ -515,10 +564,10 @@ export class Tiles {
 
   drop(t) {
     this.onUnload?.(t)
-    for (const o of [t.group, t.trees]) {
+    for (const o of [t.group, ...(t.side || [])]) {
       if (!o) continue
       o.removeFromParent()
-      o.traverse((m) => { if (m.geometry && m.geometry !== this.unitGeo && m.geometry !== this.quad && !m.geometry.userData.shared) m.geometry.dispose() })
+      o.traverse((m) => { if (m.geometry && m.geometry !== this.quad && !m.geometry.userData.shared) m.geometry.dispose() })
     }
     this.tiles.delete(this.key(t.level, t.i, t.j))
     this.byIJ.delete(ij(t.level, t.i, t.j))

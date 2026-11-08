@@ -2,6 +2,7 @@
 // work) with their detail drawn procedurally in the fragment shader: crisp at any zoom, nothing to download.
 import * as THREE from 'three'
 import { NOISE_GLSL } from './util.js'
+import { LOOK_GLSL, lookUniforms } from './look.js'
 import { treeForm, FORMS, ASPECT } from './treeforms.js'
 
 const COMMON = `
@@ -46,6 +47,24 @@ export const OCCLUDE = `uniform vec4 occluder;
 export const DISSOLVE = `void dissolve(vec3 p, float k) { if (k > 0.0 && fract(sin(dot(mod(floor(p * 1.7), 289.0), vec3(12.99, 78.23, 37.72))) * 43758.55) < k) discard; }`
 const surfUniforms = (s) => { s.uniforms.wet = surface.wet; s.uniforms.snow = surface.snow; s.uniforms.skyCol = surface.sky }
 
+export const night = { value: 0 } // 0 day .. 1 night: lights a share of the windows, the street lamps (city.light.night)
+export const late = { value: 0 } // 0 evening .. 1 the small hours: fewer windows lit (city.light.late)
+// Light on the ground at night: street lamps and the storefronts' spill, drawn from above into one texture over
+// what is on screen (lights.js; red: lamps, green: shops). box: its west edge, south edge (three.js z), 1 / its size,
+// and 1 while it holds anything. The overview tiles carry no lamps: their streets glow faintly instead (groundMaterial(true))
+export const streetLight = { map: { value: null }, box: { value: new THREE.Vector4() } }
+const LIGHT = `uniform sampler2D tLight; uniform vec4 lightBox;
+  // the light falling on the ground at p (times the surface's own colour, it is what the surface gives off)
+  vec3 poolLight(vec3 p) {
+    vec2 uv = vec2(p.x - lightBox.x, lightBox.y - p.z) * lightBox.z;
+    vec2 L = lightBox.w > 0.5 && uv == clamp(uv, 0.0, 1.0) ? texture2D(tLight, uv).rg : vec2(0.0);
+    L = 1.0 - exp(-1.6 * L); // overlapping pools saturate instead of adding up to white
+    return (vec3(1.0, 0.62, 0.3) * L.x * 2.3 + vec3(1.0, 0.56, 0.26) * L.y * 0.6) * night;
+  }
+  // the share of a pixel's colour that is this light (the post pass leaves it out of the night grade)
+  float lightShare(vec3 lit, vec3 outgoing) { return clamp(dot(lit, vec3(0.3, 0.59, 0.11)) / max(dot(outgoing, vec3(0.3, 0.59, 0.11)), 1e-4), 0.0, 1.0); }`
+const lightUniforms = (s) => { s.uniforms.night = night; s.uniforms.tLight = streetLight.map; s.uniforms.lightBox = streetLight.box }
+
 // ---------------------------------------------------------------- ground
 // class order matches tools/tiles.py GROUND
 const GROUND_COLOURS = [ // stylized but true: greens by land cover (not neon), teal water, grey asphalt, light concrete walks
@@ -55,16 +74,18 @@ const GROUND_COLOURS = [ // stylized but true: greens by land cover (not neon), 
   // 23 trail, walk, cycle, ballast, sidewalk, blvd, road, arterial (order = tools/tiles.py GROUND)
   [182, 164, 130], [196, 192, 184], [98, 102, 108], [132, 120, 108], [190, 188, 180], [106, 144, 76], [104, 107, 113], [96, 99, 106],
 ]
-export function groundMaterial() {
+// far: the overview tiles' (no lamps: a faint glow along the streets at night)
+export function groundMaterial(far = false) {
   const m = new THREE.MeshLambertMaterial()
+  if (far) m.defines = { FAR: '' }
   m.onBeforeCompile = (s) => {
-    surfUniforms(s)
+    surfUniforms(s); lightUniforms(s)
     s.uniforms.seaHole = surface.seaHole
     s.vertexShader = s.vertexShader
       .replace('#include <common>', '#include <common>\nattribute float cls;\nflat varying float vCls;\nvarying vec3 vW;\nvarying float vSlope;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCls = cls;\nvW = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvSlope = 1.0 - objectNormal.y;')
     s.fragmentShader = s.fragmentShader
-      .replace('#include <common>', `#include <common>\nflat varying float vCls;\nvarying vec3 vW;\nvarying float vSlope;\nuniform vec4 seaHole;\n${COMMON}\n${SURF}
+      .replace('#include <common>', `#include <common>\nflat varying float vCls;\nvarying vec3 vW;\nvarying float vSlope;\nuniform vec4 seaHole;\nuniform float night;\n${COMMON}\n${SURF}\n${LIGHT}
         const vec3 CL[${GROUND_COLOURS.length}] = vec3[](${GROUND_COLOURS.map((c) => `vec3(${c.map((v) => (v / 255).toFixed(4)).join(',')})`).join(',')});`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         int c = int(vCls + 0.5);
@@ -115,25 +136,37 @@ export function groundMaterial() {
           float cover = smoothstep(0.25, 0.7, snow - 0.9 * sl + 0.35 * (n - 0.5)) * (c == 29 || c == 30 ? 0.45 : 1.0);
           col = mix(col, vec3(0.86, 0.89, 0.93) * (0.94 + 0.08 * fine), cover);
         }
-        diffuseColor.rgb = col;`)
-      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += skyCol * sheen;')
+        diffuseColor.rgb = col;
+        // street lamps and shop windows at night (lights.js); on the overview tiles a faint glow along the streets
+        vec3 pool = vec3(0.0);
+        if (night > 0.01 && c != 19) {
+          pool = poolLight(vW);
+          #ifdef FAR
+          if (c == 29 || c == 30 || c == 27) pool += vec3(1.0, 0.72, 0.42) * 0.22 * night;
+          #endif
+        }
+        vec3 poolE = (min(mix(col, vec3(dot(col, vec3(0.3, 0.59, 0.11))), 0.6), vec3(0.32)) + 0.05) * pool + (paved ? pool * wet * 0.1 : vec3(0.0)); // greys the grass, lights dark asphalt; wet paving shines`)
+      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += skyCol * sheen + poolE;')
+      .replace('#include <opaque_fragment>', '#include <opaque_fragment>\ngl_FragColor.a = 1.0 - lightShare(poolE, gl_FragColor.rgb);')
   }
-  m.customProgramCacheKey = () => 'ground5'
+  m.customProgramCacheKey = () => (far ? 'ground6f' : 'ground6')
   return m
 }
 
 // ---------------------------------------------------------------- roads
 // decal = true: only the paint (lines, crosswalks, rails), blended onto the ground; else full bridge surfaces
 export function roadMaterial(decal = false) {
-  const m = new THREE.MeshLambertMaterial(decal ? { transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 } : {})
+  // a decal blends its colour and leaves the alpha as the ground had it (the share of lamp light, see LIGHT)
+  const m = new THREE.MeshLambertMaterial(decal ? { transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4,
+    blending: THREE.CustomBlending, blendSrc: THREE.SrcAlphaFactor, blendDst: THREE.OneMinusSrcAlphaFactor, blendSrcAlpha: THREE.ZeroFactor, blendDstAlpha: THREE.OneFactor } : {})
   if (decal) m.defines = { DECAL: '' }
   m.onBeforeCompile = (s) => {
-    surfUniforms(s)
+    surfUniforms(s); lightUniforms(s)
     s.vertexShader = s.vertexShader
       .replace('#include <common>', '#include <common>\nattribute vec4 aRoad;\nattribute vec4 aRoad2;\nvarying vec4 vR;\nvarying vec4 vR2;\nvarying vec3 vW;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvR = aRoad; vR2 = aRoad2;\nvW = (modelMatrix * vec4(transformed, 1.0)).xyz;')
     s.fragmentShader = s.fragmentShader
-      .replace('#include <common>', `#include <common>\nvarying vec4 vR;\nvarying vec4 vR2;\nvarying vec3 vW;\n${COMMON}\n${SURF}`)
+      .replace('#include <common>', `#include <common>\nvarying vec4 vR;\nvarying vec4 vR2;\nvarying vec3 vW;\nuniform float night;\n${COMMON}\n${SURF}\n${LIGHT}`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         float s = vR.x, t = vR.y, w = vR.z; int kind = int(vR.w + 0.5);
         float at = abs(t), fs = max(fwidth(s), 1e-3), ft = max(fwidth(t), 1e-3);
@@ -222,26 +255,59 @@ export function roadMaterial(decal = false) {
           if (dPaint < 0.02) discard;
           diffuseColor = vec4(dCol, dPaint);
           sheen *= 0.5;
+        #endif
+        vec3 pool = night > 0.01 ? poolLight(vW) : vec3(0.0), poolE = (diffuseColor.rgb + 0.04) * pool + pool * wet * 0.1;`)
+      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += skyCol * sheen + poolE;')
+      .replace('#include <opaque_fragment>', `#include <opaque_fragment>
+        #ifndef DECAL
+        gl_FragColor.a = 1.0 - lightShare(poolE, gl_FragColor.rgb);
         #endif`)
-      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += skyCol * sheen;')
   }
   m.customProgramCacheKey = () => (decal ? 'road4d' : 'road4')
   return m
 }
 
+// ---------------------------------------------------------------- the shade where walls meet the ground
+// (tile-worker.js skirt): multiplies what is under it, darkest at the wall; gone in the fog
+export function aoMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: { ...THREE.UniformsLib.fog }, fog: true,
+    vertexShader: `attribute float t; varying float vT;
+      #include <fog_pars_vertex>
+      void main() {
+        vT = t; vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mv;
+        #ifdef USE_FOG
+        vFogDepth = -mv.z;
+        #endif
+      }`,
+    fragmentShader: `varying float vT;
+      #include <fog_pars_fragment>
+      void main() {
+        float k = 1.0 - 0.5 * (1.0 - vT) * (1.0 - vT);
+        #if defined(USE_FOG) && !defined(FOG_EXP2)
+        k = mix(k, 1.0, smoothstep(fogNear, fogFar, vFogDepth));
+        #endif
+        gl_FragColor = vec4(vec3(k), 1.0);
+      }`,
+    transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4,
+    blending: THREE.CustomBlending, blendSrc: THREE.ZeroFactor, blendDst: THREE.SrcColorFactor, blendSrcAlpha: THREE.ZeroFactor, blendDstAlpha: THREE.OneFactor,
+  })
+}
+
 // ---------------------------------------------------------------- buildings (facade styles; see tile-worker.js)
-export const night = { value: 0 } // 0 day .. 1 night: lights a share of the windows (city.light.night)
 // glass balcony railings, one per building by its seed (the hex as the linear colour, as vertex colours are)
 const RAIL_GLSL = [0xb8dce0, 0xc8e4e8, 0xa8ccd8, 0xd8e8ea, 0x98c0cc].map((h, i, a) => {
   const v = `vec3(${[h >> 16, (h >> 8) & 255, h & 255].map((c) => (c / 255).toFixed(4)).join(', ')})`
   return i < a.length - 1 ? `seed < ${((i + 1) / a.length).toFixed(2)} ? ${v} : ` : v
 }).join('')
-export function buildingMaterial() {
+// far: the overview tiles' (seen from far off: the windows as floor bands only)
+export function buildingMaterial(far = false) {
   const m = new THREE.MeshLambertMaterial({ vertexColors: true })
+  if (far) m.defines = { FAR: '' }
   m.onBeforeCompile = (s) => {
-    s.uniforms.night = night
     s.uniforms.occluder = occluder
-    surfUniforms(s)
+    s.uniforms.late = late
+    surfUniforms(s); lightUniforms(s)
     s.vertexShader = s.vertexShader
       .replace('#include <common>', '#include <common>\nattribute vec4 aWin;\nvarying vec4 vWin;\nvarying float vUp;\nvarying vec3 vWp, vWn;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWin = aWin;\nvWn = normalize(mat3(modelMatrix) * objectNormal);\nvUp = vWn.y;\nvWp = (modelMatrix * vec4(transformed, 1.0)).xyz;')
@@ -250,34 +316,43 @@ export function buildingMaterial() {
         varying vec4 vWin;
         varying float vUp;
         varying vec3 vWp, vWn;
+        uniform float night, late;
         ${COMMON}
         ${SURF}
+        ${LIGHT}
         ${OCCLUDE}
         ${DISSOLVE}
         float thin(float width, float fw) { return smoothstep(0.6, 1.3, width / fw); }
         float box(vec2 f, vec2 lo, vec2 hi, vec2 fw) { vec2 a = smoothstep(lo - fw, lo + fw, f) * (1.0 - smoothstep(hi - fw, hi + fw, f)); return a.x * a.y; }
-        // lit windows at night over a pixel's footprint g +- fw / 2 (in window cells), box-filtered: the lit window area
-        // inside it (up to 2 x 2 cells), so a pick under a pixel fades in and out as the camera moves instead of
-        // flipping. s > 1: blocks of s x s windows lit or dark together, drawn as the mean window coverage, for cells
-        // under a pixel (each its own pick there was noise that crawled and changed with every render scale)
-        vec3 lights(vec2 g, vec2 fw, float s, float share, float seed) {
-          vec2 q = g / s, h = min(fw / s * 1.25, vec2(1.0)) * 0.5, a = q - h, b = q + h, k = vec2(s - 1.0), n = floor(b) - floor(a);
-          vec2 lo = s > 1.0 ? vec2(0.0) : vec2(0.2, 0.3), hi = s > 1.0 ? vec2(1.0) : vec2(0.8, 0.85);
+        // Lit windows over a pixel's footprint g +- fw / 2 (in window cells), box-filtered (as #53): the lit pane area
+        // inside it (up to 2 x 2 cells; lo, hi: the pane in its cell), so a pick under a pixel fades in and out as the
+        // camera moves instead of flipping. c(cell) = the window's colour if it is lit, else black
+        vec3 windowCol(vec2 c, float share, float seed, float use, bool shop) {
+          if (hash(c + seed * 57.0) >= share) return vec3(0.0);
+          float hc = hash(c + 11.0);
+          vec3 warm = mix(vec3(1.0, 0.6, 0.26), vec3(1.0, 0.74, 0.42), hash(c + 5.0)), cool = vec3(0.62, 0.68, 0.76);
+          return use > 1.5 && !shop ? (hc < 0.5 ? cool : warm) : hc < 0.05 && !shop ? vec3(0.42, 0.56, 1.0) : hc < 0.14 ? cool : warm;
+        }
+        vec3 panes(vec2 g, vec2 fw, vec2 lo, vec2 hi, float share, float seed, float use, bool shop) {
+          vec2 h = min(fw * 1.25, vec2(1.0)) * 0.5, a = g - h, b = g + h, n = floor(b) - floor(a);
           vec3 lit = vec3(0.0);
           for (int i = 0; i < 2; i++) for (int j = 0; j < 2; j++) {
             if (float(i) > n.x || float(j) > n.y) continue; // a cell the footprint doesn't reach
             vec2 c = floor(a) + vec2(i, j), o = max(min(b, c + hi) - max(a, c + lo), 0.0);
-            lit += step(hash(c + seed * 57.0 + k * 13.0), share) * mix(vec3(1.0, 0.72, 0.38), vec3(0.85, 0.9, 1.0), step(0.8, hash(c + 11.0 + k * 7.0))) * (o.x * o.y);
+            lit += windowCol(c, share, seed, use, shop) * (o.x * o.y);
           }
-          return lit * (s > 1.0 ? 0.33 : 1.0) / (4.0 * h.x * h.y);
-        }`)
+          return lit / (4.0 * h.x * h.y);
+        }
+        // the share of [a, b] inside the band [lo, hi) of every unit cell: an exact box filter, stable at any size
+        float integ(float x, float lo, float hi) { return floor(x) * (hi - lo) + clamp(fract(x), lo, hi) - lo; }
+        float bandCover(float a, float b, float lo, float hi) { return (integ(b, lo, hi) - integ(a, lo, hi)) / max(b - a, 1e-5); }`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         // a face across the line of sight to the player (an overhang, a skybridge); not walls alongside it
         if (occluder.w > 0.0) dissolve(vWp, occluded(vWp, 0.3) * step(0.35, abs(dot(vWn, normalize(occluder.xyz - cameraPosition)))));
         // vWin.x = pattern + (storey code + 32 * storefront) / 64 (tile-worker.js): window rows follow the real floors
         float style = floor(vWin.x + 1e-4), q = floor(fract(vWin.x + 1e-4) * 64.0 + 0.5);
         float front = step(31.5, q), fq = mod(q, 32.0), storey = fq > 0.5 ? 2.4 + fq * 0.15 : 3.2;
-        float seed = vWin.w, z = vWin.z, u = vWin.y;
+        float seed = fract(vWin.w), use = floor(vWin.w), z = vWin.z, u = vWin.y; // use: 1 homes, 2 work (tile-worker.js)
         float gf = front * 4.5, zf = z - gf; // the storefront is one tall ground floor; storeys count from its top
         vec3 base = diffuseColor.rgb;
         vec3 glassC = srgb(seed < 0.45 ? vec3(0.44, 0.62, 0.68) : seed < 0.65 ? vec3(0.42, 0.54, 0.66) : seed < 0.85 ? vec3(0.42, 0.60, 0.60) : vec3(0.32, 0.42, 0.54));
@@ -293,6 +368,22 @@ export function buildingMaterial() {
           // posts every 2 m, open between; never thinner than a pixel (no shimmer, they thicken as they go)
           float fu = fwidth(u), fz = fwidth(z), dp = min(fract(u / 2.0), 1.0 - fract(u / 2.0)) * 2.0, bar = max(0.02, fz * 0.6);
           if (dp > max(0.04, fu * 0.6) && z < 1.12 - fz && abs(z - 0.75) > bar && abs(z - 0.45) > bar) discard;
+          style = 0.0; z = 999.0;
+        }
+        vec3 roofGlow = vec3(0.0);
+        if (style > 12.5) { // rooftops (tile-worker.js rooftop): 13 pool water, 14 solar panels, 15 a planted roof
+          vec2 p = vWp.xz;
+          if (style == 13.0) {
+            diffuseColor.rgb = srgb(vec3(0.36, 0.74, 0.84)) * (0.85 + 0.3 * noise(p * 1.7));
+            roofGlow = srgb(vec3(0.3, 0.8, 0.95)) * 0.35 * night; // lit from below at night
+          } else if (style == 14.0) { // cells 1 m along the row, 1.2 m panels across it, between thin light frames
+            vec2 g = vec2(u, z) / vec2(1.0, 0.6), fw = max(fwidth(g), vec2(1e-4)), f = fract(g);
+            float frame = 1.0 - box(f, vec2(0.06), vec2(0.94), fw);
+            diffuseColor.rgb = mix(base * (0.9 + 0.25 * f.y), base * 3.0, frame * clamp(1.6 - 2.5 * max(fw.x, fw.y), 0.0, 1.0) * 0.6);
+          } else { // beds of low planting and shrubs, darker clumps, gravel edges
+            float n = fbm(p * 0.45), c = smoothstep(0.55, 0.62, noise(p * 0.9 + 7.0));
+            diffuseColor.rgb = mix(base * (0.8 + 0.4 * n), base * vec3(0.7, 0.85, 0.65), c);
+          }
           style = 0.0; z = 999.0;
         }
         if (style > 0.5) {
@@ -380,31 +471,50 @@ export function buildingMaterial() {
           }
           diffuseColor.rgb = col;
         }
+        if (vUp > 0.9 && style < 0.5) diffuseColor.rgb *= 0.93 + 0.12 * noise(vWp.xz * 0.15); // weathered roofs (one octave: cheap)
         diffuseColor.rgb *= mix(0.62, 1.0, smoothstep(0.0, 5.0, z)); // contact shadow at the foot of walls
+        diffuseColor.rgb *= mix(0.84, 1.0, smoothstep(3.0, 30.0, z)); // and the urban canyon: less sky reaches the lower floors (after Slop Toronto)
         diffuseColor.rgb *= 1.0 - 0.18 * wet;
         diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.88, 0.9, 0.94), smoothstep(0.3, 0.7, snow) * smoothstep(0.55, 0.85, vUp)); // snow on roofs
-        // lit windows at night: a seeded share of the window cells glows warm; most storefronts are lit
+        // lit windows at night, each exactly its pane as the pattern above draws it: homes the most in the evening, offices
+        // few after hours, all fewer late at night (late), some buildings nearly dark; homes warm, a few cool white or TV
+        // blue, offices fluorescent; most storefronts lit. Each window its own steady pick while a cell is over ~1 px; far
+        // off, where cells shrink under the pixel, calm floor bands: each floor's window row lit to the building's share,
+        // exactly filtered over the pixel (no blocks, no crawl)
         vec3 glow = vec3(0.0);
         if (night > 0.01 && style > 0.5 && style != 6.0 && style != 7.0 && z < 900.0) {
           bool shopF = front > 0.5 && z < gf;
-          vec2 cellSz = shopF ? vec2(2.6, gf) : style == 2.0 ? vec2(1.6, storey) : style == 9.0 ? vec2(1.5, storey) : style == 3.0 ? vec2(3.2, storey) : style == 5.0 ? vec2(3.4, storey) : vec2(3.0, storey);
+          vec2 cellSz = vec2(3.0, storey), lo = vec2(0.28, 0.3), hi = vec2(0.78, 0.84);
+          if (shopF) { cellSz = vec2(2.6, gf); lo = vec2(0.06, 0.05); hi = vec2(0.94, 0.72); }
+          else if (style == 2.0) { cellSz = vec2(1.6, storey); lo = vec2(0.13, 0.26); hi = vec2(1.0); }
+          else if (style == 9.0) { cellSz = vec2(1.5, storey); lo = vec2(0.07, 0.14); hi = vec2(1.0); }
+          else if (style == 3.0) { cellSz = vec2(3.2, storey); lo = vec2(0.04, 0.36); hi = vec2(1.0); }
+          else if (style == 10.0) { cellSz = vec2(1.5, storey); lo = vec2(0.06, 0.38); hi = vec2(1.0, 0.9); }
+          else if (style == 5.0) { cellSz = vec2(3.4, storey); lo = vec2(0.3, 0.32); hi = vec2(0.7, 0.78); }
+          else if (style == 8.0) { lo = vec2(0.2, 0.32); hi = vec2(0.8, 0.78); }
           vec2 g = vec2(u, shopF ? z : (style == 5.0 || style == 8.0 ? z : zf)) / cellSz, fw = max(fwidth(g), vec2(1e-4));
-          float share = shopF ? 0.75 : 0.18 + 0.5 * night * hash(vec2(seed, 3.1));
-          // blocks of 1, 2, 4, 8 windows a side as cells shrink under the pixel, cross-faded, so zooming doesn't pop;
-          // a little brighter far off, so far towers read as lit (as the old 0.45 fill did)
-          float m = max(fw.x, fw.y), L = min(log2(max(m * 1.75, 1.0)), 3.0), l0 = floor(L), t = L - l0;
-          vec3 lit = lights(g, fw, exp2(l0), share, seed);
-          if (t > 0.0) lit = mix(lit, lights(g, fw, exp2(l0 + 1.0), share, seed), t);
-          lit *= mix(1.0, 1.36, smoothstep(0.24, 0.64, m));
-          glow = lit * night * 1.3 * step(1.0, z);
-        }`)
+          float bh = hash(vec2(seed, 3.1)), m = max(fw.x, fw.y), far = smoothstep(0.75, 1.0, m); // (panes are exact up to a cell a pixel)
+          #ifdef FAR
+          far = 1.0;
+          #endif
+          float share = shopF ? mix(0.8, 0.3, late) : (use > 1.5 ? mix(0.24, 0.04, late) : use > 0.5 ? mix(0.34, 0.11, late) : mix(0.26, 0.08, late))
+            * (bh < 0.12 ? 0.15 : 0.5 + bh) * (0.4 + 0.6 * night);
+          vec3 lit = far < 1.0 ? panes(g, fw, lo, hi, share, seed, use, shopF) : vec3(0.0);
+          if (far > 0.0) {
+            vec3 avg = use > 1.5 && !shopF ? vec3(0.8, 0.82, 0.86) : vec3(0.97, 0.74, 0.46);
+            lit = mix(lit, avg * share * 0.6 * (hi.x - lo.x) * bandCover(g.y - fw.y * 0.5, g.y + fw.y * 0.5, lo.y, hi.y), far);
+          }
+          glow = lit * night * 0.62 * step(1.0, z);
+        }
+        // the lamps and the shop windows light the foot of the walls by them
+        vec3 poolE = night > 0.01 && z < 6.0 ? diffuseColor.rgb * poolLight(vWp - vWn * 0.5) * (1.0 - smoothstep(0.0, 6.0, z)) * (1.0 - vUp) : vec3(0.0);
+        glow += poolE + roofGlow;`)
     s.fragmentShader = s.fragmentShader
-      .replace('uniform vec3 emissive;', 'uniform vec3 emissive;\nuniform float night;')
       .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += glow;')
       // the glow's strength rides in alpha, so the post pass can keep lit windows warm under a night grade
-      .replace('#include <opaque_fragment>', '#include <opaque_fragment>\ngl_FragColor.a = 1.0 - min(1.0, dot(glow, vec3(0.5)));')
+      .replace('#include <opaque_fragment>', '#include <opaque_fragment>\ngl_FragColor.a = 1.0 - max(min(1.0, dot(glow - poolE, vec3(0.5))), lightShare(poolE, gl_FragColor.rgb));')
   }
-  m.customProgramCacheKey = () => 'building9'
+  m.customProgramCacheKey = () => (far ? 'building13f' : 'building13')
   return m
 }
 
@@ -536,11 +646,14 @@ export function treeMaterial(atlas) {
       sky: { value: new THREE.Color(0xe8eef8).multiplyScalar(2) }, gnd: { value: new THREE.Color(0x8a8070).multiplyScalar(2) },
       // a perspective camera (city.view.useCamera): upright billboards (cyl = 1), and none within near3d.z - near3d.w metres
       // of (near3d.x, near3d.y) on the ground, where trees3d.js draws real trees; over the last near3d.w they fade in
-      cyl: { value: 0 }, near3d: { value: new THREE.Vector4() } },
+      cyl: { value: 0 }, near3d: { value: new THREE.Vector4() },
+      night, tLight: streetLight.map, lightBox: streetLight.box, lampTrees: { value: 0 }, // the street lamps light the crowns from below (close up)
+      ...lookUniforms({}) },
     fog: true, // linear fog (a THREE.Fog on the scene) mixed in before the grade, like the rest of the map
     vertexShader: `attribute vec3 iPos; attribute vec2 iSize; attribute vec3 iCol; attribute float iVar; attribute float iClear;
       uniform float cyl; uniform vec4 near3d; uniform vec4 frames[${FORMS * 2}]; uniform float base[${FORMS}];
-      varying vec2 vUv; flat varying vec3 vCol; flat varying vec4 vCell, vPic, vBase; flat varying mat3 vM0, vM1; flat varying float vTrunk;
+      varying vec2 vUv; flat varying vec3 vCol, vLamp; flat varying vec4 vCell, vPic, vBase; flat varying mat3 vM0, vM1; flat varying float vTrunk;
+      uniform float night, lampTrees; ${LIGHT}
       #include <fog_pars_vertex>
       const float PI2 = 6.2831853;
       vec2 cell(float a, float form) { float c = a * ${FORMS}.0 + form; return vec2(mod(c, ${PER}.0) * ${C1}.0, ${C0}.0 + floor(c / ${PER}.0) * ${C1}.0) / vec2(${TW}.0, ${TH}.0); }
@@ -555,6 +668,7 @@ export function treeMaterial(atlas) {
         vec4 fr = frames[int((cyl > 0.5 ? ${FORMS}.0 : 0.0) + form)];
         vUv = vec2(position.x + 0.5, position.y);
         vCol = iCol;
+        vLamp = night > 0.01 && lampTrees > 0.5 ? poolLight((modelMatrix * vec4(iPos, 1.0)).xyz) : vec3(0.0);
         vPic = vec4(fr.yzw, form);
         vTrunk = 0.032 / (2.0 * fr.x); // a trunk's half width, a share of the picture's
         vec2 q = vec2(position.x * 2.0 * fr.x * w, mix(fr.y, fr.z, position.y)); // the picture's corner, for a tree w wide and fr.w tall
@@ -593,7 +707,7 @@ export function treeMaterial(atlas) {
         #endif
       }`,
     fragmentShader: `uniform sampler2D map, mat; uniform float sat, desat, cyl; uniform vec3 gain, tint, sunDir, sunCol, sky, gnd;
-      varying vec2 vUv; flat varying vec3 vCol; flat varying vec4 vCell, vPic, vBase; flat varying mat3 vM0, vM1; flat varying float vTrunk;
+      varying vec2 vUv; flat varying vec3 vCol, vLamp; flat varying vec4 vCell, vPic, vBase; flat varying mat3 vM0, vM1; flat varying float vTrunk;
       #include <fog_pars_fragment>
       // Lambert under the hemisphere and the sun, as the 3D trees (no shadows), the rim darkened like an ink outline
       vec3 lit(vec4 n4, vec4 m, mat3 M) {
@@ -602,9 +716,10 @@ export function treeMaterial(atlas) {
         vec3 c = albedo * (mix(gnd, sky, 0.5 + 0.5 * n.y) + sunCol * max(dot(n, sunDir), 0.0)) * 0.3183099;
         return c * mix(vec3(1.0), vec3(0.16, 0.18, 0.22), m.b);
       }
-      vec3 grade(vec3 cc) { // as main.js's ink pass grades the scene
+      ${LOOK_GLSL}
+      vec3 grade(vec3 cc, vec3 lit) { // as main.js's ink pass grades the scene, then the camera's look (look.js); lit: not graded
         cc = max(mix(vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), cc, sat), 0.0) * gain;
-        return mix(cc, vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), desat) * tint;
+        return tone(exposed(mix(cc, vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), desat) * tint + lit));
       }
       void main() {
         vec2 uv = vUv;
@@ -618,7 +733,7 @@ export function treeMaterial(atlas) {
             #if defined(USE_FOG) && !defined(FOG_EXP2)
               cc = mix(cc, fogColor, smoothstep(fogNear, fogFar, vFogDepth));
             #endif
-            gl_FragColor = vec4(grade(cc), a);
+            gl_FragColor = vec4(grade(cc, vec3(0.0)), a);
             #include <colorspace_fragment>
             return;
           }
@@ -632,7 +747,7 @@ export function treeMaterial(atlas) {
         #if defined(USE_FOG) && !defined(FOG_EXP2)
           cc = mix(cc, fogColor, smoothstep(fogNear, fogFar, vFogDepth));
         #endif
-        gl_FragColor = vec4(grade(cc), al * vBase.w);
+        gl_FragColor = vec4(grade(cc, vCol * vLamp * 0.5 * (1.0 - 0.6 * uv.y)), al * vBase.w); // lamp light from below, not graded
         #include <colorspace_fragment>
       }`,
     transparent: true,

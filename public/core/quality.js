@@ -10,9 +10,11 @@ export const TIERS = {
   // ink: outlines 'full' | 'off'; trees3d, near: share of the radius of 3D trees and of the detailed cars, people and signals (life);
   // detail: balconies and rooftop plant up close; life, weather: share of cars/people and of rain drops;
   // cached: tiles kept off screen (detail, overview); view: the farthest a street-level view reaches (its fog's end, at
-  // most), overview: how far the overview tiles show there (the base layer beyond)
-  high: { name: 'high', pixelRatio: 2, minRes: 0.6, shadows: 'high', aa: 'auto', ink: 'full', trees3d: 1, near: 1, detail: true, life: 1, weather: 1, cached: [80, 48], view: 24000, overview: 4000 },
-  low: { name: 'low', pixelRatio: 1.25, minRes: 0.5, shadows: 'low', aa: 'off', ink: 'full', trees3d: 0.6, near: 0.6, detail: false, life: 0.5, weather: 0.5, cached: [32, 20], view: 2400, overview: 1800 },
+  // most), overview: how far the overview tiles show there (the base layer beyond); lights: the night lights' texture
+  // size (main.js; above 1024 the lamp heads glow too); hdr: the scene in a half-float target (else 8-bit sRGB), bloom: the
+  // selective bloom (core/look.js; needs hdr)
+  high: { name: 'high', pixelRatio: 2, minRes: 0.6, shadows: 'high', aa: 'auto', ink: 'full', trees3d: 1, near: 1, detail: true, life: 1, weather: 1, cached: [80, 48], view: 24000, overview: 4000, lights: 2048, hdr: true, bloom: true },
+  low: { name: 'low', pixelRatio: 1.25, minRes: 0.5, shadows: 'low', aa: 'off', ink: 'full', trees3d: 0.6, near: 0.6, detail: false, life: 0.5, weather: 0.5, cached: [32, 20], view: 2400, overview: 1800, lights: 1024, hdr: false, bloom: false },
 }
 
 // a first guess from the GPU's name (WEBGL_debug_renderer_info; Firefox and Safari may only say "Apple GPU" etc.)

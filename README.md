@@ -20,7 +20,9 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    cultivar and the LiDAR crown's shape refine it), crowns as wide as the canopy each owns, trunks never on a carriageway or a sidewalk's walking zone:
    `tools/audit_trunks.py public/tiles` counts any left), marina docks with boats at their berths and points like traffic signals. Buildings are OSM footprints shaped by the LiDAR surface inside
    them: up to four roof levels (podium, tower, penthouse, terraces), pitched roofs fitted to it (gable either way,
-   hip, shed), rooftop plant only where it shows, the city's 2009 roof sections where they still match. Their look
+   hip, shed), rooftop plant only where it shows (and the small HVAC units, penthouses and skylights its 2 m grid misses,
+   placed by the page), planted roofs (the orthophoto, OSM `roof:garden`), rooftop pools (outdoor OSM pools over a roof)
+   and solar panels (OSM `generator:source=solar`), the city's 2009 roof sections where they still match. Their look
    comes from OSM (material, colours, levels for the window rows, heritage, shops for storefronts) and from the
    neighbourhood: Gastown, Chinatown and Yaletown brick, West End concrete towers, downtown glass condos, Granville
    Island tin sheds, character houses (steep roofs, siding, porches) and Vancouver Specials told apart by their roofs.
@@ -62,7 +64,10 @@ volume). `public/main.js` sets up the camera, light, shadows, the ink outline pa
 `public/core/` streams tiles for what is on screen, builds their geometry in Web Workers and draws ground, roads,
 facades and trees with procedural shaders, crisp at any zoom. Detail stays where it shows: the ground follows the terrain to
 25 cm on the map and to 5 cm up close (zoom 0.3 and street level), its polygons welded where they meet so no crack opens between them, and each wall's balcony fronts and railings are one
-sheet the shader draws every floor on. `public/core/quality.js` picks High or Low graphics
+sheet the shader draws every floor on. Parking lots and kerbs get parked cars, and walls a soft shade on the ground at
+their feet. At night street lamps (OpenStreetMap's, else placed along the lit streets) and the storefronts facing a
+street throw pools of light: each a soft disc drawn from above into one small texture over the view (`core/lights.js`)
+that the ground, roads and wall feet look up. `public/core/quality.js` picks High or Low graphics
 (About → Graphics: Auto, High, Low) and the frame loop lowers the resolution while frames run late. Everything else is a plugin (`public/plugins/`):
 lo-fi music, live weather and sun, TransLink transit on its timetable, live aircraft, ships, landmarks and iconic
 bridges, and driving (parcel deliveries too, or a bus on a real TransLink route and timetable, with a GPS line, stops, riders and
@@ -77,4 +82,6 @@ reload) and the live service (`server/`, visitor counts, multiplayer, chat) behi
 Map data © OpenStreetMap contributors (ODbL). City of Vancouver Open Data; 2022 orthophoto and LiDAR, property tax
 report and heritage register © City of Vancouver (Open Government Licence – Vancouver). Street photos: Mapillary
 contributors (CC BY-SA 4.0). HRDEM and MRDEM © Natural Resources Canada (Open Government Licence – Canada).
-Transit data © TransLink. Live aircraft: adsb.lol.
+Transit data © TransLink. Rendering techniques adapted from [Slop Toronto](https://sloptoronto.ca/) / Slop New York (MIT, © Mr.doob, John
+Fewell; see [THIRD_PARTY.md](THIRD_PARTY.md)): the camera look per time of day and the bloom (`core/look.js`), walls by
+what they face, the canyon shade, street-light placement. Live aircraft: adsb.lol.

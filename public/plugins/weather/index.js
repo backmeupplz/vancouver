@@ -58,8 +58,8 @@ export function vanTime(ms) {
 
 // Time-of-day looks by true sun elevation (degrees); interpolated. tint/desat go to the post grade.
 const TOD = [
-  { el: -14, tint: [0.36, 0.42, 0.66], desat: 0.3, sun: 0xb8c8ff, sunI: 1.5, sky: 0x8a9ac8, gnd: 0x3a3848, hemiI: 1.5 },
-  { el: -6, tint: [0.5, 0.5, 0.74], desat: 0.2, sun: 0xc0b8f0, sunI: 1.3, sky: 0x9a90c0, gnd: 0x45404c, hemiI: 1.6 },
+  { el: -14, tint: [0.36, 0.4, 0.48], desat: 0.4, sun: 0xb0c0dc, sunI: 1.1, sky: 0x90a0b8, gnd: 0x383c44, hemiI: 1.4 }, // a muted slate night: the lamps carry the light
+  { el: -6, tint: [0.42, 0.42, 0.56], desat: 0.3, sun: 0xb8b8e8, sunI: 1.3, sky: 0x9a98c0, gnd: 0x45424c, hemiI: 1.6 },
   { el: -1, tint: [0.84, 0.66, 0.7], desat: 0.08, sun: 0xff8050, sunI: 1.4, sky: 0xc09cc0, gnd: 0x5a4a48, hemiI: 1.6 },
   { el: 4, tint: [1.02, 0.8, 0.68], desat: 0, sun: 0xff9a58, sunI: 2.3, sky: 0xdcb4b4, gnd: 0x7a6658, hemiI: 1.7 },
   { el: 9, tint: [1.02, 0.92, 0.84], desat: 0, sun: 0xffc890, sunI: 2.3, sky: 0xe2dce6, gnd: 0x86786a, hemiI: 1.9 },
@@ -329,6 +329,8 @@ export default function weather(city) {
     if (!lastDir || lastDir.angleTo(v3) > 0.002) { lastDir = v3.clone(); city.light.setSunDirection(v3) }
     // windows light up through dusk (and earlier on dark, wet days)
     if ('night' in city.light) city.light.night = Math.min(1, 1 - THREE.MathUtils.smoothstep(elDeg, -6, 8) + (c.kind === 'storm' || c.kind === 'rain' ? 0.25 * c.intensity : 0))
+    city.post.lookFor?.(elDeg) // the camera's look for the time of day (core/look.js)
+    if ('late' in city.light) city.light.late = c.hour >= 12 ? THREE.MathUtils.smoothstep(c.hour, 21, 24) : 1 - THREE.MathUtils.smoothstep(c.hour, 4.5, 7) // the small hours: lights go out
     const keep = c.kind === 'clear' || c.kind === 'cloudy' ? 1 - (1 - look.sun) * c.intensity : look.sun + (1 - look.sun) * (1 - wet) * 0.3
     sun.color.copy(tod.sun).lerp(c3.setHex(0xdde4f0), 1 - keep) // diffuse days: whiter, weaker sun
     sun.intensity = tod.sunI * keep

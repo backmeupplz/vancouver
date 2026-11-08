@@ -10,10 +10,11 @@ from common import xy, L1, extent, SHOP_AMENITY
 SRC = 'data/lm.osm.pbf'
 KEEP_BUILDING = ('building', 'building:part', 'height', 'min_height', 'building:levels', 'building:min_level', 'roof:shape', 'roof:height',
                  'roof:levels', 'roof:colour', 'building:colour', 'building:material', 'roof:material', 'roof:direction', 'roof:orientation',
-                 'name', 'amenity', 'shop', 'tourism', 'layer', 'heritage', 'historic', 'start_date', 'building:architecture', 'office')
+                 'name', 'amenity', 'shop', 'tourism', 'layer', 'heritage', 'historic', 'start_date', 'building:architecture', 'office',
+                 'roof:garden', 'leisure', 'generator:source')  # (the last three: what stands on the roof)
 # shops and the like as points: a building with one inside (or at its door) gets a storefront ground floor
 SHOPFRONT = ('shop', 'office', 'craft')
-GROUND_KEYS = ('landuse', 'natural', 'leisure', 'amenity', 'aeroway', 'man_made', 'waterway', 'water', 'place', 'surface', 'golf', 'sport', 'highway', 'area:highway', 'railway', 'tourism', 'parking', 'bridge')
+GROUND_KEYS = ('landuse', 'natural', 'leisure', 'amenity', 'aeroway', 'man_made', 'waterway', 'water', 'place', 'surface', 'golf', 'sport', 'highway', 'area:highway', 'railway', 'tourism', 'parking', 'bridge', 'power')
 LINE_KEYS = ('highway', 'railway', 'aeroway', 'waterway', 'natural', 'man_made', 'barrier', 'route', 'power')
 KEEP_LINE = ('turn:lanes', 'turn:lanes:forward', 'turn:lanes:backward', 'highway', 'railway', 'aeroway', 'waterway', 'natural', 'man_made', 'barrier', 'name', 'ref', 'lanes', 'lanes:forward', 'lanes:backward', 'oneway',
              'junction', 'bridge', 'tunnel', 'layer', 'level', 'width', 'surface', 'sidewalk', 'cycleway', 'cycleway:left', 'cycleway:right', 'cycleway:both', 'service',
@@ -79,7 +80,8 @@ for o in fp:
         if not tags: continue
         t = tags
         if t.get('natural') == 'tree' or t.get('highway') in ('traffic_signals', 'crossing', 'stop', 'street_lamp') or t.get('railway') in ('station', 'stop', 'level_crossing') \
-                or t.get('public_transport') or t.get('amenity') in ('bench', 'fountain', 'bicycle_rental') or t.get('man_made') in ('lighthouse', 'tower', 'mast') or t.get('power') == 'tower':
+                or t.get('public_transport') or t.get('amenity') in ('bench', 'fountain', 'bicycle_rental') or t.get('man_made') in ('lighthouse', 'tower', 'mast') or t.get('power') == 'tower' \
+                or t.get('generator:source') == 'solar':
             p = xy(o.location.lat, o.location.lon)
             put('nodes', (p[0], p[1], p[0], p[1]), (o.id, p, {k: v for k, v in t})); n['nodes'] += 1
         elif any(k in t for k in SHOPFRONT) or t.get('amenity') in SHOP_AMENITY:

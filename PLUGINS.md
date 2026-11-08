@@ -59,10 +59,12 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.view.camera` | the camera the map is drawn with now: `city.camera`, or yours |
 | `city.light.sun`, `city.light.hemi` | the `DirectionalLight` (casts the shadows) and `HemisphereLight` |
 | `city.light.setSunDirection(v)` | move the sun (a `Vector3` pointing towards it); shadows follow |
-| `city.light.night` | 0 (day) to 1 (night): lights a share of the windows |
+| `city.light.night` | 0 (day) to 1 (night): lights a share of the windows, the street lamps and the shop windows' spill on the sidewalks |
+| `city.light.late` | 0 (evening) to 1 (the small hours): fewer windows lit, offices first (set by the weather plugin from the hour) |
 | `city.surface.wet`, `.snow`, `.sky` | weather on the map's ground, roads and roofs: `wet` (0–1) darkens them and makes paving mirror `sky` (a `THREE.Color`) at grazing angles; `snow` (0–1) whitens flat ground and roofs, the roads less (set by the weather plugin) |
 | `city.surface.seaHole` | a `Vector4` (x, sea level, z, radius): the map's sea is left out within radius of (x, z), up to 3 m above sea level, where a plugin draws its own water (the sail plugin's waves); radius 0 (the default) turns it off |
 | `city.post.uniforms.tint` / `.desat` | grade of the final image: multiply (`Vector3`, 1 = none) and desaturate (0–1) |
+| `city.post.lookFor(elevation)` | the camera's look for the sun this many degrees up (`core/look.js`: exposure, white balance, contrast, saturation, the ACES tone curve and, on High at night, the bloom), after the grade above; the weather plugin calls it |
 | `city.tiles` | the tile streamer (advanced) |
 | `city.on(event, fn)` | `'frame'` `(dt, t)`, `'view'` `(view)`, `'quality'` `(tier)`, `'tile:load'` / `'tile:unload'` `(tile)`, `'weather'` `(weather)`, `'player'` `(player)`; returns an unsubscribe function |
 | `city.requestRender()`, `city.animate()` | see above |
@@ -96,7 +98,8 @@ close. New tiles are built and uploaded to the GPU a few MB per frame, so stream
 - `tile.terrain`: `{ n, h, size }`, an `n`×`n` height grid over the tile, row 0 north.
 - `tile.footprints` (detail tiles): building outlines for collisions, `{ pts, start }`: ring `r` is the world x,
   north pairs `pts[start[r]] … pts[start[r + 1] - 1]`. Parts that start more than 2.5 m up (you can drive under
-  them) and buildings a plugin replaced with `suppressBuildings` are left out.
+  them) and buildings a plugin replaced with `suppressBuildings` are left out. The cars parked in parking lots are
+  rings here too (4 corners each), so a player's vehicle bumps into them; the ones along the kerbs are not.
 - `tile.water` (detail tiles with water): `{ n, mask }`, an `n`×`n` `Uint8Array`, 1 where the cell is water; cell
   `(i, j)` counts east and north from the tile's south-west corner (`ox`, `oy`), `size / n` metres each.
 - `tile.trees` (tiles with trees, else `null`): `{ pos, size }`, `Float32Array`s with 3 and 2 numbers a tree: its foot

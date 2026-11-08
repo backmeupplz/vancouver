@@ -2,8 +2,10 @@ import * as THREE from 'three'
 import { MapControls } from './vendor/MapControls.js'
 import { createCity, loadPlugins } from './city.js'
 import { Tiles, holed, holedTrees } from './core/tiles.js'
-import { groundMaterial, roadMaterial, buildingMaterial, treeAtlas, treeMaterial, night, surface, occluder } from './core/materials.js'
+import { groundMaterial, roadMaterial, buildingMaterial, aoMaterial, treeAtlas, treeMaterial, night, late, surface, occluder } from './core/materials.js'
+import { StreetLights } from './core/lights.js'
 import { Trees3D } from './core/trees3d.js'
+import { look, lookFor, lookUniforms, LOOK_GLSL, Bloom } from './core/look.js'
 import { createQuality } from './core/quality.js'
 
 // World: metres east (x) and north of an origin downtown (tools/common.py); three.js x = east, y = up, z = south.
@@ -71,18 +73,20 @@ sun.shadow.bias = -0.0005
 scene.add(sun, sun.target)
 
 // ---------- the map ----------
-const mats = { ground: groundMaterial(), road: roadMaterial(), paint: roadMaterial(true), building: buildingMaterial(), tree: treeMaterial(treeAtlas(renderer)) }
+const mats = { ground: groundMaterial(), road: roadMaterial(), paint: roadMaterial(true), building: buildingMaterial(), tree: treeMaterial(treeAtlas(renderer)), ao: aoMaterial() }
 // the overview tiles' own (tiles.js holed): a street-level view sees them past the detail tiles, and not where those show
-const farMats = { ground: holed(groundMaterial()), road: holed(roadMaterial()), paint: mats.paint, building: holed(buildingMaterial()), tree: holedTrees(mats.tree) }
+const farMats = { ground: holed(groundMaterial(true)), road: holed(roadMaterial()), paint: mats.paint, building: holed(buildingMaterial(true)), tree: holedTrees(mats.tree) }
+const lights = new StreetLights() // night lights: lamps and shop windows (core/lights.js)
+let lightStale = true
 const tiles = new Tiles({
-  scene, treeScene, mats, farMats,
+  scene, treeScene, mats, farMats, lights,
   // shadows follow new tiles at most twice a second; a tile that loads hidden changes neither them nor the picture
   onChange: (shown = true) => { dirty = true; if (shown) { shadowStale = true; trees3d?.changed() } },
   onLoad: (t) => city?.emit('tile:load', tileInfo(t)),
   onUnload: (t) => { trees3d?.changed(); city?.emit('tile:unload', tileInfo(t)) },
 })
 const trees3d = new Trees3D({ scene, tiles, treeMaterial: mats.tree }) // real trees near a perspective camera
-tiles.cached = quality.tier.cached; trees3d.share = quality.tier.trees3d; trees3d.fine = quality.tier.detail
+tiles.cached = quality.tier.cached; trees3d.share = quality.tier.trees3d; trees3d.fine = quality.tier.detail; mats.ao.visible = quality.tier.detail // (the wall-foot shade: High)
 const tileInfo = (t) => ({ level: t.level, i: t.i, j: t.j, ox: t.ox, oy: t.oy, size: t.level ? 4096 : 1024, graph: t.graph, terrain: t.terrain, footprints: t.footprints, water: t.water,
   trees: t.trees ? { pos: t.trees.geometry.attributes.iPos.array, size: t.trees.geometry.attributes.iSize.array } : null })
 status('Loading the map…', 0.05)
@@ -227,13 +231,40 @@ function fitShadows() {
   Object.assign(sun.shadow.camera, { left: -sh.r, right: sh.r, top: sh.r, bottom: -sh.r, near: 10, far: D * 2 })
   sun.shadow.camera.updateProjectionMatrix()
   renderer.shadowMap.needsUpdate = true
+  lightStale = true // the night lights cover the same square
+}
+// the night lights' texture over the shadows' square, redrawn with it (and as tiles arrive); a perspective camera's
+// shadows reach only a few hundred metres: its lights cover the streamed square round the focus. By day none
+function updateLights() {
+  lights.head.visible = night.value >= 0.01 && quality.tier.lights > 1024
+  if (night.value < 0.01 || !Number.isFinite(sh.x)) { lights.off(); lightStale = true; return }
+  if (!lightStale) return
+  lightStale = false
+  const p = own?.camera.isPerspectiveCamera && own.opts
+  if (p) lights.draw(renderer, p.focus.x, p.focus.z, Math.min(1100, p.radius ?? 900), quality.tier.lights)
+  else lights.draw(renderer, sh.x, sh.z, sh.r, quality.tier.lights)
 }
 
-// ---------- ink: edges in the depth buffer drawn as dark lines, plus the colour grade ----------
+// ---------- ink: edges in the depth buffer drawn as dark lines, plus the colour grade and the camera's look ----------
+// (core/look.js: exposure, contrast, saturation, ACES, bloom). The scene is drawn into a half-float target where the
+// tier has HDR (high: lamps and windows can be brighter than white, for the bloom and the tone curve's shoulder), else
+// into 8-bit sRGB (low: half the bandwidth, no banding in the dark)
 const rt = new THREE.WebGLRenderTarget(1, 1, { samples: 4, type: THREE.HalfFloatType })
 rt.depthTexture = new THREE.DepthTexture(1, 1)
+function setHDR(on) {
+  if ((rt.texture.type === THREE.HalfFloatType) === on) return
+  rt.texture.type = on ? THREE.HalfFloatType : THREE.UnsignedByteType; rt.texture.colorSpace = on ? THREE.NoColorSpace : THREE.SRGBColorSpace; rt.dispose()
+}
+// the weather's grade (sat, gain, desat, tint) of a scene pixel; lit windows and lamp light (alpha < 1) skip it
+const GRADE = `uniform float sat, desat; uniform vec3 gain, tint;
+  vec3 graded(vec4 col) {
+    vec3 cc = max(mix(vec3(dot(col.rgb, vec3(0.2126, 0.7152, 0.0722))), col.rgb, sat), 0.0) * gain;
+    cc = mix(cc, vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), desat) * tint;
+    return mix(cc, col.rgb, 1.0 - col.a);
+  }`
 const ink = new THREE.ShaderMaterial({
-  uniforms: { tColor: { value: rt.texture }, tDepth: { value: rt.depthTexture }, sat: { value: 1.2 }, gain: { value: new THREE.Vector3(1, 1, 1) }, tint: { value: new THREE.Vector3(1, 1, 1) },
+  defines: { LOOK: 1 },
+  uniforms: { tBloom: look.tBloom, bloomK: look.bloom, tColor: { value: rt.texture }, tDepth: { value: rt.depthTexture }, sat: { value: 1.2 }, gain: { value: new THREE.Vector3(1, 1, 1) }, tint: { value: new THREE.Vector3(1, 1, 1) },
     desat: { value: 0 }, px: { value: new THREE.Vector2() }, uvs: { value: new THREE.Vector2(1, 1) }, off: { value: new THREE.Vector2() }, lim: { value: new THREE.Vector2(1, 1) }, range: { value: 1 }, thr: { value: 1 }, ink: { value: 0 },
     cnear: { value: 1 }, cfar: { value: 2 }, fade: { value: new THREE.Vector2(1e9, 2e9) }, inkFade: { value: new THREE.Vector2(1e9, 2e9) }, tSky: { value: null }, fogCol: { value: new THREE.Color() },
     zenCol: { value: new THREE.Color() }, domeK: { value: 0 }, projInv: { value: new THREE.Matrix4() }, camWorld: { value: new THREE.Matrix4() } },
@@ -253,7 +284,12 @@ const ink = new THREE.ShaderMaterial({
   // The scene may fill only part of the target (adaptive resolution): uvs is that part, lim its last texel centre,
   // off the sub-texel shift of a map camera snapped to the texel grid.
   // NOINK (quality tier ink: 'off'): the grade only, no depth taps.
-  fragmentShader: `uniform sampler2D tColor, tDepth; uniform vec2 px, uvs, off, lim; uniform float range, thr, ink, sat, desat; uniform vec3 gain, tint; varying vec2 vUv;
+  fragmentShader: `uniform sampler2D tColor, tDepth; uniform vec2 px, uvs, off, lim; uniform float range, thr, ink; varying vec2 vUv;
+    ${GRADE}
+    ${LOOK_GLSL}
+    #ifdef BLOOM
+    uniform sampler2D tBloom; uniform float bloomK;
+    #endif
     vec2 uv;
     #ifdef PERSP
     uniform float cnear, cfar; uniform vec2 fade, inkFade;
@@ -290,19 +326,24 @@ const ink = new THREE.ShaderMaterial({
       e *= 1.0 - smoothstep(inkFade.x, inkFade.y, 1.0 / c);
       #endif
       #endif
-      vec3 cc = mix(col.rgb, col.rgb * vec3(0.16, 0.18, 0.22), e);
-      cc = max(mix(vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), cc, sat), 0.0);
-      cc *= gain;
-      cc = mix(cc, vec3(dot(cc, vec3(0.2126, 0.7152, 0.0722))), desat) * tint;
-      cc = mix(cc, col.rgb, 1.0 - col.a); // lit windows (alpha < 1) skip the grade
+      vec3 cc = exposed(graded(vec4(mix(col.rgb, col.rgb * vec3(0.16, 0.18, 0.22), e), col.a)));
+      #ifdef BLOOM
+      cc += texture2D(tBloom, vUv).rgb * bloomK;
+      #endif
+      vec2 r = (vUv - 0.5) * vec2(px.y / px.x, 1.0); // a faint vignette, the same in portrait and landscape
+      cc = tone(cc) * (1.0 - 0.12 * smoothstep(0.35, 1.0, length(r) / length(vec2(px.y / px.x, 1.0) * 0.5)));
       gl_FragColor = vec4(cc, 1.0);
       #include <colorspace_fragment>
       gl_FragDepth = texture2D(tDepth, uv).x;
     }`,
   depthTest: true, depthWrite: true, depthFunc: THREE.AlwaysDepth,
 })
+lookUniforms(ink.uniforms)
+const bloom = new Bloom(`uniform sampler2D tColor; uniform vec2 uvs, off; ${GRADE} ${LOOK_GLSL}
+  vec3 source(vec2 u) { return exposed(graded(texture2D(tColor, u * uvs + off))); }`, ink.uniforms)
 const define = (k, on) => { if (!!ink.defines[k] === on) return; if (on) ink.defines[k] = 1; else delete ink.defines[k]; ink.needsUpdate = true }
 define('NOINK', quality.tier.ink === 'off')
+setHDR(quality.tier.hdr)
 const post = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), ink)
 post.frustumCulled = false
 const postScene = new THREE.Scene(), postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
@@ -392,7 +433,7 @@ function draw(scale = res) {
     // the outlines fade out within ~1.5 km even in a long clear view: far off they would be all there is of a building
     u.inkFade.value.set(Math.min(u.fade.value.x, 600), Math.min(u.fade.value.y, 1600))
   } else u.thr.value = Math.max(0.35 / (K * cam.zoom), 0.9)
-  u.ink.value = THREE.MathUtils.smoothstep(zoom, 0.05, 0.16)
+  u.ink.value = THREE.MathUtils.smoothstep(zoom, 0.05, 0.16) * (1 - 0.45 * night.value) // softer by night, as the light draws the edges
   // a light grade: the materials carry natural, map-like colours of their own (a strong blue gain read as neon)
   u.sat.value = 1.0 + 0.12 * THREE.MathUtils.smoothstep(zoom, 0.04, 0.2)
   const near = THREE.MathUtils.smoothstep(zoom, 0.04, 0.12)
@@ -415,9 +456,13 @@ function draw(scale = res) {
     u.off.value.set(fa / w, fb / h)
   }
   renderer.setRenderTarget(rt); renderer.render(scene, C)
+  const glow = quality.tier.bloom && look.bloom.value > 0.01
+  define('BLOOM', glow)
+  if (glow) bloom.render(renderer, w, h)
   if (snap) { C.position.copy(v2); C.updateMatrixWorld() }
   renderer.setRenderTarget(smooth ? aa : null); renderer.render(postScene, postCam)
   const tm = mats.tree.uniforms
+  tm.lampTrees.value = C.isPerspectiveCamera || zoom >= 0.25 ? 1 : 0 // (a texture fetch per billboard corner: not for the whole city)
   // the billboards are lit and graded as the 3D trees are (the map's a little less saturated)
   tm.sat.value = ink.uniforms.sat.value * (tm.cyl.value ? 1 : 0.88); tm.gain.value.copy(ink.uniforms.gain.value); tm.tint.value.copy(ink.uniforms.tint.value); tm.desat.value = ink.uniforms.desat.value
   tm.sunDir.value.subVectors(sun.position, sun.target.position).normalize(); tm.sunCol.value.copy(sun.color).multiplyScalar(sun.visible ? sun.intensity : 0)
@@ -453,8 +498,10 @@ function applyQuality(t) { // a new tier (core/quality.js)
   renderer.setPixelRatio(PR); renderer.setSize(innerWidth, innerHeight)
   shadowQuality(t)
   setAA(t.aa)
+  setHDR(t.hdr); if (!t.bloom) bloom.dispose()
   define('NOINK', t.ink === 'off')
-  tiles.cached = t.cached; trees3d.share = t.trees3d; trees3d.fine = t.detail; trees3d.changed()
+  tiles.cached = t.cached; trees3d.share = t.trees3d; trees3d.fine = t.detail; trees3d.changed(); mats.ao.visible = t.detail
+  lightStale = true
   res = 1; settle()
   city?.emit('quality', t)
 }
@@ -474,11 +521,11 @@ function loop(now) {
   dirty = false
   if (own) {
     tiles.update(own.camera, own.opts.focus, own.opts.radius, own.camera.isPerspectiveCamera ? Math.min(own.camera.far, quality.tier.overview) : 0)
-    tiles.setDetail(quality.tier.detail, true)
+    tiles.setDetail(quality.tier.detail, true, 1)
     if (own.opts.focus.distanceTo(ownSeen) > 20) { ownSeen.copy(own.opts.focus); city?.emit('view', city.view) }
   } else {
     tiles.update(cam, controls.target)
-    tiles.setDetail(quality.tier.detail && cam.zoom >= 0.3, cam.zoom >= 0.3)
+    tiles.setDetail(quality.tier.detail && cam.zoom >= 0.3, cam.zoom >= 0.3, cam.zoom >= (quality.tier.detail ? 0.15 : 0.3) ? 2 : 0) // parked cars: specks from 0.15
   }
   if (!own && now - lastGroundCheck > 300) { // keep the orbit target on the ground
     lastGroundCheck = now
@@ -492,7 +539,8 @@ function loop(now) {
   const pl = own?.camera.isPerspectiveCamera && city?.player, oc = pl && OCCLUDER[pl.mode]
   if (oc) occluder.value.set(pl.x, pl.y + oc[0], pl.z, oc[1]); else occluder.value.w = 0
   updateShadows()
-  if (shadowStale && now - lastShadow > 500) { shadowStale = false; lastShadow = now; renderer.shadowMap.needsUpdate = true }
+  if (shadowStale && now - lastShadow > 500) { shadowStale = false; lastShadow = now; renderer.shadowMap.needsUpdate = true; lightStale = true }
+  updateLights()
   if (shadowStale) dirty = true // come back for it
   draw()
   cpu = performance.now() - t0
@@ -505,11 +553,12 @@ city = createCity({
   scene, overlay, camera: cam, renderer, controls, zAt, ll,
   toLatLon: (x, n) => ({ lat: LAT_O + n / KY, lon: LON_O + x / KX }),
   sun, hemi, setSun: (v) => { SUN.copy(v).normalize(); sh.x = NaN; dirty = true },
-  post: { uniforms: { tint: ink.uniforms.tint, desat: ink.uniforms.desat } },
+  post: { uniforms: { tint: ink.uniforms.tint, desat: ink.uniforms.desat }, lookFor: (el) => { lookFor(el); dirty = true } },
   requestRender: () => { dirty = true },
   data: {},
   tiles,
   night,
+  late,
   surface,
   suppressBuildings: (ring) => tiles.addMask(ring.map(([lat, lon]) => ll(lat, lon))),
   ownCamera,
