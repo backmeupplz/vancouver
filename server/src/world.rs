@@ -19,7 +19,7 @@
 //!   text   {"t":"check","name"}                          is this username free? (debounce it: ≤ 4/s)
 //!   text   {"t":"chat","ch":"g"|"n","text"}              global, or players within 1.5 km
 //!   text   {"t":"block","id"} / {"t":"unblock","id"}
-//!   binary [1][mode u8: 0 stopped, 1 car, 2 foot, 3 boat][x f32][y f32][z f32][heading i16 ×1e4][speed i16 ×100]   ≤ 10 Hz while playing
+//!   binary [1][mode u8: 0 stopped, 1 car, 2 foot, 3 boat, 4 bus][x f32][y f32][z f32][heading i16 ×1e4][speed i16 ×100]   ≤ 10 Hz while playing
 //! server → client
 //!   text   {"t":"welcome","s","id","token","name","chosen","colour","blocks":[id],"players":[{s,id,name,chosen,colour}],"chat":[…],"stats"}
 //!   text   {"t":"join","s","id","name","chosen","colour"} / {"t":"leave","s"}   players starting / stopping (or renamed)
@@ -80,7 +80,7 @@ pub struct State {
 
 /// Parses a binary state message; None when malformed.
 pub fn parse_state(b: &[u8]) -> Option<State> {
-    if b.len() != 18 || b[0] != 1 || b[1] > 3 {
+    if b.len() != 18 || b[0] != 1 || b[1] > 4 {
         return None;
     }
     let f = |i: usize| f32::from_le_bytes(b[i..i + 4].try_into().unwrap());
@@ -574,6 +574,7 @@ impl World {
             let vmax = match (p.mode, s.mode) {
                 (2, 2) => 15.0, // on foot
                 (3, 3) => 12.0, // sailing
+                (4, 4) => 25.0, // a bus (about 70 km/h flat out)
                 _ => 70.0,      // by van, or getting in or out
             };
             if (s.x - p.x).hypot(s.z - p.z) > vmax * 1.5 * dt + 5.0 && !c.teleports.take(now) {
@@ -1128,10 +1129,35 @@ mod tests {
             sail(&mut t, 10.0 + 40.0 * i as f32);
         }
         assert_eq!(t.w.clients[&a.slot].state.unwrap().x, 90.0, "two teleports allowed, then ignored");
-        // modes past 3 are refused
+        // modes past 4 are refused
         t.later(1000);
-        t.w.binary(a.slot, &encode_state(&State { mode: 4, x: 91.0, y: 1.0, z: 0.0, heading: 0.0, speed: 0.0 }), t.now).unwrap();
+        t.w.binary(a.slot, &encode_state(&State { mode: 5, x: 91.0, y: 1.0, z: 0.0, heading: 0.0, speed: 0.0 }), t.now).unwrap();
         assert_eq!(t.w.clients[&a.slot].state.unwrap().mode, 3);
+    }
+
+    #[test]
+    fn buses() {
+        let mut t = T::new();
+        let a = t.join("Ann");
+        let drive = |t: &mut T, x: f32| t.w.binary(a.slot, &encode_state(&State { mode: 4, x, y: 20.0, z: 0.0, heading: 0.0, speed: 15.0 }), t.now).unwrap();
+        drive(&mut t, 0.0);
+        assert_eq!(t.w.clients[&a.slot].state.unwrap().mode, 4);
+        // 20 m/s down Broadway is fine
+        t.later(1000);
+        drive(&mut t, 20.0);
+        assert_eq!(t.w.clients[&a.slot].state.unwrap().x, 20.0);
+        // 60 m/s is no bus: after the respawns allowed, ignored
+        for i in 1..=4 {
+            t.later(1000);
+            drive(&mut t, 20.0 + 60.0 * i as f32);
+        }
+        assert_eq!(t.w.clients[&a.slot].state.unwrap().x, 140.0, "two teleports allowed, then ignored");
+        // and others see it as a bus
+        let mut b = t.join("Bob");
+        t.at(&b, 30.0, 0.0);
+        t.w.tick(t.now);
+        let near = b.bins().into_iter().find(|m| m[0] == 1).expect("a near list");
+        assert_eq!(near[3 + 4 + 12 + 4], 4, "mode on the wire");
     }
 
     #[test]

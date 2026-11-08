@@ -45,6 +45,14 @@ export function decode(buf) {
   return { shapes, pats, profs, starts, prof, mask, n, maxDur }
 }
 
+// local (metres east/north of man.origin) -> world: x = o.x + ax * e + bx * n, z = o.z + az * e + bz * n, an affine
+// fit of the core's own projection (the drive plugin's buses use it too)
+export function localFrame(city, man) {
+  const [la0, lo0] = man.origin, o = city.world.fromLatLon(la0, lo0)
+  const ex = city.world.fromLatLon(la0, lo0 + 0.01), en = city.world.fromLatLon(la0 + 0.01, lo0)
+  return { o, ax: (ex.x - o.x) / (0.01 * man.k[0]), az: (ex.z - o.z) / (0.01 * man.k[0]), bx: (en.x - o.x) / (0.01 * man.k[1]), bz: (en.z - o.z) / (0.01 * man.k[1]) }
+}
+
 // day pattern (0 Mon–Thu, 1 Fri, 2 Sat, 3 Sun/holiday) of a yyyymmdd service date
 export function patternOf(man, ymd) {
   if (ymd in man.special) return man.special[ymd]
@@ -163,11 +171,7 @@ export default async function transit(city) {
   const { THREE } = city
   const man = await fetch(new URL('manifest.json', DATA)).then((r) => r.json())
 
-  // local (metres east/north of man.origin) -> world, as an affine fit of the core's own projection
-  const [la0, lo0] = man.origin, o = city.world.fromLatLon(la0, lo0)
-  const ex = city.world.fromLatLon(la0, lo0 + 0.01), en = city.world.fromLatLon(la0 + 0.01, lo0)
-  const ax = (ex.x - o.x) / (0.01 * man.k[0]), az = (ex.z - o.z) / (0.01 * man.k[0])
-  const bx = (en.x - o.x) / (0.01 * man.k[1]), bz = (en.z - o.z) / (0.01 * man.k[1])
+  const { o, ax, az, bx, bz } = localFrame(city, man)
   const routes = man.routes
   const H = (x, z) => city.world.heightAt(x, z)
   let raf = 0, last = 0, force = false, lastView = '', ui = null // loop state (see the loop below)
@@ -342,7 +346,7 @@ export default async function transit(city) {
     for (const m of Object.values(meshes)) m.count = 0
     counts.clear()
     const vb = city.view.bounds, mpp = city.view.metresPerPixel, zoom = city.view.zoom
-    const busOn = show.bus && zoom >= BUS_ZOOM && !document.hidden
+    const busOn = show.bus && zoom >= BUS_ZOOM && !document.hidden, me = city.player?.vehicle === 'bus' ? city.player : null
     const pad = 250
     const scale = Math.min(5, Math.max(1, mpp / 0.9)) // trains stay visible zoomed out
     drawn = 0
@@ -382,6 +386,7 @@ export default async function transit(city) {
         at(sh, front - total / 2, P1)
         const reach = total / 2 + pad
         if (P1.x < vb.x0 - reach || P1.x > vb.x1 + reach || P1.z < vb.z0 - reach || P1.z > vb.z1 + reach) return
+        if (me && !c.rail && (P1.x - me.x) ** 2 + (P1.z - me.z) ** 2 < 900) return // not on top of the bus the user drives
         const side = r.kind === 'seabus' ? 22 : r.kind === 'wce' ? 0 : c.rail ? 1.9 : 1.8
         const s = c.rail ? scale : 1
         for (let j = 0; j < cars; j++) {

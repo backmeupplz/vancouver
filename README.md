@@ -53,7 +53,8 @@ volume). `public/main.js` sets up the camera, light, shadows, the ink outline pa
 facades and trees with procedural shaders, crisp at any zoom. `public/core/quality.js` picks High or Low graphics
 (About → Graphics: Auto, High, Low) and the frame loop lowers the resolution while frames run late. Everything else is a plugin (`public/plugins/`):
 lo-fi music, live weather and sun, TransLink transit on its timetable, live aircraft, ships, landmarks and iconic
-bridges, and driving (parcel deliveries too), walking, hiking real trails and sailing through it all. See
+bridges, and driving (parcel deliveries too, or a bus on a real TransLink route and timetable, with a GPS line, stops, riders and
+trolley wires), walking, hiking real trails and sailing through it all. See
 [PLUGINS.md](PLUGINS.md) to write one.
 
 Map data © OpenStreetMap contributors (ODbL). City of Vancouver Open Data; 2022 orthophoto and LiDAR, property tax

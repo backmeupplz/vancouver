@@ -567,8 +567,8 @@ export default function multiplayer(city) {
   const offPlayer = city.on('player', onPlayer)
 
   // ---------------------------------------------------------------- 3D: vans, people and boats near me while I play
-  const MODES = { car: 1, foot: 2, boat: 3 } // city.player.mode → the wire's mode (0: stopped)
-  const size = (mode) => (mode === 2 ? { length: 0.6, width: 0.6 } : mode === 3 ? { length: 6.6, width: 2.4 } : { length: 4.3, width: 1.8 })
+  const MODES = { car: 1, foot: 2, boat: 3, bus: 4 } // city.player.mode → the wire's mode (0: stopped)
+  const size = (mode) => (mode === 2 ? { length: 0.6, width: 0.6 } : mode === 3 ? { length: 6.6, width: 2.4 } : mode === 4 ? { length: 12.2, width: 2.55 } : { length: 4.3, width: 1.8 })
   const fallback = {
     van(colour) { // a simple low-poly van (forward -z), when the drive plugin's models aren't there
       const g = new THREE.Group(), M = (c) => new THREE.MeshLambertMaterial({ color: c, flatShading: true })
@@ -587,7 +587,7 @@ export default function multiplayer(city) {
     },
   }
   function make(mode, colour) {
-    const f = mode === 2 ? (city.models?.person || fallback.person) : mode === 3 && city.models?.boat ? city.models.boat : (city.models?.van || fallback.van)
+    const f = mode === 2 ? (city.models?.person || fallback.person) : mode === 3 && city.models?.boat ? city.models.boat : mode === 4 && city.models?.bus ? city.models.bus : (city.models?.van || fallback.van)
     let o
     try { o = f(colour) } catch (e) { console.warn('live: model', e); o = (mode === 2 ? fallback.person : fallback.van)(colour) }
     o.userData.mode = mode
@@ -662,7 +662,7 @@ export default function multiplayer(city) {
         layer.append(p.tag)
       }
       if (p.saidUntil && p.saidUntil < now) { p.saidUntil = 0; p.tag.firstChild.textContent = '' }
-      const xy = p.d < TAG_RANGE && project(c.x, c.y + (c.mode === 2 ? 2.25 : c.mode === 3 ? 10 : 3.4), c.z)
+      const xy = p.d < TAG_RANGE && project(c.x, c.y + (c.mode === 2 ? 2.25 : c.mode === 3 ? 10 : c.mode === 4 ? 4.4 : 3.4), c.z)
       p.tag.hidden = !xy
       if (xy) p.tag.style.transform = `translate(${xy[0]}px, ${xy[1]}px) translate(-50%, -100%)`
     }

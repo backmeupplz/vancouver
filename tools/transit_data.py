@@ -13,6 +13,11 @@ Output (all little varint streams, see `Out` and public/plugins/transit/index.js
   manifest.json   routes, day patterns (wk = Mon-Thu, fr, sa, su) + dates that differ, stations, chunk list
   rail.bin        SkyTrain, West Coast Express, SeaBus: shapes (with height codes), stop patterns, timings, trips
   bus_I_J.bin     buses, grouped by the 8 km cell their route's middle lies in
+  lines/          for driving a bus (the drive plugin): index.json lists each bus route's directions; R.json (R: the
+                  route's index in the manifest) has per direction its usual pattern with every stop, not just the
+                  timepoints: {head, shape: [x, n, dx, dn, ...] (0.5 m steps, as below), stops:
+                  [[name, code, metres along]], prof: [[half minutes from each stop to the next, the first 0]], trips: [start - previous
+                  start, profile, day mask, ...]}
 Positions are metres east/north of ORIGIN (equirectangular, the core's own projection), in 0.5 m steps.
 Each shape point has a height code = zigzag(lift in 0.25 m) * 3 + mode; mode 0 = lift over the terrain,
 1 = bridge (straight between the terrain at the bridge's two ends, plus lift), 2 = tunnel (hidden).
@@ -413,7 +418,52 @@ def main():
         'routes': rmeta, 'chunks': chunks, 'guide': guide_out, 'stations': stations,
     }
     json.dump(manifest, open(os.path.join(OUT, 'manifest.json'), 'w'), separators=(',', ':'), ensure_ascii=False)
+    write_lines(trips, rail_routes, RI, rmeta, st, shapes, stops)
     print('total', sum(c['bytes'] for c in chunks) + os.path.getsize(os.path.join(OUT, 'manifest.json')), 'bytes')
+
+
+BOUND = ('Northbound ', 'Southbound ', 'Eastbound ', 'Westbound ')
+
+
+def write_lines(trips, rail_routes, RI, rmeta, st, shapes, stops):
+    """Every bus route's usual pattern each way, all its stops and its timetable (see the docstring)."""
+    out = os.path.join(OUT, 'lines')
+    os.makedirs(out, exist_ok=True)
+    for f in os.listdir(out): os.remove(os.path.join(out, f))
+    by = collections.defaultdict(list)
+    for t in trips:
+        if t['route_id'] not in rail_routes and len(st[t['trip_id']]) >= 2: by[(RI[t['route_id']], t['direction_id'])].append(t)
+    pat = lambda t: (t['shape_id'], tuple(x[5] for x in sorted(st[t['trip_id']])))
+    files, index = collections.defaultdict(list), collections.defaultdict(list)
+    for (ri, d), ts in sorted(by.items()):
+        key = collections.Counter(pat(t) for t in ts).most_common(1)[0][0]
+        mine = [t for t in ts if pat(t) == key]
+        sh, s0 = shapes[key[0]], sorted(st[mine[0]['trip_id']])
+        dist = np.maximum.accumulate(np.round(np.interp([x[3] * 1000 for x in s0], sh['orig'], sh['cum'])))
+        head = collections.Counter(t['trip_headsign'] for t in mine).most_common(1)[0][0]
+        name = rmeta[ri]['name']
+        if head.split(' ')[0].lstrip('0') == name: head = head.split(' ', 1)[1] if ' ' in head else head
+        names = []
+        for x, v in zip(s0, dist):
+            n = stops[x[5]]['stop_name'].strip()
+            for b in BOUND: n = n[len(b):] if n.startswith(b) else n
+            names.append([n, stops[x[5]]['stop_code'], int(v)])
+        profs, rows = {}, []
+        for t in mine:
+            s = sorted(st[t['trip_id']])
+            off = [round((x[1] - s[0][1]) / 30) for x in s]  # half minutes, as steps from stop to stop
+            rows.append((s[0][1], profs.setdefault(tuple(b - a for a, b in zip([0] + off, off)), len(profs)), t['mask']))
+        rows.sort()
+        flat, last = [], 0
+        for a, p, m in rows: flat += [a - last, p, m]; last = a
+        shape, px, pn = [], 0, 0
+        for x, n in sh['q']: shape += [x - px, n - pn]; px, pn = x, n
+        files[ri].append({'head': head, 'shape': shape, 'stops': names, 'prof': [list(p) for p, _ in sorted(profs.items(), key=lambda kv: kv[1])], 'trips': flat})
+        index[ri].append([head, len(names), round(float(sh['cum'][-1]) / 100) / 10])
+    for ri, dirs in files.items():
+        json.dump({'dirs': dirs}, open(os.path.join(out, f'{ri}.json'), 'w'), separators=(',', ':'), ensure_ascii=False)
+    json.dump({str(ri): v for ri, v in sorted(index.items())}, open(os.path.join(out, 'index.json'), 'w'), separators=(',', ':'), ensure_ascii=False)
+    print(len(files), 'bus lines', sum(os.path.getsize(os.path.join(out, f)) for f in os.listdir(out)), 'bytes')
 
 
 if __name__ == '__main__':

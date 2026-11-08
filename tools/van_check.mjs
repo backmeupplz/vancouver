@@ -26,3 +26,20 @@ const a = turn(1), b = turn(0.3)
 assert(a.yaw > b.yaw * 1.5, `yaw dry ${a.yaw.toFixed(2)} vs snow ${b.yaw.toFixed(2)}`)
 assert(Math.abs(a.br) > 0.02, 'leans in a turn')
 console.log(`ok: 0-50 km/h ${t.toFixed(1)} s, top ${(top * 3.6).toFixed(0)} km/h, stop from 50: dry ${dry.toFixed(1)} m, snow ${snow.toFixed(1)} m; 2 s at full lock: ${a.yaw.toFixed(2)} rad dry, ${b.yaw.toFixed(2)} snow`)
+// the bus: slow to pull away (0-50 km/h in 10-20 s), about 70 km/h flat out, longer to stop, a wide turn at full lock
+import { BUS, ARTIC } from '../public/plugins/drive/van.js'
+for (const V of [BUS, ARTIC]) {
+  let b = newVan(V), tb = 0
+  run(b, go, 1, 60, (c) => { tb += DT; return c.speed > 13.9 })
+  assert(tb > 10 && tb < 20, `bus 0-50 km/h in ${tb.toFixed(1)} s`)
+  run(b, go, 1, 90)
+  assert(b.speed > 17 && b.speed < 20, `bus top ${b.speed.toFixed(1)} m/s`)
+  const s = newVan(V); s.speed = 13.9; s.gear = 3
+  const d = run(s, brake, 1, 30, (c) => c.speed === 0)
+  assert(d > dry * 1.2 && d < 30, `bus stop ${d.toFixed(1)} m`)
+  const w = newVan(V); w.speed = 3; w.gear = 1
+  run(w, { up: true, down: false, steer: 1, hand: false }, 1, 1.5)
+  const r = w.speed / Math.max(1e-6, w.yawRate)
+  assert(r > 8 && r < 14, `bus turning radius ${r.toFixed(1)} m`)
+  console.log(`ok: ${V === BUS ? '12 m' : '18 m'} bus 0-50 km/h ${tb.toFixed(1)} s, top ${(b.speed * 3.6).toFixed(0)} km/h, stop from 50 ${d.toFixed(1)} m, turning radius ${r.toFixed(1)} m`)
+}

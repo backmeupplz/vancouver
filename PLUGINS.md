@@ -146,10 +146,10 @@ camera. The drive plugin is the example: it dives from the map into a chase came
   `{ x, z, heading, length, width, speed, y }` that cars brake for; see Traffic below), `city.traffic.bump(id, impulse)` (a car was hit),
   `city.traffic.people(x, z, r, out)` and `city.traffic.poles(x, z, r, out)` (the people and the traffic signal poles
   there), `city.traffic.knock(id, dx, dz, speed)` (a person was bumped into: they stumble, or fall over and get up).
-- **The player** (`plugins/drive`, `plugins/sail`): while the user drives, walks, hikes or sails, `city.player = { mode: 'car' |
-  'foot' | 'boat', x, y, z, heading, speed, colour, vehicle: 'van' | 'boat' }` (updated every frame, read it when you
+- **The player** (`plugins/drive`, `plugins/sail`): while the user drives, walks, hikes, drives a bus or sails, `city.player = { mode: 'car' |
+  'foot' | 'bus' | 'boat', x, y, z, heading, speed, colour, vehicle: 'van' | 'bus' | 'boat' }` (updated every frame, read it when you
   need it), else `null`; `'player'` is emitted on enter, leave and car ⇄ foot. `city.models.van(colour)`,
-  `city.models.person(colour)` and `city.models.boat(colour)` return the same low-poly models (forward −z, origin on the
+  `city.models.person(colour)`, `city.models.bus()` (a 12 m city bus, its middle at the origin) and `city.models.boat(colour)` return the same low-poly models (forward −z, origin on the
   ground or the waterline; `update(dt, speed)` runs the walk cycle or bobs the boat), so other players look alike.
   They are built with `plugins/life/kit.js`, a small kit for flat-shaded low-poly models (bevelled profiles, boxes,
   rods, wheels merged into one geometry with vertex colours) and their shared look (`shaded(material)`: a little
