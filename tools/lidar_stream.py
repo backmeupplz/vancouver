@@ -1,10 +1,11 @@
 # Streams the Lower Mainland LiDAR (data/lidar_lm/urls.json) into building massing without keeping the 438 GB:
-# per tile download -> `lidar_massing.py tile` -> keep its small data/massing_lm/<tile>.npz -> delete the tile.
+# per tile download -> `lidar_massing.py tile` (massing and each wall's look) -> keep its small data/massing_lm/<tile>.npz
+# -> delete the tile.
 # Resumable (done tiles are skipped), failed tiles retry with backoff, a few hosts-polite downloads at once. Tiles closest
 # to the city centre go first (the inner ring: Burnaby, Richmond, New Westminster, the Tri-Cities, North Van), the
 # "optional_*" sections are skipped. Progress: <out>/progress.log. Then: python3 tools/lidar_massing.py merge
 # Run (inside the bake image, see tools/lidar_stream.sh): python3 tools/lidar_stream.py urls.json OUT_DIR [workers]
-import json, os, re, struct, subprocess, sys, time, zlib
+import json, os, re, struct, subprocess, sys, time, zipfile, zlib
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock, BoundedSemaphore
 from urllib.parse import urlparse
@@ -89,7 +90,7 @@ def log(out, total, msg=''):
 
 def one(e, out, scratch, total):
     res = f"{out}/{e['id']}.npz"
-    if os.path.exists(res):
+    if os.path.exists(res) and 'wseg.npy' in zipfile.ZipFile(res).namelist():  # (one from before the walls' looks is redone)
         stat['skipped'] += 1; return
     src = f"{scratch}/{e['id']}.{e['ext']}"
     for k in range(4):

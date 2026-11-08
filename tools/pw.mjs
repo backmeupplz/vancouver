@@ -39,7 +39,8 @@ export async function open({ port, dpr = 1, size = '1400x900', tier = 'auto', we
   return { browser, ctx, page, errs }
 }
 
-export const settle = async (page, ms = 1500) => { // tiles built + warmed, then a beat for fades
-  await page.waitForFunction(() => !view.tiles.made.length && !view.tiles.warming.length, null, { timeout: 90000 }).catch(() => {})
+export const settle = async (page, ms = 1500) => { // tiles asked for, built + warmed, then a beat for fades
+  const idle = (timeout) => page.waitForFunction(() => { const t = view.tiles; return !t.queue.length && !t.made.length && !t.warming.length && ![...t.tiles.values()].some((x) => x.state === 'loading') }, null, { timeout }).catch(() => {})
+  await idle(90000); await page.waitForTimeout(500); await idle(30000) // a camera just moved asks for its tiles a frame or two later
   await page.waitForTimeout(ms)
 }

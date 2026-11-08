@@ -630,7 +630,7 @@ function readBuilding(t, o) {
 // carriage: the detail tile's 1 m carriageway mask (roadMask), for the light storefronts spill onto the street
 function buildings(t, terr, level, lines, carriage) {
   const s = t.sections.BLDG
-  const W = { pos: [], nor: [], col: [], win: [] }, Bal = { pos: [], nor: [], col: [], win: [] }
+  const W = { pos: [], nor: [], col: [], win: [], fac: [] }, Bal = { pos: [], nor: [], col: [], win: [], fac: [] }
   const fp = [], fpStart = [0] // footprints: world x, north pairs; ring i is fp[fpStart[i]..fpStart[i+1])
   const fronts = [] // storefront walls that face a street: ax, ay, px, py, ground height (for the shop signs)
   const spill = [] // tile-local x, north: where a lit shop window throws light on the sidewalk
@@ -644,6 +644,14 @@ function buildings(t, terr, level, lines, carriage) {
   const detail = level === 0
   const recs = []
   for (let bi = 0; bi < n; bi++) { const b = readBuilding(t, o); o = b.o; recs.push(b) }
+  // each wall's own look, as the 2022 LiDAR saw it (tools/lidar_walls.py; FACD: per building its wall count, 0 for none,
+  // then 4 bytes a wall): glazing, spandrel tone, window bay and size, storey height
+  const fs = t.sections.FACD
+  if (fs && detail) for (let bi = 0, q = fs.off; bi < n && q < fs.off + fs.len; bi++) {
+    const k = dv.getUint8(q); q += 1
+    if (k && k === recs[bi].pts.length) recs[bi].looks = new Uint8Array(t.buf, q, k * 4)
+    q += k * 4
+  }
   // which walls a neighbour covers (party walls: windowless), from every footprint of the tile (detail tiles)
   const G = 16, grid = new Map(), gk = (i, j) => i * 4096 + j
   if (detail) for (const b of recs) {
@@ -654,7 +662,7 @@ function buildings(t, terr, level, lines, carriage) {
   // neighbour standing beside it (not one overlapping it: a part over a bigger outline, a duplicate)
   const covered = (self, x, y, ix, iy, y0, y1) => grid.get(gk(Math.floor(x / G), Math.floor(y / G)))?.some((b) => b !== self && b.base + b.mn < y0 + 2 && b.base + b.h >= y0 + 0.6 * (y1 - y0) && inPoly(x, y, b.pts) && !inPoly(ix, iy, b.pts))
   for (const rec of recs) {
-    const { fl, style0, base, h, mn, roofShape, roofBits, ridge, wallHex, roofHex, gH, fh, bits, fx, facing, plant, pts } = rec
+    const { fl, style0, base, h, mn, roofShape, roofBits, ridge, wallHex, roofHex, gH, fh, bits, fx, facing, plant, pts, looks } = rec
     let { gid } = rec
     const np = pts.length
     if (MASKS.length) {
@@ -712,7 +720,9 @@ function buildings(t, terr, level, lines, carriage) {
       const party = rowWalls && (len < 2 || covered(rec, mx + nx * 0.8, my - nz * 0.8, mx - nx * 0.8, my + nz * 0.8, y0, y1))
       const kind = party ? fq / 64 : shopEdges && !shopEdges[i] && styleW % 1 >= 0.5 ? styleW - 0.5 : styleW
       const w = (uu, yy) => [kind, uu, yy - base, seed + use]
+      if (looks && !party) FAC = looks.subarray(i * 4, i * 4 + 4)
       quad(W, [a[0], y0, -a[1]], [p[0], y0, -p[1]], [p[0], y1, -p[1]], [a[0], y1, -a[1]], wall, [nx, 0, nz], w(u, y0), w(u + len, y0), w(u + len, y1), w(u, y1))
+      FAC = NOFAC
       u += len
     }
     const flat = !roofShape || !ridge || ridge <= h
@@ -1059,8 +1069,11 @@ function faces(mask, e, n) {
   return !!(mask & (1 << k) || mask & (1 << ((k + 1) & 7)) || mask & (1 << ((k + 7) & 7)))
 }
 function pack(B) {
-  return { position: new Float32Array(B.pos), normal: new Int8Array(B.nor), color: new Uint8Array(B.col), aWin: new Float32Array(B.win) }
+  return { position: new Float32Array(B.pos), normal: new Int8Array(B.nor), color: new Uint8Array(B.col), aWin: new Float32Array(B.win), aFac: new Uint8Array(B.fac) }
 }
+// the wall look (tools/lidar_walls.py's 4 bytes) the triangles being added carry: materials.js aFac
+const NOFAC = [0, 0, 0, 0]
+let FAC = NOFAC
 // one triangle with a flat normal, wound so the normal points along `want`; w = aWin per vertex (or one for all)
 function tri(B, a, b, c, col, want, w, w2, w3) {
   const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]]
@@ -1068,7 +1081,7 @@ function tri(B, a, b, c, col, want, w, w2, w3) {
   const l = Math.hypot(...n) || 1; n = n.map((v) => v / l)
   let ws = [w, w2 || w, w3 || w]
   if (n[0] * want[0] + n[1] * want[1] + n[2] * want[2] < 0) { [b, c] = [c, b]; n = n.map((v) => -v); ws = [ws[0], ws[2], ws[1]] }
-  for (const p of [a, b, c]) { B.pos.push(p[0], p[1], p[2]); B.nor.push(n[0] * 127, n[1] * 127, n[2] * 127); B.col.push(col[0] * 255, col[1] * 255, col[2] * 255) }
+  for (const p of [a, b, c]) { B.pos.push(p[0], p[1], p[2]); B.nor.push(n[0] * 127, n[1] * 127, n[2] * 127); B.col.push(col[0] * 255, col[1] * 255, col[2] * 255); B.fac.push(FAC[0], FAC[1], FAC[2], FAC[3]) }
   for (const x of ws) B.win.push(...x)
 }
 function quad(B, a, b, c, d, col, want, wa, wb, wc, wd) {

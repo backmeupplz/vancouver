@@ -59,13 +59,19 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    city's property tax report gives every building its year built, which picks 1960s-80s concrete towers with solid
    balcony fronts on their long sides, 1990s green glass with glass balconies all round, window walls after 2005, and
    window bands on old concrete offices; the heritage register marks the old brick and stone. The city's 2022 LiDAR
-   (coloured points, 1 km tiles listed in `data/lidar2022/urls.json`, downloaded by hand into `data/lidar2022/` and
-   unzipped into `las/`) gives the storey height from the rhythm of the floors on the walls;
+   (coloured points, 1 km tiles listed in `data/lidar2022/urls.json`, downloaded by hand into `data/lidar2022/` and read
+   one at a time out of their zips) gives the storey height from the rhythm of the floors on the walls;
    the same LiDAR gives the massing where it covers (`uv run --with numpy,scipy,shapely,pyproj,rasterio python3
    tools/lidar_massing.py` → `data/massing22.npz`, optional; tiles.py falls back to the HRDEM levels): each building
    sliced every metre up into parts fitted to its outline at that height (setbacks, podiums and towers, chamfers, curves,
    twists, overhangs such as Harbour Centre's lookout from the wall points), domes and sloped tops, masts and spires,
-   rooftop plant;
+   rooftop plant, and each wall's own look (`tools/lidar_walls.py`): the rhythm of the returns on its plane gives the
+   window bay and the storey height and how much of each the window fills, which rhythm is there gives the glazing
+   (punched windows, vertical strips, ribbon bands, a curtain wall where glass returns little, a blank wall), and the
+   returns' laser intensity (on one scale across flights) dark or light spandrels; the rest of the Lower Mainland gets the same massing
+   and wall looks from the open regional sets, streamed a tile at a time (`tools/lidar_stream.sh` → `lidar_massing.py
+   tile`, then `merge` → `data/massing_lm.npz`; the thresholds follow each set's density). The page draws each wall's
+   look; walls no LiDAR saw keep the era, heritage and zone patterns;
    Mapillary street photos (`tools/mapillary.py`, token through the vault, CC BY-SA 4.0) give wall colours seen from
    the street; a short list of landmarks (`LOOKS`) is set by hand from public photos.
    Landmarks get a mesh of their own from LiDAR (`uv run --with numpy,scipy,shapely,pyproj,rasterio,scikit-image,fast-simplification,laspy[lazrs]

@@ -10,20 +10,22 @@
 # top (spires, masts) become a pointed cap. Heights are above the footprint's own ground (the ground returns round it),
 # so tiles.py stacks them on its HRDEM base.
 # Cells are owned by the nearest footprint within 3 m of it (overhangs past an OSM outline stay with their building).
-# The LAS files (data/lidar2022/urls.json, by hand into data/lidar2022/, `unzip -j -o '*.zip' '*.las' -d las`) are
-# first cut down to their building and ground points, sorted into 4 m cells (data/lidar2022/cache/, about a quarter
-# of the size).
-# Run: uv run --with numpy,scipy,shapely,pyproj,rasterio python3 tools/lidar_massing.py [procs]
+# Each wall of the footprint and of the parts that stand back from it gets its look too (tools/lidar_walls.py).
+# The LAS files (data/lidar2022/urls.json, zips by hand into data/lidar2022/, read one at a time out of their zip, or
+# from las/ where unzipped) are first cut down to their building and ground points (with their intensity), sorted
+# into 4 m cells (data/lidar2022/cache/, about an eighth of the size).
+# Run: uv run --with numpy,scipy,shapely,pyproj,rasterio python3 tools/lidar_massing.py [procs [tile names to add]]
 #      ... tools/lidar_massing.py check          (self-test on a synthetic tower)
 #      ... tools/lidar_massing.py tile IN.laz OUT.npz | merge [DIR [OUT]]   (other LiDAR: tools/lidar_stream.py; needs laspy[lazrs])
-import glob, math, os, sys, time
+import glob, math, os, shutil, sys, time
 from multiprocessing import Pool
 import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 from common import xy, latlon, L1, save_rings, load_feat, all_tiles, hnum
+from lidar_walls import walls_of
 
-OUT = 'data/massing22.npz'
-OUT_LM = 'data/massing_lm.npz'  # the rest of the Lower Mainland, merged from data/massing_lm/<tile>.npz
+OUT = os.environ.get('MASSING', 'data/massing22.npz')  # (MASSING=<file>: a test bake beside the shared one)
+OUT_LM = os.environ.get('MASSING_LM', 'data/massing_lm.npz')  # the rest of the Lower Mainland, merged from data/massing_lm/<tile>.npz
 LAS = 'data/lidar2022/las'
 CACHE = 'data/lidar2022/cache'
 RES = 0.5        # m, raster cell
@@ -31,6 +33,7 @@ STEP = 1.0       # m between slices
 MIN_TOP = 10.0   # m: lower buildings keep tiles.py's own shapes (pitched roofs fitted to the HRDEM)
 REACH = 3.0      # m past its outline a footprint owns the cells nearer to it than to any other
 KEEP = 0.9       # IoU with a run's first slice under which a new part starts
+I_REF = 125.0    # the median intensity of the building returns in the City's downtown 2022 flights
 MIN_CELLS = 16   # 4 m2: smaller bits of a slice are dropped (a spire is caught separately)
 K = lambda n: max(1, round(n * 0.5 / RES))  # morphology radii are given in 0.5 m cells
 
@@ -54,36 +57,46 @@ def las_header(path):
 
 
 def cache_tile(path):
-    """one LAS -> its building points and every 4th ground point, as x, y (from the tile's corner), z, class, sorted
-    into 4 m cells (start: where each cell begins) in CACHE/<name>/"""
+    """one LAS (or its zip as downloaded: unzipped beside the cache and deleted once read, so the LAS never pile up) ->
+    its building points and every 4th ground point, as x, y (from the tile's corner), z, class, intensity, sorted into
+    4 m cells (start: where each cell begins) in CACHE/<name>/"""
     name = os.path.basename(path)[:-4]
     d = f'{CACHE}/{name}'
-    if os.path.exists(f'{d}/start.npy'): return name
+    if os.path.exists(f'{d}/i.npy'): return name  # (a cache from before the intensity is made again)
+    if path.endswith('.zip'):
+        import tempfile, zipfile
+        with zipfile.ZipFile(path) as z, tempfile.TemporaryDirectory(dir=CACHE) as t:
+            las = [m for m in z.namelist() if m.lower().endswith('.las')]
+            if not las: return name
+            return cache_tile(z.extract(las[0], t))  # (named as its zip)
     off, pf, rl, sc, of, mn, mx = las_header(path)
-    dt = np.dtype(dict(names=['x', 'y', 'z', 'cls'], formats=['<i4', '<i4', '<i4', 'u1'], offsets=[0, 4, 8, 16 if pf >= 6 else 15], itemsize=rl))
+    dt = np.dtype(dict(names=['x', 'y', 'z', 'i', 'cls'], formats=['<i4', '<i4', '<i4', '<u2', 'u1'], offsets=[0, 4, 8, 12, 16 if pf >= 6 else 15], itemsize=rl))
     p = np.memmap(path, dt, 'r', offset=off)
     cls = np.asarray(p['cls']) & 31
     keep = (cls == 6) | (cls == 2) & (np.arange(len(cls)) % 4 == 0)
     x0, y0 = math.floor(mn[0]), math.floor(mn[1])
     x = (p['x'][keep] * sc[0] + of[0] - x0).astype(np.float32); y = (p['y'][keep] * sc[1] + of[1] - y0).astype(np.float32)
     z = (p['z'][keep] * sc[2] + of[2]).astype(np.float32); cls = cls[keep]
-    write_cache(d, x, y, z, cls, x0, y0, int((mx[0] - x0) // 4) + 1, int((mx[1] - y0) // 4) + 1)
+    write_cache(d, x, y, z, cls, x0, y0, int((mx[0] - x0) // 4) + 1, int((mx[1] - y0) // 4) + 1, np.asarray(p['i'][keep]))
     return name
 
 
-def write_cache(d, x, y, z, cls, x0, y0, nx, ny):
-    """points (x, y from the corner x0, y0; z; class) -> d/, sorted into nx x ny 4 m cells"""
+def write_cache(d, x, y, z, cls, x0, y0, nx, ny, inten=None):
+    """points (x, y from the corner x0, y0; z; class; intensity, 0s where the set has none) -> d/, sorted into nx x ny
+    4 m cells"""
+    if inten is None: inten = np.zeros(len(x), np.uint16)
     key = np.clip(y // 4, 0, ny - 1).astype(np.int64) * nx + np.clip(x // 4, 0, nx - 1).astype(np.int64)
     o = np.argsort(key, kind='stable')
     os.makedirs(d + '.tmp', exist_ok=True)
-    for k, v in (('x', x[o]), ('y', y[o]), ('z', z[o]), ('cls', cls[o])): np.save(f'{d}.tmp/{k}.npy', v)
+    for k, v in (('x', x[o]), ('y', y[o]), ('z', z[o]), ('cls', cls[o]), ('i', inten[o])): np.save(f'{d}.tmp/{k}.npy', v)
     np.save(f'{d}.tmp/meta.npy', np.array([x0, y0, nx, ny], np.float64))
     np.save(f'{d}.tmp/start.npy', np.searchsorted(key[o], np.arange(nx * ny + 1)).astype(np.int64))
+    if os.path.exists(d): shutil.rmtree(d)
     os.replace(d + '.tmp', d)
 
 
 class Cloud:
-    """the cached tiles, opened lazily (memory-mapped): box(e0, n0, e1, n1) -> UTM x, y, z, class arrays"""
+    """the cached tiles, opened lazily (memory-mapped): box(e0, n0, e1, n1) -> UTM x, y, z, class, intensity arrays"""
     def __init__(self, cache=CACHE):
         self.t = {}
         for d in sorted(glob.glob(f'{cache}/*/meta.npy')):
@@ -98,14 +111,19 @@ class Cloud:
         for d, (x0, y0, nx, ny, a) in self.t.items():
             if e1 < x0 or e0 >= x0 + nx * 4 or n1 < y0 or n0 >= y0 + ny * 4: continue
             if a is None:
-                a = {k: np.load(f'{d}/{k}.npy', mmap_mode='r') for k in ('x', 'y', 'z', 'cls', 'start')}
+                a = {k: np.load(f'{d}/{k}.npy', mmap_mode='r') for k in ('x', 'y', 'z', 'cls', 'i', 'start')}
+                # intensity on one scale: each flight's (and sensor's) gain differs, so the tile's building returns are
+                # brought to the median of the City's downtown flights (0 where the set has no intensity)
+                c, i = np.asarray(a['cls'][::97]), np.asarray(a['i'][::97])
+                med = float(np.median(i[c == 6])) if (c == 6).sum() > 100 else 0.0
+                a['k'] = I_REF / med if med > 0 else 0.0
                 self.t[d] = (x0, y0, nx, ny, a)
             i0, i1 = max(0, int((e0 - x0) // 4)), min(nx - 1, int((e1 - x0) // 4))
             for j in range(max(0, int((n0 - y0) // 4)), min(ny - 1, int((n1 - y0) // 4)) + 1):
                 s, t = a['start'][j * nx + i0], a['start'][j * nx + i1 + 1]
-                if t > s: out.append((a['x'][s:t] + x0, a['y'][s:t] + y0, a['z'][s:t], a['cls'][s:t]))
-        if not out: return [np.zeros(0)] * 4
-        return [np.concatenate([o[k] for o in out]) for k in range(4)]
+                if t > s: out.append((a['x'][s:t] + x0, a['y'][s:t] + y0, a['z'][s:t], a['cls'][s:t], a['i'][s:t] * np.float32(a['k'])))
+        if not out: return [np.zeros(0)] * 5
+        return [np.concatenate([o[k] for o in out]) for k in range(5)]
 
 
 # ---------------------------------------------------------------- footprints (as tiles.py's buildings() takes them)
@@ -252,14 +270,14 @@ def mass(job):
     M = REACH + 2
     x0, y1 = math.floor((e0 - M) / RES) * RES, math.ceil((n1 + M) / RES) * RES
     nx, ny = int(math.ceil((e1 + M - x0) / RES)), int(math.ceil((y1 - (n0 - M)) / RES))
-    X, Y, Z, C = cloud.box(x0 - 8, y1 - ny * RES - 8, x0 + nx * RES + 8, y1 + 8)
+    X, Y, Z, C, I = cloud.box(x0 - 8, y1 - ny * RES - 8, x0 + nx * RES + 8, y1 + 8)
     g = C == 2
     ring_d = shapely.distance(poly.boundary, shapely.points(X[g], Y[g])) if g.sum() else np.zeros(0)
     gz = Z[g][ring_d < 10] if g.sum() else np.zeros(0)
     if len(gz) < 10: return None
     ground = float(np.percentile(gz, 10))
     b = (C == 6) & (X >= x0) & (X < x0 + nx * RES) & (Y > y1 - ny * RES) & (Y <= y1)
-    X, Y, Z = X[b], Y[b], Z[b] - ground
+    X, Y, Z, I = X[b], Y[b], Z[b] - ground, I[b]
     if len(Z) < 200: return None
     ix = ((X - x0) / RES).astype(int).clip(0, nx - 1); iy = ((y1 - Y) / RES).astype(int).clip(0, ny - 1)
     inside = raster([poly], x0, y1, nx, ny)
@@ -280,11 +298,16 @@ def mass(job):
     on = own & (dsm > 2)
     if inside.sum() < 16 or (on & inside).sum() < 0.5 * inside.sum(): return None  # not built yet when it flew, or gone
     top = float(np.percentile(dsm[on], 99.5))
-    if top < MIN_TOP: return None
+    fr = np.array(poly.exterior.coords)[:-1]
+    # the footprint's walls (tools/lidar_walls.py), with the roof's returns a m2: the set's density here
+    roof = inside[iy, ix] & (Z > dsm[iy, ix] - 1.0)
+    pd = roof.sum() / max(1.0, (inside & on).sum() * RES * RES)
+    walls = [(a, b, 0.0, top, d) for a, b, d in walls_of(fr, X, Y, Z, I, top, pd)]
+    if top < MIN_TOP: return (ground, [], walls) if walls else None
     zs = np.arange(1.0, top, STEP)
     regs = slices(own, dsm, Z, ix, iy, zs)
     parts = tidy(runs(regs, zs, dsm))
-    if not parts: return None
+    if not parts: return (ground, [], walls) if walls else None
     tr = Affine(RES, 0, x0, 0, -RES, y1)
     out = []
     for q in sorted(parts, key=lambda q: q['foot']):
@@ -308,7 +331,12 @@ def mass(job):
         ce, cn = x0 + (c + 0.5) * RES, y1 - (r + 0.5) * RES
         w, ht = 0.9, hi['ridge'] or hi['top']
         out.append((np.array([(ce - w, cn - w), (ce + w, cn - w), (ce + w, cn + w), (ce - w, cn + w)]), ht, ht + 0.3, 3, h))
-    return ground, out
+    # the walls of the parts that stand back from the footprint (towers over podiums, setbacks): their own looks
+    for r, f, t, rf, _ in out:
+        if rf == UNIT or t - f < 6 or len(r) == len(fr) and np.allclose(r, fr): continue
+        sel = (Z > f - 0.5) & (Z < t + 0.5)
+        walls += [(a, b, f, t, d) for a, b, d in walls_of(r, X[sel], Y[sel], Z[sel] - f, I[sel], t - f, pd)]
+    return ground, out, walls
 
 
 UNIT = 255  # a part that is rooftop plant: tiles.py puts it on the part under it as a box
@@ -454,12 +482,15 @@ def work(chunk):
     return out
 
 
-def bake(procs):
+def bake(procs, only=()):
+    """only: tile names (e.g. 488000_5457000) to cache this time, of the LAS and zips not cached yet (all by default)"""
     import shapely
     from shapely.geometry import Polygon
     from pyproj import Transformer
     t0 = time.time()
-    files = sorted(glob.glob(f'{LAS}/*.las'))
+    las = {os.path.basename(f)[:-4]: f for f in glob.glob(f'{os.path.dirname(LAS)}/*.zip')}
+    las.update({os.path.basename(f)[:-4]: f for f in glob.glob(f'{LAS}/*.las')})  # an unzipped LAS over its zip
+    files = sorted(f for k, f in las.items() if not only or k in only or os.path.exists(f'{CACHE}/{k}/i.npy'))
     os.makedirs(CACHE, exist_ok=True)
     with Pool(min(procs, 4)) as pool:  # each holds a LAS tile's points (about 2 GB)
         for nm in pool.imap_unordered(cache_tile, files): print('cached', nm, f'{time.time() - t0:.0f}s', flush=True)
@@ -488,25 +519,29 @@ def save(res, fps, out, t0=None):
     inv = Transformer.from_crs('EPSG:3157', 'EPSG:4326', always_xy=True)
     keys = sorted(res)
     prc, pro, foot, top, roof, ridge, po = [], [0], [], [], [], [], [0]
+    wseg, wdesc = [], []
+    w2xy = lambda p: xy(*inv.transform(p[0], p[1])[::-1])
     for k in keys:
-        ground, parts = res[k]
+        ground, parts, walls = res[k]
         for ring, f, t, rf, rd in parts:
             lo, la = inv.transform(ring[:, 0], ring[:, 1])
             x, y = xy(la, lo)
             prc += list(zip(x, y)); pro.append(len(prc))
             foot.append(f); top.append(t); roof.append(rf); ridge.append(rd)
         po.append(len(foot))
+        for a, b, f, t, d in walls:
+            wseg.append((*w2xy(a), *w2xy(b), f, t)); wdesc.append(d)
     save_rings(out, [fps[k][1] for k in keys], po=np.array(po[:-1], np.int32), pn=np.diff(po).astype(np.int16),
-
+               wseg=np.array(wseg, np.float32).reshape(-1, 6), wdesc=np.array(wdesc, np.uint8).reshape(-1, 4),
                prc=np.array(prc, np.float32).reshape(-1, 2), pro=np.array(pro, np.int32), pfoot=np.array(foot, np.float32), ptop=np.array(top, np.float32),
                proof=np.array(roof, np.uint8), pridge=np.array(ridge, np.float32), osm=np.array([fps[k][0] for k in keys], np.int64))
-    print(f'{len(keys)} of {len(fps)} footprints, {len(foot)} parts ->', out, f'{os.path.getsize(out) / 1e6:.1f} MB', flush=True)
+    print(f'{len(keys)} of {len(fps)} footprints, {len(foot)} parts, {len(wseg)} walls ->', out, f'{os.path.getsize(out) / 1e6:.1f} MB', flush=True)
 
 
 # ---------------------------------------------------------------- other regions: one LAZ/COPC/LAS tile at a time
 def read_points(path, near=None):
-    """a LAZ/COPC/LAS (any point format, any CRS) -> its building and ground points in NAD83(CSRS) UTM 10 (x, y, z, class),
-    the tile's density (pts/m2). Ground is thinned by density. Open sets rarely classify buildings (class 6): then the
+    """a LAZ/COPC/LAS (any point format, any CRS) -> its building and ground points in NAD83(CSRS) UTM 10 (x, y, z, class,
+    intensity), the tile's density (pts/m2). Ground is thinned by density. Open sets rarely classify buildings (class 6): then the
     unclassified points (class 1) that near(x, y) says are by a footprint stand in for them (a tree beside a tower
     can leak in: ponytail, trees under 10 m are dropped anyway by MIN_TOP)."""
     import laspy
@@ -520,17 +555,17 @@ def read_points(path, near=None):
         for c in f.chunk_iterator(4_000_000):
             cl = np.asarray(c.classification)
             gi = np.flatnonzero(cl == 2); gi = gi[(np.arange(len(gi)) + g) % step == 0]; g += int((cl == 2).sum())
-            x, y, z = np.asarray(c.x), np.asarray(c.y), np.asarray(c.z).astype(np.float32)
+            x, y, z, it = np.asarray(c.x), np.asarray(c.y), np.asarray(c.z).astype(np.float32), np.asarray(c.intensity).astype(np.uint16)
             if to: x, y = to.transform(x, y)
-            def pick(i): return x[i], y[i], z[i]
+            def pick(i): return x[i], y[i], z[i], it[i]
             gnd.append(pick(gi)); bld.append(pick(np.flatnonzero(cl == 6)))
             if near is not None:
                 u = np.flatnonzero(cl == 1); u = u[near(x[u], y[u])]; unc.append(pick(u))
     use = bld if sum(len(a[0]) for a in bld) >= 500 else unc  # a classified tile, or an unclassified one
     parts = [(a, 2) for a in gnd] + [(a, 6) for a in use]
-    x, y, z = (np.concatenate([a[k] for a, _ in parts]) for k in range(3))
+    x, y, z, it = (np.concatenate([a[k] for a, _ in parts]) for k in range(4))
     cl = np.concatenate([np.full(len(a[0]), k, np.uint8) for a, k in parts])
-    return x, y, z, cl, dens
+    return x, y, z, cl, it, dens
 
 
 def tile(path, out, tmp):
@@ -558,11 +593,11 @@ def tile(path, out, tmp):
         i, j = (x - mn[0]).astype(int), (mn[1] + ny - y).astype(int)
         ok = (i >= 0) & (i < nx) & (j >= 0) & (j < ny)
         return ok & mask[j.clip(0, ny - 1), i.clip(0, nx - 1)]
-    x, y, z, cl, dens = read_points(path, near)
+    x, y, z, cl, it, dens = read_points(path, near)
     if not len(x): return save({}, [], out)
     x0, y0 = math.floor(x.min()), math.floor(y.min())
     d = f'{tmp}/c'; shutil.rmtree(d, ignore_errors=True)
-    write_cache(d, (x - x0).astype(np.float32), (y - y0).astype(np.float32), z, cl, x0, y0, int((x.max() - x0) // 4) + 1, int((y.max() - y0) // 4) + 1)
+    write_cache(d, (x - x0).astype(np.float32), (y - y0).astype(np.float32), z, cl, x0, y0, int((x.max() - x0) // 4) + 1, int((y.max() - y0) // 4) + 1, it)
     cloud = Cloud(tmp)
     tree = shapely.STRtree(polys); res = {}
     for k, p in enumerate(polys):
@@ -578,8 +613,10 @@ def tile(path, out, tmp):
 def merge(src='data/massing_lm', out=OUT_LM):
     """every <tile>.npz in src -> one file (a building on two tiles' edges is kept once)"""
     rings, po, pn, osm, prc, pro, cols, seen = [], [], [], [], [], [0], {k: [] for k in ('pfoot', 'ptop', 'proof', 'pridge')}, set()
+    wseg, wdesc = [], []
     for f in sorted(glob.glob(f'{src}/*.npz')):
         d = np.load(f)
+        if 'wseg' in d.files: wseg.append(d['wseg']); wdesc.append(d['wdesc'])  # each wall's look (tools/lidar_walls.py)
         for i in range(len(d['osm'])):
             r = d['rc'][d['ro'][i]:d['ro'][i + 1]]
             key = (int(d['osm'][i]), round(float(r[0][0]) * 2), round(float(r[0][1]) * 2))
@@ -590,6 +627,7 @@ def merge(src='data/massing_lm', out=OUT_LM):
                 for k in cols: cols[k].append(d[k][j])
     save_rings(out, rings, po=np.array(po, np.int32), pn=np.array(pn, np.int16), osm=np.array(osm, np.int64),
                prc=np.array(prc, np.float32).reshape(-1, 2), pro=np.array(pro, np.int32),
+               wseg=np.concatenate(wseg) if wseg else np.zeros((0, 6), np.float32), wdesc=np.concatenate(wdesc) if wdesc else np.zeros((0, 4), np.uint8),
                **{k: np.array(v, np.float32 if k in ('pfoot', 'ptop', 'pridge') else np.uint8) for k, v in cols.items()})
     print(len(rings), 'buildings ->', out, f'{os.path.getsize(out) / 1e6:.1f} MB')
 
@@ -645,6 +683,25 @@ def _lookup(db, q):
     return out
 
 
+_WT = None
+
+
+def walls_near(ring):
+    """the measured walls (tools/lidar_walls.py) within 3 m of a world-xy ring's box, whichever footprint they were
+    measured on (an outline with parts, a part over a podium: the walls are where they are): [(x0, y0, x1, y1, foot,
+    top, (d0, d1, d2, d3))]"""
+    global _WT
+    import shapely
+    if _WT is None:  # the City's 2022 walls and the rest of the Lower Mainland's (tools/lidar_stream.py)
+        ds = [d for d in (np.load(f) for f in (OUT, OUT_LM) if os.path.exists(f)) if 'wseg' in d.files and len(d['wseg'])]
+        seg = np.concatenate([d['wseg'] for d in ds]) if ds else None
+        _WT = seg is not None and (shapely.STRtree(shapely.linestrings(seg[:, :4].reshape(-1, 2, 2))), seg, np.concatenate([d['wdesc'] for d in ds]))
+    if not _WT: return []
+    xs, ys = [p[0] for p in ring], [p[1] for p in ring]
+    tree, seg, desc = _WT
+    return [(*map(float, seg[i]), tuple(int(v) for v in desc[i])) for i in tree.query(shapely.box(min(xs) - 3, min(ys) - 3, max(xs) + 3, max(ys) + 3))]
+
+
 # ---------------------------------------------------------------- self-test
 def check():
     """a synthetic tower on a podium with a wider lookout disc on top: three parts, the disc over a thinner shaft"""
@@ -670,9 +727,9 @@ def check():
     g = rng.uniform(-10, 50, (4000, 2)); pts.append(np.c_[g, np.zeros(4000), np.full(4000, 2)])
     a = np.concatenate(pts)
     class C:
-        def box(self, *b): return a[:, 0] + 1000, a[:, 1] + 5000, a[:, 2].astype(np.float32), a[:, 3].astype(np.uint8)
+        def box(self, *b): return a[:, 0] + 1000, a[:, 1] + 5000, a[:, 2].astype(np.float32), a[:, 3].astype(np.uint8), np.full(len(a), 150, np.uint16)
     foot = shapely.affinity.translate(pod, 1000, 5000)
-    ground, parts = mass((foot, [], C()))
+    ground, parts, walls = mass((foot, [], C()))
     parts.sort(key=lambda p: p[1])
     got = [(round(f), round(t), round(Polygon(r).area)) for r, f, t, *_ in parts]
     print(got)
@@ -691,7 +748,7 @@ def check():
     las.classification = rng.choice([1, 2, 6], n)
     with tempfile.TemporaryDirectory() as t:
         las.write(f'{t}/a.laz')
-        x, y, z, c, dens = read_points(f'{t}/a.laz')
+        x, y, z, c, it, dens = read_points(f'{t}/a.laz')
     want = int(((las.classification == 6) | (las.classification == 2)).sum())
     assert set(np.unique(c)) <= {2, 6} and want * 0.99 <= len(x) <= want and abs(dens - 0.3) < 0.01 and RES == 1.0, (len(x), want, dens)
     assert abs(x.mean() - 500050) < 2 and abs(y.mean() - 5450050) < 2  # 26910 -> 3157: same frame to a metre
@@ -705,4 +762,4 @@ if __name__ == '__main__':
         import tempfile
         with tempfile.TemporaryDirectory() as t: tile(a[1], a[2], t)
     elif a[:1] == ['merge']: merge(*a[1:])
-    else: bake(int(sys.argv[1]) if len(sys.argv) > 1 else os.cpu_count())
+    else: bake(int(a[0]) if a else os.cpu_count(), a[1:])

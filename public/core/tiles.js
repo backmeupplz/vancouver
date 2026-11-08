@@ -428,6 +428,7 @@ export class Tiles {
       geo.setAttribute('normal', new THREE.BufferAttribute(b.normal, 3, true))
       geo.setAttribute('color', new THREE.BufferAttribute(b.color, 3, true))
       geo.setAttribute('aWin', new THREE.BufferAttribute(b.aWin, 4))
+      geo.setAttribute('aFac', new THREE.BufferAttribute(b.aFac, 4))
       return geo
     }
     // in pieces of ~1.5 MB: pump() uploads a few MB a frame, and an overview tile's buildings (20+ MB) in one piece
