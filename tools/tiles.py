@@ -12,7 +12,7 @@ from shapely.ops import unary_union
 from PIL import Image, ImageDraw
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(__file__))
-from common import GROUND, GI, xy, extent, L0, L1, KX, KY, LAT_O, LON_O, HR, KINDS, KI, DRIVE, SHOP_AMENITY, line_kind, hnum, densify, all_tiles, HR_CACHE, hr_lookup, tile_args, load_feat
+from common import GROUND, GI, xy, extent, L0, L1, KX, KY, LAT_O, LON_O, HR, KINDS, KI, DRIVE, SHOP_AMENITY, line_kind, hnum, densify, all_tiles, HR_CACHE, hr_lookup, tile_args, load_feat, tube_h, SLAB
 from roofs import roof_lookup
 from facades import facade_lookup, NONE as B_NONE, GLASS as B_GLASS, SOLID as B_SOLID
 
@@ -312,6 +312,18 @@ def build(ij):
 
     # ---- lines
     lines = road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0)
+    # roads on roofs: the roof is their deck (its LiDAR height has the parked cars and lamps on it), so down to the deck
+    rd = [L for L in lines if L.get('roof') and L['z']]
+    if rd:
+        tree = STRtree([LineString(L['pts']) for L in rd])
+        for b in builds:
+            P = Polygon(b['ring']); top = b['base'] + b['h']
+            zs = []
+            for q in tree.query(P, predicate='intersects'):
+                Q = np.array(densify(rd[q]['pts'], 4)); line = LineString(rd[q]['pts'])
+                s_ = np.array([line.project(shapely.geometry.Point(p)) for p in rd[q]['pts']]); sq = np.array([line.project(shapely.geometry.Point(p)) for p in Q])
+                zs += list(np.interp(sq, s_, rd[q]['z'])[shapely.contains_xy(P, Q[:, 0], Q[:, 1])])
+            if zs and top - 4 < min(zs) < top + 1 and not b['roof']: b['h'] = max(0.5, min(zs) - b['base']); b['units'] = []
     # streets as ground: carriageways, sidewalks and boulevards, paths and rail beds, unioned per class so junctions
     # are clean (bridges are raised decks, drawn from the lines)
     # every piece that touches this tile, not only those it owns: a street crossing the tile edge is paved on
@@ -331,6 +343,25 @@ def build(ij):
             outer = ls.buffer(w / 2 + blvd + walk, quad_segs=3, cap_style='flat')
             polys.setdefault('sidewalk', []).append(outer)
             if blvd: polys.setdefault('blvd', []).append(ls.buffer(w / 2 + blvd, quad_segs=3, cap_style='flat'))
+
+    # ---- tunnel portals: where a tunnel's roof isn't under the ground the ground is cut and the page draws its box
+    cuts, lids = [], []
+    for wid, c, _, t in feat.get('lines', []):
+        if wid not in TUNNELS: continue
+        P, s, z, op = TUNNELS[wid]
+        lids += [(x, y, h + tube_h(line_kind(t)) + SLAB) for (x, y), h in zip(P[op], z[op])]
+        k = np.nonzero(op[:-1] & op[1:])[0]
+        if len(k): cuts.append(shapely.MultiLineString([P[r[0]:r[-1] + 2] for r in np.split(k, np.nonzero(np.diff(k) > 1)[0] + 1)])
+                                .buffer(road_shape(line_kind(t), t)[1] / 2 + 0.6 + SLAB, cap_style='flat', join_style='mitre'))
+    holes = unary_union(cuts) if cuts else None
+    if holes is not None:  # a building over a portal's box (a tunnel's control building) stands on its roof
+        shapely.prepare(holes); L_ = np.array(lids)
+        for b in builds:
+            B = Polygon(b['ring'])
+            if not holes.intersects(B): continue
+            on = L_[shapely.contains_xy(B.buffer(4), L_[:, 0], L_[:, 1])]
+            if len(on): b['mn'] = max(b['mn'] or 0.0, float(on[:, 2].max()) - b['base'])
+        builds = [b for b in builds if (b['mn'] or 0) < b['h'] - 1]
 
     # ---- docks: piers and floating docks mapped as lines (a marina's walkways and fingers) are decks on the water;
     # the boats berthed along them in marinas
@@ -380,7 +411,7 @@ def build(ij):
             out = Out(tx, ty, L0)
             ti_, tj_ = i * 4 + a, j * 4 + b
             terr = terrain_grid(dtm, a * L0, (3 - b) * L0, L0, 129)  # 8 m: embankments, cuts and seawalls under the roads
-            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, boats=boats, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all()):
+            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, boats=boats, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes):
                 continue
             os.makedirs(f'{OUT}/0', exist_ok=True)
             open(f'{OUT}/0/{ti_}_{tj_}.bin', 'wb').write(out.bytes()); n += 1
@@ -1186,8 +1217,9 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
     for wid, coords, refs, t in items:
         k = line_kind(t)
         if not k: continue
-        if t.get('tunnel') in ('yes', 'building_passage', 'culvert') or t.get('covered') == 'yes' and k in ('rail', 'lightrail'): continue
-        if t.get('area') == 'yes': continue
+        if t.get('tunnel') in TUNNEL and wid not in TUNNELS: continue
+        if t.get('tunnel') == 'building_passage' and (t.get('bridge') not in (None, 'no') or on_level(t)): continue  # a skywalk through a building
+        if t.get('covered') == 'yes' and k in ('rail', 'lightrail') and not t.get('tunnel') or t.get('area') == 'yes': continue
         new = sorted((e[2] for e in APPROACH.get(wid, ()) if e[2]), key=lambda n: n[:2], reverse=True)
         if new:  # an approach touches down between two nodes: a node there
             coords, refs = list(coords), list(refs)
@@ -1209,17 +1241,23 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
             pts = coords[a:b + 1]
             mid = pts[len(pts) // 2]
             if own and not (X0 <= mid[0] < X0 + L1 and Y0 <= mid[1] < Y0 + L1): continue
-            z = None
+            z, tube, kind = None, None, k
             raised = any(lo <= a and b <= hi for lo, hi, *_ in ap)
-            if not own:  # surfaces only: every piece touching the tile, bridges just flagged
-                z = [0.0] if bridge or raised else None
-            elif bridge or k == 'lightrail' and t.get('bridge'):
+            if not own:  # surfaces only: every piece touching the tile, bridges and tunnels just flagged
+                z = [0.0] if bridge or raised or wid in DECKS or wid in TUNNELS else None
+            elif wid in TUNNELS:
+                pts = densify(pts, 8)
+                z, tube = tunnel_heights(wid, pts)
+                tube = [2 if o and (e == 0 and refs[a] in PORTALS or e == len(pts) - 1 and refs[b] in PORTALS) else int(o) for e, o in enumerate(tube)]
+            elif bridge or wid in DECKS:  # bridges, roads on roofs
                 pts = densify(pts, 25)  # a long straight span needs points along it to carry its arch
                 z = deck_heights(wid, pts)
             elif raised:
                 pts = densify(pts, 12)
                 z = approach_heights(ap, a, b, pts)
-            out.append(dict(turns=turns, own=mid, kind=k, pts=pts, z=z, lanes=lanes, w=w, ow=ow, band=band, layer=int(hnum(t.get('layer')) or 0), a=refs[a], b=refs[b],
+                if k in FOOT and z and max(abs(z1 - z0) / max(1e-6, math.dist(p0, p1)) for p0, p1, z0, z1 in zip(pts, pts[1:], z, z[1:])) > 0.3:
+                    kind = 'steps'  # stairs off a footbridge
+            out.append(dict(turns=turns, own=mid, kind=kind, pts=pts, z=z, tube=tube, roof=wid in ROOFS, lanes=lanes, w=w, ow=ow, band=band and tube is None, layer=int(hnum(t.get('layer')) or 0), a=refs[a], b=refs[b],
                             name=t.get('name', ''), drive=k in DRIVE and t.get('access') not in ('private', 'no'),
                             crossing=k in ('footway', 'cycleway', 'path') and (t.get('footway') == 'crossing' or t.get('cycleway') == 'crossing') and t.get('crossing') not in ('unmarked', 'no')))
     return out
@@ -1231,12 +1269,38 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
 # trusses sit above the deck), samples far above the along-bridge profile dropped, the grade clamped, then smoothed.
 # Sidewalks and cycle decks mapped beside a road deck take that deck's height; a long bridge the LiDAR does not have
 # yet (stal̕əw̓asəm, 2024) or one under the trees spans between its abutments. Cached in data/decks<version>.pkl.
-DECK_VERSION = 4
+DECK_VERSION = 5
 DECK_CACHE = f'data/decks{DECK_VERSION}.pkl'
 GRADE = 0.07  # steepest deck grade kept, rise per metre
+STAIRS = 0.7  # rise per metre of the stairs down off a footbridge end where OpenStreetMap maps none
 FOOT = {'footway', 'cycleway', 'path', 'pedestrian', 'steps', 'track'}
 DECKS = None
 APPROACH = {}  # at-grade way id -> [(deck end node, touchdown node, new node or None, points, distance along, height)]
+TUNNEL = ('yes', 'culvert')  # underground (a building_passage runs at grade, under the building)
+TUNNELS, PORTALS = {}, set()  # tunnel way id -> (points, along, height, open); nodes where a tunnel comes out
+ROOFS = set()  # roads on roofs (decks the building carries)
+
+
+def ground_at(x, y):
+    """the LiDAR ground at world points, MRDEM where HRDEM has none"""
+    x, y = np.asarray(x, float).ravel(), np.asarray(y, float).ravel()
+    g = hr_lookup(x, y, 1)
+    return np.where(np.isfinite(g), g, MR[((MR_Y1 - y) / 32).astype(int).clip(0, MR.shape[0] - 1), ((x - MR_X0) / 32).astype(int).clip(0, MR.shape[1] - 1)])
+
+
+def drawn_ground(x, y):
+    """the ground as the page draws it: bilinear on the detail tiles' 8 m terrain grid"""
+    c = L0 / 128
+    fx, fy = np.asarray(x, float).ravel() / c, np.asarray(y, float).ravel() / c
+    i, j = np.floor(fx), np.floor(fy); u, v = fx - i, fy - j
+    g = ground_at(np.concatenate([i, i + 1, i, i + 1]) * c, np.concatenate([j, j, j + 1, j + 1]) * c).reshape(4, -1)
+    return g[0] * (1 - u) * (1 - v) + g[1] * u * (1 - v) + g[2] * (1 - u) * v + g[3] * u * v
+
+
+def on_level(t):
+    """a way OpenStreetMap puts above the ground floor (layer or level 1 and up), not inside a building"""
+    lv = t.get('level', '')
+    return not t.get('indoor') and ((hnum(t.get('layer')) or 0) >= 1 or ';' not in lv and (hnum(lv) or 0) >= 1)
 
 
 def deck_samples(coords, w):
@@ -1314,17 +1378,41 @@ def deck_profiles():
     key = (DECK_VERSION, max((os.path.getmtime(f) for f in files), default=0))
     if os.path.exists(DECK_CACHE):
         d = pickle.load(open(DECK_CACHE, 'rb'))
-        if d.get('key') == key: DECKS = d['decks']; APPROACH.update(d['approach']); return DECKS
+        if d.get('key') == key:
+            DECKS = d['decks']; APPROACH.update(d['approach']); TUNNELS.update(d['tunnels']); PORTALS.update(d['portals']); ROOFS.update(d['roofs'])
+            return DECKS
     t0 = time.time()
-    ways = {}
+    ways, tun, roofs, water = {}, {}, ROOFS, []
+    from shapely.strtree import STRtree
     for f in files:
-        for wid, coords, refs, t in pickle.load(open(f, 'rb')).get('lines', []):
-            if t.get('bridge') in (None, 'no') or len(coords) < 2: continue
+        d = pickle.load(open(f, 'rb'))
+        tops, blds, here = {}, None, False
+        for wid, coords, refs, t in d.get('lines', []):
             k = line_kind(t)
-            if k and t.get('tunnel') not in ('yes', 'building_passage', 'culvert'): ways[wid] = (coords, refs, t, k)
+            if not k or len(coords) < 2 or t.get('area') == 'yes': continue
+            if t.get('tunnel') in TUNNEL:
+                tun[wid] = (coords, refs, k, road_shape(k, t)[1]); here = True
+            elif t.get('bridge') not in (None, 'no'):
+                if t.get('tunnel') != 'building_passage': ways[wid] = (coords, refs, t, k)
+            elif k in DRIVE and not t.get('tunnel') and t.get('covered') != 'yes' and on_level(t):
+                # a road up on a building (a mall's rooftop parking, a parkade's top deck): a deck if it is mostly over
+                # a footprint and the LiDAR sees it well above the ground (below: the low surface across it)
+                if blds is None: blds = STRtree([Polygon(o).buffer(0) for _, prs, _ in d.get('buildings', []) for o, _ in prs if len(o) >= 4])
+                P = np.array(densify(coords, 4))
+                if len(blds.geometries) and len(np.unique(blds.query(shapely.points(P), predicate='within')[0])) > 0.5 * len(P):
+                    ways[wid] = (coords, refs, t, k); roofs.add(wid)
+        for wid, (coords, refs, k, w) in tun.items():  # where a tunnel meets a line that isn't one: its portal
+            for r in (refs[0], refs[-1]): tops[r] = wid
+        if here: water += [Polygon(o, [h for h in ins if len(h) >= 4]).buffer(0) for _, prs, t in d.get('areas', []) if ground_class(t) == 'water' for o, ins in prs if len(o) >= 4]
+        for wid, coords, refs, t in d.get('lines', []):
+            if wid not in tun and line_kind(t): PORTALS.update(r for r in refs if r in tops)
     raw = {}
     for wid, (coords, refs, t, k) in sorted(ways.items(), key=lambda kv: (int(kv[1][0][0][0] // L1), int(kv[1][0][0][1] // L1))):
         P, s, low, gnd = deck_samples(coords, road_shape(k, t)[1])
+        if wid in roofs:
+            up = low - hr_lookup(P[:, 0], P[:, 1], 1)
+            with np.errstate(invalid='ignore'):
+                if np.mean((up > 3) & (up < 25)) < 0.6: del ways[wid]; roofs.discard(wid); continue  # at grade after all (a car park beside it)
         raw[wid] = (P, s, low, gnd)
     layer = {wid: int(hnum(t.get('layer')) or 0) for wid, (c, r, t, k) in ways.items()}
     prof = {}
@@ -1333,9 +1421,9 @@ def deck_profiles():
         L = s[-1]
         mid = (s > 0.15 * L) & (s < 0.85 * L)
         g = np.nan_to_num(gnd, nan=0.0)
-        if layer[wid] >= 1 and L > 80 and mid.any() and np.mean(~np.isfinite(low[mid]) | (low[mid] - g[mid] < 2)) > 0.6:
+        if wid not in roofs and layer[wid] >= 1 and L > 80 and mid.any() and np.mean(~np.isfinite(low[mid]) | (low[mid] - g[mid] < 2)) > 0.6:
             missing.add(wid)  # the surface is no higher than the land and water beside it: the deck is newer than the survey
-        elif ways[wid][3] in FOOT | {'service', 'residential', 'tertiary'} and L < 400 and wooded(P, low, road_shape(ways[wid][3], ways[wid][2])[1]):
+        elif wid not in roofs and ways[wid][3] in FOOT | {'service', 'residential', 'tertiary'} and L < 400 and wooded(P, low, road_shape(ways[wid][3], ways[wid][2])[1]):
             missing.add(wid); canopy.add(wid)  # a small bridge under the trees: the LiDAR sees their crowns, not the deck
         else:
             z = robust_deck(s, low)
@@ -1449,11 +1537,81 @@ def deck_profiles():
             if not np.isfinite(g) or abs(z[e] - g) < 1.0: continue
             prof[w] = z[:] = to_ground(s, z, g, e); eased += 1
     if eased: go_on()  # nodes near those ends moved
+    TUNNELS.update(tunnel_profiles(tun, STRtree(water) if water else None))
     HR_CACHE.clear()
-    try: pickle.dump({'key': key, 'decks': DECKS, 'approach': APPROACH}, open(DECK_CACHE, 'wb'), protocol=5)
+    try: pickle.dump({'key': key, 'decks': DECKS, 'approach': APPROACH, 'tunnels': TUNNELS, 'portals': PORTALS, 'roofs': ROOFS}, open(DECK_CACHE, 'wb'), protocol=5)
     except OSError: pass
-    print('bridge decks', len(DECKS), 'of', len(ways), 'ways,', len(missing), 'not in the LiDAR,', len(APPROACH), 'approaches', round(time.time() - t0), 's', flush=True)
+    print('bridge decks', len(DECKS), 'of', len(ways), 'ways,', len(roofs), 'on roofs,', len(missing), 'not in the LiDAR,', len(APPROACH), 'approaches,',
+          len(TUNNELS), 'tunnels', round(time.time() - t0), 's', flush=True)
     return DECKS
+
+
+def tunnel_profiles(ways, water=None):
+    """ways {id: (coords, refs, kind, width)}, water: STRtree of OpenStreetMap's water areas near them -> {id: (points every
+    4 m, distance along, height, open)}. A tunnel runs from portal to portal (PORTALS: at the drawn ground there),
+    straight where the ground is high over it, else under the ground with its roof 0.5 m down, no steeper than its
+    kind's grade. Ways are joined at shared nodes, the joints' and dead ends' heights in between (Laplace: straight along
+    a chain). Open: where the ground isn't 0.3 m over its roof, near the portals (the bake cuts the ground there, the
+    page draws its box and portal face)"""
+    use = {}
+    for wid, (c, refs, k, w) in ways.items():
+        for r in refs: use[r] = use.get(r, 0) + 1
+    segs = []  # (way, first ref, last ref, points, along, ground, highest roof under the ground)
+    for wid, (c, refs, k, w) in sorted(ways.items(), key=lambda kv: (int(kv[1][0][0][0] // L1), int(kv[1][0][0][1] // L1))):  # a LiDAR tile at a time
+        cut = [0] + [n for n in range(1, len(refs) - 1) if use[refs[n]] > 1] + [len(refs) - 1]
+        for a, b in zip(cut, cut[1:]):
+            P = np.array(densify(c[a:b + 1], 4)); s = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
+            t = np.gradient(P, axis=0) if len(P) > 1 else np.array([[1.0, 0.0]]); t /= np.maximum(np.hypot(t[:, 0], t[:, 1]), 1e-6)[:, None]
+            n = np.stack([-t[:, 1], t[:, 0]], 1) * (w / 2 + 0.6 + SLAB)
+            g = drawn_ground(*np.concatenate([P, P + n, P - n]).T).reshape(3, -1).min(0)
+            segs.append((wid, refs[a], refs[b], P, s, g, g - tube_h(k) - SLAB - 0.5))
+    h, free = {}, {}
+    for wid, ra, rb, P, s, g, u in segs:
+        for r, e in ((ra, 0), (rb, -1)):
+            if r in PORTALS: h[r] = float(drawn_ground(*P[e])[0])
+            else: free.setdefault(r, []).append(float(u[e]))  # a joint, or a dead end (an underground station)
+    for r, us in free.items(): h[r] = min(us)
+    grade = lambda k: 0.035 if k == 'rail' else 0.05 if k == 'lightrail' else 0.10 if k in FOOT else 0.06
+    for _ in range(200):  # joints: the mean of their neighbours by 1 / distance, never above the ground's limit there
+        acc = {}  # nor further below a neighbour than the grade gets (a joint just inside a portal)
+        for wid, ra, rb, P, s, g, u in segs:
+            L = max(s[-1], 1.0)
+            for r, o in ((ra, rb), (rb, ra)):
+                if r in free: a = acc.setdefault(r, [0.0, 0.0, -np.inf]); a[0] += h[o] / L; a[1] += 1 / L; a[2] = max(a[2], h[o] - grade(ways[wid][2]) * L)
+        for r, (num, den, lo) in acc.items(): h[r] = max(min(num / den, min(free[r])), lo)
+    out = {}
+    for wid, ra, rb, P, s, g, u in segs:
+        k = ways[wid][2]
+        G = grade(k)
+        L = max(s[-1], 1e-6)
+        # the ground's limit holds away from the portals (it can't get under the ground any faster): there it is open.
+        # Under the sea or a river it holds right up to the bank, the tube coming down to it more steeply if it must
+        X = (tube_h(k) + SLAB + 0.5) / G
+        wet = SEA_M[((SEA_Y1 - P[:, 1]) / SEA_C).astype(int).clip(0, SEA_M.shape[0] - 1), ((P[:, 0] - SEA_X0) / SEA_C).astype(int).clip(0, SEA_M.shape[1] - 1)]
+        if water is not None: wet[np.unique(water.query(shapely.points(P), predicate='within')[0])] = True  # rivers and lakes
+        lim = np.where(((s < X) & (ra in PORTALS) | (L - s < X) & (rb in PORTALS)) & ~wet, np.inf, u)
+        ds = np.diff(s)
+        for m in range(1, len(lim)): lim[m] = min(lim[m], lim[m - 1] + G * ds[m - 1])  # no steeper than G (the lower envelope)
+        for m in range(len(lim) - 2, -1, -1): lim[m] = min(lim[m], lim[m + 1] + G * ds[m])
+        Gc = 2.5 * G if wet.any() else G
+        z = np.maximum(np.minimum(h[ra] + (h[rb] - h[ra]) * s / L, lim), np.maximum(h[ra] - Gc * s, h[rb] - Gc * (L - s)))
+        z[0], z[-1] = h[ra], h[rb]
+        op = (g < z + tube_h(k) + SLAB + 0.3) & ~wet
+        if wid in out:  # the way's next stretch (split at a joint): on along it
+            P0, s0, z0, o0 = out[wid]
+            out[wid] = (np.concatenate([P0, P[1:]]), np.concatenate([s0, s0[-1] + s[1:]]), np.concatenate([z0, z[1:]]), np.concatenate([o0, op[1:]]))
+        else: out[wid] = (P, s, z, op)
+    return {w: (P, s.astype(np.float32), z.astype(np.float32), o) for w, (P, s, z, o) in out.items()}
+
+
+def tunnel_heights(wid, pts):
+    """a tunnel piece's height at each of its points and whether it is open there (or within 6 m of it)"""
+    P, s, z, op = TUNNELS[wid]
+    line = LineString(P)
+    sp = np.array([line.project(shapely.geometry.Point(p)) for p in pts])
+    c = np.concatenate([[0], np.cumsum(op)])
+    lo, hi = np.searchsorted(s, sp - 6, 'left'), np.searchsorted(s, sp + 6, 'right')
+    return [float(v) for v in np.interp(sp, s, z)], [bool(v) for v in c[hi] - c[lo] > 0]
 
 
 def to_ground(s, z, g, e):
@@ -1514,7 +1672,15 @@ def approaches(files, tops):
                     z, down = h0 + (far - h0) * s / max(s[-1], 1e-6), None
                 else:  # a footway's surface beyond its bridge is a building or the trees as often as a ramp: it just comes down
                     z, down = ramp(s, low, g, h0, G, 0 if kind in FOOT else 300)
-                if down is not None and (down < 0 or s[down] < 6): continue  # down at once: stairs or a lift, not a ramp
+                    # the next node another way meets (a path down there: the ramp must be down by then)
+                    jn = next((vert[n] for n in range(1, len(order)) if len(at.get(refs[order[n]], ())) > 1), None)
+                    if down is not None and (down < 0 or s[down] < 6) or kind in FOOT and jn is not None and (down is None or down > jn):
+                        if kind not in FOOT: continue  # down at once: a lift, not a ramp
+                        # a path on from a footbridge's end down on the ground (the stairs aren't mapped): stairs down along it,
+                        # down by the next junction (steeper, up to a stair tower's 1.5, where OpenStreetMap leaves no room)
+                        st = STAIRS if jn is None else min(1.5, max(STAIRS, (h0 - g[jn]) / max(s[jn], 1e-6)))
+                        z = np.maximum(h0 - st * s, g); low_ = z - g < 0.3
+                        down = int(np.argmax(low_)) if low_.any() else None
                 end, ins, keep = refs[order[-1]], None, len(P)
                 if down is not None:  # the approach ends where it touches down: at a node of the way, else at a new one there
                     vi = int(np.searchsorted(vert, down))
@@ -1588,7 +1754,7 @@ def pack_ring(out, ring):
     return b
 
 
-def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=()):
+def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None):
     tb = box(tx, ty, tx + size, ty + size)
     n = terr.shape[0]
     out.section('TERR', struct.pack('<H', n) + np.clip(np.round(terr * 10), -32768, 32767).astype('<i2').tobytes())
@@ -1607,6 +1773,7 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
         try: g = unary_union(cand).intersection(tb)
         except Exception: g = unary_union([c.buffer(0) for c in cand]).intersection(tb)
         if wat and k not in ('water', 'pier', 'land') and k not in ('road', 'arterial', 'sidewalk', 'blvd', 'walk', 'cycle', 'trail', 'ballast'): g = g.difference(water_u)
+        if detail and holes is not None and g.intersects(holes): g = g.difference(holes)  # tunnel portals: the page draws their boxes there
         g = g.simplify(tol)
         if k != 'land':
             parts = [p for p in (g.geoms if hasattr(g, 'geoms') else [g]) if p.geom_type == 'Polygon' and p.area >= min_area]
@@ -1651,12 +1818,16 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
         pts = L['pts'] if detail or L['z'] or len(L['pts']) <= 2 else list(LineString(L['pts']).simplify(1.5).coords)
         z = L['z'] if L['z'] and len(pts) == len(L['pts']) else None  # bridge decks in overview tiles too
         tf, tb_ = L.get('turns', ([], []))
-        flags = (1 if L['ow'] else 0) | (2 if L['band'] else 0) | (4 if z else 0) | (8 if L['drive'] else 0) | (16 if L.get('crossing') else 0) | (32 if tf or tb_ else 0)
+        flags = (1 if L['ow'] else 0) | (2 if L['band'] else 0) | (4 if z else 0) | (8 if L['drive'] else 0) | (16 if L.get('crossing') else 0) | (32 if tf or tb_ else 0) \
+            | (64 if z and L.get('tube') else 0) | (128 if z and L.get('roof') else 0)
         lb += struct.pack('<BBBbHII', KI[L['kind']], min(255, L['lanes']), flags, max(-8, min(7, L['layer'])), int(min(655, L['w']) * 100), nodes[L['a']], nodes[L['b']])
         lb += pack_ring(out, pts)
         if z: lb += np.round(np.array(z) * 10).astype('<i2').tobytes()
         if tf or tb_: lb += bytes([len(tf)] + tf + [len(tb_)] + tb_)  # turn lanes, left to right in each direction of travel
     out.section('LINE', bytes(lb))
+    if detail:  # tunnels (flag 64): per point 0 underground, 1 open (the ground is cut: the page draws its box), 2 a portal
+        tun = [(n, L['tube']) for n, L in enumerate(sel) if L.get('tube') and L['z']]
+        out.section('TUNL', struct.pack('<I', len(tun)) + b''.join(struct.pack('<I', n) + bytes(c) for n, c in tun))
     # buildings: compact header, optional fields behind flags
     bb = bytearray(); nb = 0
     for b in builds:

@@ -6,7 +6,8 @@
 #  step     bridge ends more than 1 m off the road they meet (cliffs at abutments), joints between decks that don't meet
 #  steep    deck stretches steeper than 12% (paths 25%, stairs any)
 #  buried   deck stretches the ground rises through (more than 1 m above the deck top)
-#  tunnel   tunnels (tunnel=*, covered=yes, layer < 0 under something) drawn on the surface
+#  tunnel   tunnels (tunnel=*, covered=yes, layer < 0 under something) drawn on the surface, or whose tube pokes out of
+#           the ground away from the portals (where the bake did not cut the ground for its box)
 # Run: uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/audit_elev.py <tiles dir> [procs] [i_j ...]
 # Writes <tiles dir>/audit.json (every finding, worst first) and prints counts and the worst of each kind with a view
 # hash for the site (#X,Y,zoom; main.js setView: X = E*6 + 23551.5, Y = 9727.5 - (N*0.5 + h*0.866)*6).
@@ -17,10 +18,10 @@ import shapely
 from shapely.geometry import LineString, Polygon
 from shapely.strtree import STRtree
 sys.path.insert(0, os.path.dirname(__file__))
-from common import read_tile, latlon, L0, KINDS, line_kind, hnum, hr_lookup, densify, all_tiles, tile_args, load_feat
+from common import read_tile, latlon, L0, KINDS, line_kind, hnum, hr_lookup, densify, all_tiles, tile_args, load_feat, tube_h, SLAB
 
 DIR = sys.argv[1] if len(sys.argv) > 1 else 'public/tiles'
-TUNNEL = ('yes', 'building_passage', 'culvert')
+TUNNEL = ('yes', 'culvert')
 
 
 def parse(path):
@@ -39,7 +40,11 @@ def parse(path):
             z = None
             if flags & 4: z = np.frombuffer(b, '<i2', len(pts), o) / 10.0; o += 2 * len(pts)
             if flags & 32: nf = b[o]; o += 1 + nf; nb = b[o]; o += 1 + nb
-            lines.append(dict(kind=kind, layer=layer, w=w / 100, band=bool(flags & 2), a=int(nodes[a]), b=int(nodes[bb]), pts=pts, z=z))
+            lines.append(dict(kind=kind, layer=layer, w=w / 100, band=bool(flags & 2), a=int(nodes[a]), b=int(nodes[bb]), pts=pts, z=z, tunnel=bool(flags & 64), tube=None))
+    if 'TUNL' in sec:  # per point of a tunnel piece: 0 underground, 1 open, 2 portal
+        o = sec['TUNL'][0]; cnt = struct.unpack_from('<I', b, o)[0]; o += 4
+        for _ in range(cnt):
+            L = lines[struct.unpack_from('<I', b, o)[0]]; L['tube'] = np.frombuffer(b, np.uint8, len(L['pts']), o + 4); o += 4 + len(L['pts'])
     blds = []
     if 'BLDG' in sec:
         o = sec['BLDG'][0]; cnt = struct.unpack_from('<I', b, o)[0]; o += 4
@@ -115,7 +120,7 @@ def audit(ij):
         return ways[min(c)] if c else None
     lines = [L for _, T in tiles.items() for L in T[4]]
     mine = [L for _, T in own for L in T[4]]
-    decks = [L for L in lines if L['z'] is not None]
+    decks = [L for L in lines if L['z'] is not None and not L['tunnel']]
     seen_b, blds = set(), []
     for _, T in tiles.items():
         for B in T[5]:
@@ -208,6 +213,14 @@ def audit(ij):
                 k_ = int(np.argmax(np.where(st, g, 0)))
                 add('steep', float(g[k_] * 100 * min(ds[k_], 30)), *P[k_], z[k_], L, w, grade=g[k_] * 100, length=ds[k_])
             # buried: the ground above the deck top away from its ends
+            if L['tunnel']:  # its tube under the ground, but where the bake cut the ground for its box
+                if L['tube'] is None: continue
+                roof = z + tube_h(KINDS[L['kind']]) + SLAB; gp = G(P[:, 0], P[:, 1])
+                out_ = (L['tube'] == 0) & (gp < roof - 0.5)
+                if out_.any():
+                    m = int(np.argmax(np.where(out_, roof - gp, -1)))
+                    add('tunnel', 10 * out_.sum() * min(roof[m] - gp[m], 10), *P[m], gp[m], L, w, note='tube out of the ground', above=roof[m] - gp[m])
+                continue
             Q = np.array(densify([tuple(p) for p in P], 4.0)); sq = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(Q, axis=0).T))])
             zq = np.interp(sq, s, z); gq = G(Q[:, 0], Q[:, 1])
             inner = (sq > 12) & (sq < sq[-1] - 12)
@@ -243,7 +256,7 @@ def audit(ij):
     if blds and mine:
         bt = STRtree([Polygon(B['ring']).buffer(0) for B in blds])
         for L in mine:
-            if L['z'] is None: continue
+            if L['z'] is None or L['tunnel']: continue
             w = tags(L)
             P, z = L['pts'], L['z']
             half = L['w'] / 2 + (2.5 if L['band'] else 0.6)
@@ -260,6 +273,7 @@ def audit(ij):
                     if inter.area < 2: continue
                     f = ls.project(inter.centroid, normalized=True); zz = z[k] + (z[k + 1] - z[k]) * f
                     top, bot = zz + 0.35, zz - th
+                    if zz > B['top'] - 0.5: continue  # on its roof (a mall's rooftop car park)
                     pen = min(B['top'] - bot, top - B['bot'])
                     near_end = any(np.hypot(*(np.array(inter.centroid.coords[0]) - L['pts'][e])) < 8 for e, nd in ((0, L['a']), (-1, L['b'])) if nd not in deck_nodes)
                     if pen > 0.5 and not near_end:

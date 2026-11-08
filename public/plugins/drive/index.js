@@ -758,7 +758,7 @@ export default function drive(city) {
     onFoot = kind === 'foot' || kind === 'hike'
     hike = kind === 'hike' ? at.hike : null
     document.activeElement?.blur?.() // a focused toolbar button would take Space (brake) as a click
-    Object.assign(car, newVan(kind === 'bus' ? (at.pick.r.artic ? ARTIC : CITYBUS) : VAN), { roll: 0, deck: false, kerb: true, parked: onFoot, kneel: 0 })
+    Object.assign(car, newVan(kind === 'bus' ? (at.pick.r.artic ? ARTIC : CITYBUS) : VAN), { roll: 0, deck: false, roof: undefined, kerb: true, parked: onFoot, kneel: 0 })
     errand = null; carried.visible = false
     if (kind === 'bus') { // the shift: where it starts (the first stop, or the one nearest the middle of the map)
       vehicle = at.bus
@@ -766,7 +766,7 @@ export default function drive(city) {
       spot = busSpawn = game.startAt(at.pick.from, at.x, at.y)
     }
     if (onFoot) {
-      Object.assign(man, { x: spot.x, y: spot.y, yaw: spot.yaw, speed: 0, board: null, stamina: 1, winded: false })
+      Object.assign(man, { x: spot.x, y: spot.y, yaw: spot.yaw, speed: 0, board: null, stamina: 1, winded: false, roof: undefined })
       man.h = city.world.heightAt(man.x, -man.y) + 0.15
       const v = !hike && carSpawn(at.x, at.y) // the van waits on the street nearby (not at a trailhead)
       hasVan = !!v && Math.hypot(v.x - man.x, v.y - man.y) < 120
@@ -936,20 +936,22 @@ export default function drive(city) {
     const back = onFoot ? 4.3 + sp * 0.18 : doors ? -(car.V.hl + doorCam[0]) : 8.6 + big * 0.8 + sp * 0.14, up = onFoot ? 1.9 + sp * 0.06 : doors ? 3.8 : 4.3 + big * 0.2 + sp * 0.05
     const off = !game ? 0 : doors ? doorCam[1] : -2.2
     const bx = P.x - fx * back + fy * off, by = P.y - fy * back - fx * off
-    const gy = Math.max(city.world.heightAt(bx, -by) + (onFoot ? 1.2 : 1.4), P.h + up)
+    const tube = P.roof != null // in a tunnel: under its ceiling, and the buildings overhead are no walls
+    const gy = tube ? Math.min(P.h + up, P.roof - 0.7) : Math.max(city.world.heightAt(bx, -by) + (onFoot ? 1.2 : 1.4), P.h + up)
     v3.set(bx, gy, -by)
     if (snap) chase.pos.copy(v3); else chase.pos.lerp(v3, 1 - Math.exp(-(doors ? 1.6 : 7) * dt))
+    if (tube) chase.pos.y = Math.min(chase.pos.y, P.roof - 0.7)
     // keep the camera out of buildings, every frame and after the smoothing (so it never glides through a wall):
     // on the line from the player to the camera, stop short of the first wall; then step off walls beside it
-    const cx = chase.pos.x, cy = -chase.pos.z, k0 = wallHit(P.x, P.y, cx, cy)
+    const cx = chase.pos.x, cy = -chase.pos.z, k0 = tube ? 1 : wallHit(P.x, P.y, cx, cy)
     if (k0 < 1) {
       const len = Math.hypot(cx - P.x, cy - P.y) || 1, k = Math.max(0, k0 - 0.7 / len)
       chase.pos.x = P.x + (cx - P.x) * k; chase.pos.z = -(P.y + (cy - P.y) * k)
     }
-    const side = collide(chase.pos.x, -chase.pos.z, 0.6)
+    const side = !tube && collide(chase.pos.x, -chase.pos.z, 0.6)
     if (side) { chase.pos.x += side.x; chase.pos.z -= side.y }
     // the near plane comes in when a wall is close, so it never cuts through one
-    const wall = collide(chase.pos.x, -chase.pos.z, 2.5)
+    const wall = !tube && collide(chase.pos.x, -chase.pos.z, 2.5)
     chase.near = wall ? clamp((2.5 - Math.hypot(wall.x, wall.y)) * 0.6, 0.2, nearPlane()) : nearPlane()
     const ahead = onFoot ? 3 : doors ? car.V.hl - 3 : 6 + big * 0.3, right = doors ? car.V.hw + 1.2 : 0
     v4.set(P.x + fwdX(P.yaw) * ahead + fwdY(P.yaw) * right, P.h + (onFoot ? 1.3 : 1.0), -(P.y + fwdY(P.yaw) * ahead - fwdX(P.yaw) * right))
@@ -1135,15 +1137,29 @@ export default function drive(city) {
 
   // ---------------------------------------------------------------- driving
   // the surface under (x, north): a bridge deck when the van is on one, else the ground; y = height of the road top
-  // near a deck's end (where it meets the street, often a few metres off the terrain) the van may step up or down
+  // near a deck's end (where it meets the street, often a few metres off the terrain) the van may step up or down.
+  // In a tunnel: its road, under the ground, and roof the height of its ceiling
   function surface(x, y, curY) {
     const g = city.world.heightAt(x, -y) + 0.2
     const r = nearestRoad(x, y, 16, true, false, false, curY - 0.58)
     if (!r) return { y: g, deck: false, end: false }
     const P = r.s.p.pts, m = P.length - 2, end = Math.min(Math.hypot(x - P[0], y - P[1]), Math.hypot(x - P[m], y - P[m + 1])) < 25
     const dz = r.z + 0.58
-    if (r.d < 1.2 && Math.abs(dz - curY) < (end ? 7 : 2.6)) return { y: Math.max(g, dz), deck: dz - g > 1.2, end }
+    if (r.d < 1.2 && Math.abs(dz - curY) < (end ? 7 : 2.6)) return r.s.p.tunnel ? { y: dz, deck: true, end, roof: r.z + r.s.p.tunnel } : { y: Math.max(g, dz), deck: dz - g > 1.2, end }
     return { y: g, deck: false, end }
+  }
+  // how far (x, north) is past the railings (tile-worker.js railings), or a tunnel's walls (tubes), of the decks at about
+  // height h: the least of them, so a deck splitting into pieces or one beside another is one surface; -Infinity on a
+  // roof (no railings there)
+  function railPast(x, y, h) {
+    let best = Infinity
+    segsNear(x, y, 14, (s) => {
+      if (s.z0 == null) return
+      const dx = s.x1 - s.x0, dy = s.y1 - s.y0, u = clamp(((x - s.x0) * dx + (y - s.y0) * dy) / (dx * dx + dy * dy || 1), 0, 1)
+      if (Math.abs(s.z0 + (s.z1 - s.z0) * u - h) > 2.6) return
+      best = Math.min(best, s.p.roof ? -Infinity : Math.hypot(x - s.x0 - dx * u, y - s.y0 - dy * u) - (s.p.w / 2 + (s.p.tunnel ? 0.6 : s.p.band ? 2 : 0)))
+    })
+    return best
   }
   const roadAt = (x, y, h) => { const r = nearestRoad(x, y, 2); return !!r && r.d < 0.5 && (r.z == null ? h - (city.world.heightAt(x, -y) + 0.2) < 3 : Math.abs(r.z + 0.58 - h) < 3) }
   function input() {
@@ -1158,7 +1174,7 @@ export default function drive(city) {
     // Lane assist: with no steering, a gentle steer along the road the van is on
     let steer = I.steer
     if (assist && !steer && car.speed > 2.5 && !car.parked) {
-      const r = nearestRoad(car.x, car.y, 3)
+      const r = car.deck ? nearestRoad(car.x, car.y, 3, true, false, false, car.h - 0.58) : nearestRoad(car.x, car.y, 3) // on a deck or in a tunnel: that road, not the one over or under it
       if (r && r.d < 0.5) {
         let d = wrap(yawFromDir(r.dir) - car.yaw)
         if (Math.abs(d) > Math.PI / 2) d = wrap(d + Math.PI)
@@ -1174,7 +1190,8 @@ export default function drive(city) {
     let nx = car.x + vx * dt, ny = car.y + vy * dt
     const blocked = (x, y) => {
       const s = surface(x, y, car.h)
-      if (car.deck && !s.deck && car.h - s.y > 2 && !s.end) return 'edge'
+      if (car.deck && !s.deck && car.h - s.y > 2 && !s.end) return 'edge' // off the deck's side
+      if (car.deck) { const p = railPast(x, y, car.h - 0.58); if (p + car.V.hw > 0 && p > railPast(car.x, car.y, car.h - 0.58)) return 'rail' } // its railing, a tunnel's wall
       const ax = x + fx * Math.sign(car.speed || 1) * 2, ay = y + fy * Math.sign(car.speed || 1) * 2
       if (!s.deck && isWater(ax, ay) && !roadAt(ax, ay, car.h)) return 'water'
       return null
@@ -1184,6 +1201,15 @@ export default function drive(city) {
       const r = nearestRoad(car.x, car.y, 16, true), l = r ? Math.hypot(r.px - car.x, r.py - car.y) : 0
       if (l > 0.01) { const vn = bounce((r.px - car.x) / l, (r.py - car.y) / l, 0, 0, 0.25, 0); if (vn > 1.5) bumped(vn, vn > 3 ? sfx.clank : null) } else car.speed *= 0.5
       nx = car.x; ny = car.y
+    } else if (why === 'rail') { // along a railing or a tunnel's wall, scraping: on along the deck, a little in, turned with it
+      const r = nearestRoad(car.x, car.y, 16, true, false, false, car.h - 0.58)
+      if (r) {
+        const tx = Math.cos(r.dir), ty = Math.sin(r.dir), m = (nx - car.x) * tx + (ny - car.y) * ty, l = Math.hypot(r.px - car.x, r.py - car.y) || 1
+        const sx = car.x + tx * m + ((r.px - car.x) / l) * 0.05, sy = car.y + ty * m + ((r.py - car.y) / l) * 0.05
+        if (blocked(sx, sy)) { nx = car.x; ny = car.y } else { nx = sx; ny = sy }
+        const a = yawFromDir(r.dir), d = wrap(a - car.yaw), e = Math.abs(d) < Math.PI / 2 ? d : wrap(d + Math.PI)
+        car.yaw += e * Math.min(1, 4 * dt); car.speed *= 1 - Math.min(1, 0.6 * dt)
+      } else { nx = car.x; ny = car.y }
     } else if (why) {
       if (!blocked(nx, car.y)) ny = car.y
       else if (!blocked(car.x, ny)) nx = car.x
@@ -1208,14 +1234,14 @@ export default function drive(city) {
     // street furniture, trunks, bollards, signal poles; then people
     for (let i = 0; i < nsec; i++) {
       const B = secs[i]
-      propsNear(B.x, B.y, B.hl + 1, postHit)
+      if (car.roof == null) propsNear(B.x, B.y, B.hl + 1, postHit) // (in a tunnel the trees and lamps are on the ground over it)
       for (const o of poles(B.x, B.y, B.hl + 4)) if (Math.abs(o.y - car.h) < 4 && !game?.inLane(o.x, -o.z)) carVsPost(o.x, -o.z, o.r, true)
     }
     carVsPeople(performance.now())
     kerbs()
     // stand on the surface: height from the middle, pitch and roll from the wheels
     const s = surface(car.x, car.y, car.h)
-    car.deck = s.deck
+    car.deck = s.deck; car.roof = s.roof
     car.h += (s.y - car.h) * (1 - Math.exp(-18 * dt))
     const near = (v) => (Math.abs(v - car.h) < 1.5 ? v : car.h) // a wheel over a deck edge or a kerb drop doesn't tip the van
     const wb = car.V.wb, ax = wb / 2, tw = car.V.hw * 0.9
@@ -1269,7 +1295,7 @@ export default function drive(city) {
     const r = nearestRoad(x, y, 16, true, true, false, curY - 0.5)
     if (!r) return { y: g, deck: false }
     const dz = r.z + 0.5, reach = r.s.p.band ? 5 : 1
-    if (r.d < reach && Math.abs(dz - curY) < 2.2) return { y: Math.max(g, dz), deck: dz - g > 1.2 }
+    if (r.d < reach && Math.abs(dz - curY) < 2.2) return r.s.p.tunnel ? { y: dz, deck: true, roof: r.z + r.s.p.tunnel } : { y: Math.max(g, dz), deck: dz - g > 1.2 }
     return { y: g, deck: false }
   }
   // a hike's pace: slower the steeper (and steep downhill too), slower off the trail, a push on tires you
@@ -1316,12 +1342,17 @@ export default function drive(city) {
     if ((nx !== man.x || ny !== man.y) && wet(nx + fx * 0.4, ny + fy * 0.4)) {
       if (!wet(nx + fx * 0.4, man.y)) ny = man.y; else if (!wet(man.x, ny + fy * 0.4)) nx = man.x; else { nx = man.x; ny = man.y }
     }
+    if (man.deck && (nx !== man.x || ny !== man.y)) { // a deck's railing, a tunnel's walls
+      const now = railPast(man.x, man.y, man.h - 0.5)
+      const out = (x, y) => { const p = footSurface(x, y, man.h).deck ? railPast(x, y, man.h - 0.5) : -1; return p + 0.3 > 0 && p > now }
+      if (out(nx, ny)) { if (!out(nx, man.y)) ny = man.y; else if (!out(man.x, ny)) nx = man.x; else { nx = man.x; ny = man.y } }
+    }
     man.x = nx; man.y = ny
     // buildings, the parked van, posts and trunks (not the ones a trail runs through), signal poles, people, cars
     const p = !man.deck && collide(man.x, man.y, 0.32) // (not the buildings under a bridge)
     if (p) { man.x += p.x; man.y += p.y }
     if (hasVan) { const q = circleBox(man.x, man.y, 0.32, car.x, car.y, fwdX(car.yaw), fwdY(car.yaw), car.V.hl, car.V.hw); if (q) { man.x += q.x; man.y += q.y } }
-    propsNear(man.x, man.y, 1, (x, y, r, kind) => { if (!(kind === 0 && onTrail)) push(x, y, r) })
+    if (man.roof == null) propsNear(man.x, man.y, 1, (x, y, r, kind) => { if (!(kind === 0 && onTrail)) push(x, y, r) })
     for (const o of poles(man.x, man.y, 3)) if (Math.abs(o.y - man.h) < 4) push(o.x, -o.z, o.r)
     const now = performance.now()
     for (const o of people(man.x, man.y, 2.5)) {
@@ -1341,7 +1372,7 @@ export default function drive(city) {
       bumped(closing, () => hitTraffic(o, closing))
     }
     const s = footSurface(man.x, man.y, man.h)
-    man.deck = s.deck
+    man.deck = s.deck; man.roof = s.roof
     man.h += (s.y - man.h) * (1 - Math.exp(-14 * dt))
     man.phase += dt * Math.abs(man.speed) * (man.run ? 2.3 : 3.6)
   }
@@ -1466,7 +1497,7 @@ export default function drive(city) {
     if (Math.abs(wrap(yaw - car.yaw)) > Math.PI / 2) yaw = wrap(yaw + Math.PI)
     Object.assign(car, { x: r.px, y: r.py, yaw, speed: 0, lat: 0, steer: 0, kick: 0, gear: 1 })
     car.h = r.z != null ? r.z + 0.58 : city.world.heightAt(r.px, -r.py) + 0.2
-    car.deck = r.z != null
+    car.deck = r.z != null; car.roof = r.s.p.tunnel ? r.z + r.s.p.tunnel : undefined
     resetTrailer()
   }
 
@@ -1832,8 +1863,8 @@ export default function drive(city) {
   document.addEventListener('visibilitychange', onVis)
 
   // ?drivedebug: the state, for tests in a browser (window.driveDebug)
-  if (location.search.includes('drivedebug')) window.driveDebug = { car, man, goal, get run() { return run }, get hike() { return hike }, get errand() { return errand }, get shift() { return shift }, get state() { return state }, startHike: (id) => startHike(HIKES.find((h) => h.id === id)), propsNear, nearestRoad, wallHit,
-    get game() { return game }, get horn() { return !!horn }, input, secs, startBus: (name, dir = 0, from = 'first') => loadLines().then(({ man }) => { const ri = man.routes.findIndex((r) => r.name === name); return startBus({ ri, r: man.routes[ri], dir, from, man }) }) }
+  if (location.search.includes('drivedebug')) window.driveDebug = { car, man, goal, get run() { return run }, get hike() { return hike }, get errand() { return errand }, get shift() { return shift }, get state() { return state }, startHike: (id) => startHike(HIKES.find((h) => h.id === id)), propsNear, nearestRoad, wallHit, railPast,
+    get game() { return game }, get horn() { return !!horn }, input, secs, start: (kind, x, y, yaw = 0) => start(kind, { x, y, yaw }, { x, y }), startBus: (name, dir = 0, from = 'first') => loadLines().then(({ man }) => { const ri = man.routes.findIndex((r) => r.name === name); return startBus({ ri, r: man.routes[ri], dir, from, man }) }) }
   return {
     dispose() {
       cancelPick()

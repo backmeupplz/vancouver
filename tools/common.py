@@ -74,6 +74,14 @@ SHOP_AMENITY = {'restaurant', 'cafe', 'fast_food', 'bar', 'pub', 'bank', 'pharma
                 'library', 'cinema', 'theatre', 'nightclub', 'food_court', 'bureau_de_change', 'veterinary', 'marketplace', 'community_centre'}
 
 
+SLAB = 0.6  # a tunnel's walls and roof, m (tiles.py, the page's tile-worker.js tubes()): 0.6 m wider than its way each side
+
+
+def tube_h(k):
+    """clear height inside a tunnel of this kind, m (the page's tile-worker.js TUBE_H)"""
+    return 6.0 if k in ('rail', 'lightrail') else 5.0 if k in DRIVE else 3.0
+
+
 def line_kind(t):
     h = t.get('highway', ''); r = t.get('railway', ''); a = t.get('aeroway', '')
     if h:

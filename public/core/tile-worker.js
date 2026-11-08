@@ -77,7 +77,7 @@ function build(t, level) {
   out.roads = rd.surf; out.paint = rd.paint
   out.graph = graph(t, lines)
   out.graph.pois = ps
-  const b = buildings(t, terr, level)
+  const b = buildings(t, terr, level, lines)
   out.buildings = b.walls; out.balconies = b.balconies; out.units = b.units
   if (level === 0) { out.footprints = b.footprints; out.water = water(t); out.carriage = roadMask(t); out.boats = boats(t, terr) }
   out.trees = trees(t, terr)
@@ -313,7 +313,12 @@ function readLines(t) {
     if (flags & 4) { z = new Float32Array(np); for (let p = 0; p < np; p++) { z[p] = dv.getInt16(o, true) / 10; o += 2 } }
     let turns = null // OSM turn lanes, a bitmask per lane left to right: 1 left, 2 slight left, 4 through, 8 slight right, 16 right, 32 u-turn, 64 merge
     if (flags & 32) { const nf = dv.getUint8(o); const f = [...new Uint8Array(t.buf, o + 1, nf)]; o += 1 + nf; const nb = dv.getUint8(o); const b = [...new Uint8Array(t.buf, o + 1, nb)]; o += 1 + nb; turns = { f, b } }
-    out.push({ kind, lanes, oneway: !!(flags & 1), band: !!(flags & 2), drive: !!(flags & 8), crossing: !!(flags & 16), turns, layer, w, a, b, pts, z })
+    out.push({ kind, lanes, oneway: !!(flags & 1), band: !!(flags & 2), drive: !!(flags & 8), crossing: !!(flags & 16), tunnel: !!(flags & 64), roof: !!(flags & 128), turns, layer, w, a, b, pts, z, tube: null })
+  }
+  const tl = t.sections.TUNL // detail tiles: per point of each tunnel piece 0 underground, 1 open (the ground is cut there), 2 a portal
+  if (tl) for (let i = 0, o = tl.off + 4, n = dv.getUint32(tl.off, true); i < n; i++) {
+    const L = out[dv.getUint32(o, true)], np = L.pts.length / 2
+    L.tube = new Uint8Array(t.buf.slice(o + 4, o + 4 + np)); o += 4 + np
   }
   return out
 }
@@ -540,7 +545,7 @@ function graph(t, lines) {
   for (const L of lines) {
     const pts = new Float32Array(L.pts.length)
     for (let i = 0; i < L.pts.length / 2; i++) { pts[i * 2] = L.pts[i * 2] + t.ox; pts[i * 2 + 1] = L.pts[i * 2 + 1] + t.oy }
-    pieces.push({ kind: L.kind, lanes: L.lanes, oneway: L.oneway, drive: L.drive, band: L.band, turns: L.turns, w: L.w, a: L.a, b: L.b, pts, z: L.z })
+    pieces.push({ kind: L.kind, lanes: L.lanes, oneway: L.oneway, drive: L.drive, band: L.band, tunnel: L.tunnel ? TUBE_H(L.kind) : 0, roof: L.roof, turns: L.turns, w: L.w, a: L.a, b: L.b, pts, z: L.z })
   }
   return { pieces }
 }
@@ -579,11 +584,13 @@ const hex = (h) => [((h >> 16) & 255) / 255, ((h >> 8) & 255) / 255, (h & 255) /
 const lin = (h) => hex(h).map((c) => c ** 1.8) // a little lighter than linear: the stylized map reads brighter than a photo
 const shade = (c, f) => [Math.min(1, c[0] * f), Math.min(1, c[1] * f), Math.min(1, c[2] * f)]
 
-function buildings(t, terr, level) {
+function buildings(t, terr, level, lines) {
   const s = t.sections.BLDG
   const W = { pos: [], nor: [], col: [], win: [] }, Bal = { pos: [], nor: [], col: [], win: [] }
   const units = [], fp = [], fpStart = [0] // footprints: world x, north pairs; ring i is fp[fpStart[i]..fpStart[i+1])
   if (!s) return {}
+  if (level === 0) tubes(W, lines)
+  if (level === 0) railings(W, Bal, lines, terr) // (a road on a roof has the building's parapet)
   const dv = t.dv
   let o = s.off
   const n = dv.getUint32(o, true); o += 4
@@ -707,6 +714,102 @@ function buildings(t, terr, level) {
     footprints: fpStart.length > 1 ? { pts: new Float32Array(fp), start: new Uint32Array(fpStart) } : null }
 }
 const ROOFW = (seed) => [0, 0, 999, seed]
+// per point of a centre line (x, north pairs): the unit normal to its left, stretched to mitre the bends, and the
+// unit tangent
+function sides(P) {
+  const n = P.length / 2, out = []
+  for (let i = 0; i < n; i++) {
+    const p = Math.max(0, i - 1), q = Math.min(n - 1, i + 1)
+    let tx = P[q * 2] - P[p * 2], ty = P[q * 2 + 1] - P[p * 2 + 1]; const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl
+    let k = 1
+    if (i > 0 && i < n - 1) { const ax = P[i * 2] - P[i * 2 - 2], ay = P[i * 2 + 1] - P[i * 2 - 1], al = Math.hypot(ax, ay) || 1; k = 1 / Math.max(0.5, Math.abs((ay * ty + ax * tx) / al)) }
+    out.push([-ty * k, tx * k, tx, ty])
+  }
+  return out
+}
+// railings along the raised decks' edges (bridges, viaducts, guideways, footbridges and their stairs, roads on roofs):
+// a concrete parapet on road decks (0.9 m) and guideways (0.7 m), on foot and cycle decks a curb and a 1.2 m railing,
+// its posts and bars drawn by materials.js (pattern 12) on one sheet a side in the balcony mesh (close views and the
+// high tier: the map and the low tier see the curb). Not where the deck is down at the ground nor where another deck
+// runs alongside (a sidewalk deck, the other carriageway). At the deck's edge: its strip (L.w / 2, + 2 m of sidewalk with
+// a band), where the drive plugin's van and walker stop (railAt there)
+const PARAPET = lin(0xbcb8ae), RAILING = lin(0x8a9096)
+const railAt = (L) => L.w / 2 + (L.band ? 2 : 0) // metres from the centre line (the drive plugin's railAt)
+function railings(W, Bal, lines, terr) {
+  const decks = lines.filter((L) => L.z && !L.tunnel && !L.roof && (L.kind <= K.track || L.kind === K.rail || L.kind === K.lightrail))
+  if (!decks.length) return
+  const C = 16, grid = new Map(), segs = [] // deck centre-line segments by 16 m cell
+  for (const L of decks) for (let i = 0; i < L.pts.length / 2 - 1; i++) {
+    const s = [L.pts[i * 2], L.pts[i * 2 + 1], L.pts[i * 2 + 2], L.pts[i * 2 + 3], L.z[i], L.z[i + 1], railAt(L), L]; segs.push(s)
+    for (let a = Math.floor((Math.min(s[0], s[2]) - s[6]) / C); a <= Math.floor((Math.max(s[0], s[2]) + s[6]) / C); a++)
+      for (let b = Math.floor((Math.min(s[1], s[3]) - s[6]) / C); b <= Math.floor((Math.max(s[1], s[3]) + s[6]) / C); b++) {
+        const k = a * 65536 + b; if (!grid.has(k)) grid.set(k, []); grid.get(k).push(s)
+      }
+  }
+  const beside = (x, y, h, L) => { // inside another deck's edge, at about this height
+    for (const s of grid.get(Math.floor(x / C) * 65536 + Math.floor(y / C)) || []) {
+      if (s[7] === L) continue
+      const dx = s[2] - s[0], dy = s[3] - s[1], u = Math.max(0, Math.min(1, ((x - s[0]) * dx + (y - s[1]) * dy) / (dx * dx + dy * dy || 1)))
+      if (Math.hypot(x - s[0] - dx * u, y - s[1] - dy * u) < s[6] + 0.8 && Math.abs(s[4] + (s[5] - s[4]) * u - h) < 2.5) return true
+    }
+    return false
+  }
+  for (const L of decks) {
+    const P = L.pts, z = L.z, n = P.length / 2, side = sides(P), R = railAt(L), foot = L.kind >= K.pedestrian && L.kind <= K.track
+    const ph = foot ? 0.15 : L.kind === K.rail || L.kind === K.lightrail ? 0.7 : 0.9, T = 0.25, top = 0.36
+    for (const sg of [1, -1]) {
+      const at = (i, off, y) => [P[i * 2] + side[i][0] * sg * off, y, -(P[i * 2 + 1] + side[i][1] * sg * off)]
+      const ok = []
+      for (let i = 0; i < n; i++) {
+        const x = P[i * 2] + side[i][0] * sg * (R + T / 2), y = P[i * 2 + 1] + side[i][1] * sg * (R + T / 2)
+        ok.push(z[i] - heightAt(terr, x, y) > 1 && !beside(x, y, z[i], L))
+      }
+      let u = 0
+      for (let i = 0; i < n - 1; i++) {
+        const j = i + 1, len = Math.hypot(P[j * 2] - P[i * 2], P[j * 2 + 1] - P[i * 2 + 1])
+        u += len
+        if (!ok[i] || !ok[j]) continue
+        const nx = (side[i][0] + side[j][0]) * sg, nn = (side[i][1] + side[j][1]) * sg, l = Math.hypot(nx, nn) || 1, out = [nx / l, 0, -nn / l], inw = [-nx / l, 0, nn / l]
+        const y0 = z[i] + top, y1 = z[j] + top, pw = ROOFW(0.5)
+        quad(W, at(i, R + T, z[i] - 0.5), at(j, R + T, z[j] - 0.5), at(j, R + T, y1 + ph), at(i, R + T, y0 + ph), PARAPET, out, pw) // outer face, over the deck's edge
+        quad(W, at(i, R, y0), at(j, R, y1), at(j, R, y1 + ph), at(i, R, y0 + ph), PARAPET, inw, pw)
+        quad(W, at(i, R, y0 + ph), at(j, R, y1 + ph), at(j, R + T, y1 + ph), at(i, R + T, y0 + ph), shade(PARAPET, 1.06), [0, 1, 0], pw)
+        if (!foot) continue
+        const rw = (uu, h) => [12, uu, h, 0.5] // materials.js pattern 12: along, height over the deck
+        for (const want of [out, inw]) quad(Bal, at(i, R + T / 2, y0 + ph), at(j, R + T / 2, y1 + ph), at(j, R + T / 2, y1 + 1.2), at(i, R + T / 2, y0 + 1.2), RAILING, want, rw(u - len, ph), rw(u, ph), rw(u, 1.2), rw(u - len, 1.2))
+      }
+    }
+  }
+}
+// tunnels (tools/tiles.py tunnel_profiles): a dark tube round the road all the way (seen from both sides, so a chase
+// camera that swings out of it on a bend sees its walls), and where the bake cut the ground near a portal its concrete
+// box, roof flush with the ground, and at the portal a face with the opening in it
+const TUBE_H = (kind) => (kind === K.rail || kind === K.lightrail ? 6 : kind >= K.pedestrian ? 3 : 5), SLAB = 0.6 // tools/tiles.py tube_h, SLAB
+const TUBE_IN = lin(0x38393c), TUBE_FLOOR = lin(0x2e3033), CONCRETE = lin(0xb4b0a6)
+function tubes(W, lines) {
+  const pw = ROOFW(0.5)
+  for (const L of lines) {
+    if (!L.tunnel || !L.z || !L.tube) continue
+    const P = L.pts, z = L.z, n = P.length / 2, H = TUBE_H(L.kind), hw = L.w / 2 + 0.6, ho = hw + SLAB, side = sides(P)
+    const at = (i, off, y) => [P[i * 2] + side[i][0] * off, y, -(P[i * 2 + 1] + side[i][1] * off)]
+    const both = (a, b, c, d, col, want) => { quad(W, a, b, c, d, col, want, pw); quad(W, a, b, c, d, col, want.map((v) => -v), pw) }
+    for (let i = 0; i < n - 1; i++) {
+      const j = i + 1, nx = side[i][0] + side[j][0], nn = side[i][1] + side[j][1], l = Math.hypot(nx, nn) || 1
+      for (const sg of [1, -1]) both(at(i, sg * hw, z[i]), at(j, sg * hw, z[j]), at(j, sg * hw, z[j] + H), at(i, sg * hw, z[i] + H), TUBE_IN, [(sg * nx) / l, 0, (-sg * nn) / l])
+      both(at(i, -hw, z[i] + H), at(j, -hw, z[j] + H), at(j, hw, z[j] + H), at(i, hw, z[i] + H), TUBE_IN, [0, -1, 0])
+      quad(W, at(i, -hw, z[i] + 0.25), at(j, -hw, z[j] + 0.25), at(j, hw, z[j] + 0.25), at(i, hw, z[i] + 0.25), TUBE_FLOOR, [0, 1, 0], pw)
+      if (!L.tube[i] && !L.tube[j]) continue
+      for (const sg of [1, -1]) quad(W, at(i, sg * ho, z[i] - 0.5), at(j, sg * ho, z[j] - 0.5), at(j, sg * ho, z[j] + H + SLAB), at(i, sg * ho, z[i] + H + SLAB), CONCRETE, [(sg * nx) / l, 0, (-sg * nn) / l], pw)
+      quad(W, at(i, -ho, z[i] + H + SLAB), at(j, -ho, z[j] + H + SLAB), at(j, ho, z[j] + H + SLAB), at(i, ho, z[i] + H + SLAB), CONCRETE, [0, 1, 0], pw)
+    }
+    for (const i of [0, n - 1]) { // the portal: pillars either side of the opening, a headwall over it
+      if (L.tube[i] !== 2) continue
+      const [, , tx, ty] = side[i], out = i ? 1 : -1, a = Math.atan2(ty, tx), x = P[i * 2] + tx * out * 0.2, y = P[i * 2 + 1] + ty * out * 0.2
+      for (const sg of [1, -1]) box3(W, x + side[i][0] * sg * (hw + SLAB / 2), y + side[i][1] * sg * (hw + SLAB / 2), z[i] - 0.5, 0.8, SLAB, H + 0.5, a, CONCRETE)
+      box3(W, x, y, z[i] + H, 0.8, 2 * ho + 1, SLAB + 0.9, a, CONCRETE)
+    }
+  }
+}
 // a wall facing (east, north) is in one of the octants (bit 0 east, 2 north, ...) or next to one: footprints get
 // simplified and inset after their facing was measured
 function faces(mask, e, n) {

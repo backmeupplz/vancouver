@@ -30,10 +30,17 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    them, and a bridge newer than the LiDAR (stal̕əw̓asəm) or a footbridge under the trees (the LiDAR sees their crowns)
    spans its abutments. Where a street goes on from a raised deck end (OpenStreetMap's bridge tag stops short of the
    structure, stairs come down off a footbridge) it follows the LiDAR down to the ground at a ramp's grade. A road or rail
-   deck end that nothing goes on from comes down to the ground at 7%. The terrain
+   deck end that nothing goes on from comes down to the ground at 7%; a path that goes on from a footbridge's end down on
+   the ground (OpenStreetMap maps no stairs there) gets stairs down along it. Roads up on a building (a mall's rooftop
+   parking, a parkade's top deck: layer or level 1 and up, mostly over a footprint, the LiDAR well above the ground) are
+   decks on its roof, joined to their ramps. Tunnels run under the ground from portal to portal (straight where the ground
+   is high over them, else with the roof under it, no steeper than a ramp); near a portal, where the roof isn't under the
+   ground, the ground is cut and the page draws the tunnel's concrete box and portal face, and the whole way a dark tube
+   round the road, so traffic, walkers and the van go through. Raised decks have railings along their edges. The terrain
    is an 8 m grid in detail tiles, so streets sit on their embankments and in their cuts; piers and seawalls in the sea
    keep their height. `tools/audit_elev.py public/tiles` checks a bake: streets off the ground, decks through
-   buildings, steps at abutments, steep or buried decks, tunnels on the surface (worst first, with view links).
+   buildings, steps at abutments, steep or buried decks, tunnels on the surface or out of the ground (worst first, with
+   view links).
    Roofs take their colour from the city's 2022 orthophoto: put its ECW tiles (7.5 cm, 800 x 500 m each) in
    `data/ortho/`, `tools/ortho.sh` turns them into 0.5 m GeoTIFFs (GDAL with the open libecwj2 3.3 plugin, in podman) and
    `uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/roofs.py` samples every footprint into

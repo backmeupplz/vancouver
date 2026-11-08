@@ -289,6 +289,12 @@ export function buildingMaterial() {
           diffuseColor.rgb = g < 0.4 ? base * (0.86 + 0.14 * side) : (front > 0.5 ? base * (0.78 / 1.05) : glassRail) * (0.9 + 0.1 * side);
           style = 0.0; z = 999.0; // no facade pattern, no contact shadow, no lit windows
         }
+        if (style == 12.0) { // railings (tile-worker.js railings): u along, z over the deck; a handrail on top, two bars and
+          // posts every 2 m, open between; never thinner than a pixel (no shimmer, they thicken as they go)
+          float fu = fwidth(u), fz = fwidth(z), dp = min(fract(u / 2.0), 1.0 - fract(u / 2.0)) * 2.0, bar = max(0.02, fz * 0.6);
+          if (dp > max(0.04, fu * 0.6) && z < 1.12 - fz && abs(z - 0.75) > bar && abs(z - 0.45) > bar) discard;
+          style = 0.0; z = 999.0;
+        }
         if (style > 0.5) {
           vec3 pat, avg, col;
           if (style == 3.0) { // glass balcony towers (the 3D slabs come in close; this is the far look)
