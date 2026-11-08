@@ -410,12 +410,13 @@ def build(ij):
 
     # ---- write the 16 detail tiles and the medium tile
     n = 0
+    ground8 = road_ground(dtm, road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0, own=False), X0, Y0, lines)  # 8 m, fitted to the streets
     for a in range(4):
         for b in range(4):
             tx, ty = X0 + a * L0, Y0 + b * L0
             out = Out(tx, ty, L0)
             ti_, tj_ = i * 4 + a, j * 4 + b
-            terr = terrain_grid(dtm, a * L0, (3 - b) * L0, L0, 129)  # 8 m: embankments, cuts and seawalls under the roads
+            terr = ground8[(3 - b) * 128:(4 - b) * 128 + 1, a * 128:a * 128 + 129]  # 8 m: embankments, cuts and seawalls under the roads
             if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, boats=boats, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes):
                 continue
             os.makedirs(f'{OUT}/0', exist_ok=True)
@@ -449,6 +450,67 @@ def flat_water(dtm, sea, water):
         low &= ~ndimage.binary_opening(dtm > lvl[lab] + 2.5, iterations=2)
         dtm = np.where(low, np.minimum(dtm, lvl[lab]), dtm)
     return dtm
+
+
+ITER, DAMP, HOLD = 60, 0.45, 0.3  # road_ground's fit: rounds, step, how hard a node holds its own height
+DECK_TOP = 0.38  # a deck's drawn road over its height, less the ground's (the page's tile-worker.js strip lift, drive surface())
+
+
+def road_ground(dtm, pieces, X0, Y0, decks=()):
+    """the detail tiles' 8 m terrain grid over a whole 4 km tile (513 x 513 nodes, row 0 north), fitted to the at-grade
+    roads and rail: an 8 m node near a road can land in the cut, the ravine or the yard beside it and drag the street
+    with it (a street beside the Grandview Cut, a ramp's foot beside a ravine, tilting the van). Where the drawn ground under a road (its
+    centre line and its kerbs, level across at the middle of the three) strays from the LiDAR ground there, the nodes round it move to take it
+    there (least squares, the 4 km tile's edge nodes fixed so the next tile still meets it); nodes nowhere near a road
+    keep their height. decks: the tile's raised pieces; where one ends at the street's level (an abutment, a ramp's foot)
+    the street takes the deck's drawn top for 12 m, so the van rolls off it rather than stepping down (the LiDAR's
+    ground is often off right at an abutment, a gap interpolated under the bridge's end)"""
+    G = terrain_grid(dtm, 0, 0, L1, 513)
+    at = lambda P: ndimage.map_coordinates(dtm, [(Y0 + L1 - P[:, 1]) / HR - 0.5, (P[:, 0] - X0) / HR - 0.5], order=1, mode='nearest')
+    S = []  # x, y, weight, the ground wanted there
+    for L in pieces:
+        if L['z'] is not None or L['kind'] not in DRIVE | {'rail', 'lightrail'} or len(L['pts']) < 2: continue
+        P = np.array(densify(L['pts'], 2.0), float)
+        t = np.gradient(P, axis=0) if len(P) > 1 else np.array([[1.0, 0.0]]); t /= np.maximum(np.hypot(t[:, 0], t[:, 1]), 1e-6)[:, None]
+        n = np.stack([-t[:, 1], t[:, 0]], 1)
+        e = max(0.0, L['w'] / 2 - 0.5)
+        Q = [P] if e < 1 else [P, P + n * e, P - n * e]
+        h = np.median([at(q) for q in Q], axis=0)  # level across, as a street is (a line drawn a metre or two off the street puts a kerb on the cut's or the embankment's slope)
+        for q in Q: S.append(np.c_[q, np.full(len(q), 0.3 if L['kind'] in ('rail', 'lightrail') else 1.0), h])
+    if not S: return G
+    S = np.concatenate(S)
+    S = S[(S[:, 0] > X0 + 1) & (S[:, 0] < X0 + L1 - 1) & (S[:, 1] > Y0 + 1) & (S[:, 1] < Y0 + L1 - 1)]
+    if not len(S): return G
+    want = S[:, 3].copy()
+    ends = []  # (x, y, drawn top) of road decks ending at the street's level: the ground 15 m on past the end is near it
+    for L in decks:
+        if not L['z'] or L.get('tube') or L.get('roof') or L['kind'] not in DRIVE or len(L['pts']) < 2: continue
+        for e, f in ((0, 1), (-1, -2)):
+            p, q = np.array(L['pts'][e], float), np.array(L['pts'][f], float)
+            d = (p - q) / max(math.dist(p, q), 1e-6)
+            if abs(L['z'][e] + DECK_TOP - at((p + d * 15)[None])[0]) < 2.5: ends.append((*p, L['z'][e] + DECK_TOP))
+    if ends:
+        from scipy.spatial import cKDTree
+        E = np.array(ends); dist, n_ = cKDTree(E[:, :2]).query(S[:, :2], distance_upper_bound=12)
+        near = np.isfinite(dist); f = dist[near] / 12
+        want[near] = E[n_[near], 2] * (1 - f) + want[near] * f
+        S[near, 2] *= 3  # held to it harder than the LiDAR elsewhere
+    k = S[:, 2:3]  # how much each counts: the streets, rail a little (a cut's floor where it shares a cell with the street above)
+    fx, fy = (S[:, 0] - X0) / 8, (Y0 + L1 - S[:, 1]) / 8
+    i, j = np.clip(np.floor(fx).astype(int), 0, 511), np.clip(np.floor(fy).astype(int), 0, 511)
+    u, v = fx - i, fy - j
+    idx = np.stack([j * 513 + i, j * 513 + i + 1, (j + 1) * 513 + i, (j + 1) * 513 + i + 1], 1)
+    w = np.stack([(1 - u) * (1 - v), u * (1 - v), (1 - u) * v, u * v], 1)
+    w2 = w * k
+    g = G.ravel().astype(np.float64)
+    g0 = g.copy()
+    free = np.zeros((513, 513), bool); free[1:-1, 1:-1] = True; free = free.ravel()
+    den = np.zeros(g.size); np.add.at(den, idx.ravel(), (w2 * w).ravel())
+    for _ in range(ITER):  # damped Jacobi on the samples' misfit, held to the LiDAR's own node height (a node only a
+        e = want - (g[idx] * w).sum(1)  # sample or two lean on stays near it, no overshoot where a cut meets a street)
+        num = np.zeros(g.size); np.add.at(num, idx.ravel(), (w2 * e[:, None]).ravel())
+        g += np.where(free, DAMP * (num - HOLD * (g - g0)) / (den + HOLD), 0.0)
+    return g.reshape(513, 513).astype(np.float32)
 
 
 def terrain_grid(dtm, ox, oy, size, n):
@@ -1260,7 +1322,8 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
         for a, b in zip(cut, cut[1:]):
             pts = coords[a:b + 1]
             mid = pts[len(pts) // 2]
-            if own and not (X0 <= mid[0] < X0 + L1 and Y0 <= mid[1] < Y0 + L1): continue
+            long_ = own and sum(math.dist(p, q) for p, q in zip(pts, pts[1:])) > LONG
+            if own and not long_ and not (X0 <= mid[0] < X0 + L1 and Y0 <= mid[1] < Y0 + L1): continue
             z, tube, kind = None, None, k
             raised = any(lo <= a and b <= hi for lo, hi, *_ in ap)
             if not own:  # surfaces only: every piece touching the tile, bridges and tunnels just flagged
@@ -1277,9 +1340,37 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
                 z = approach_heights(ap, a, b, pts)
                 if k in FOOT and z and max(abs(z1 - z0) / max(1e-6, math.dist(p0, p1)) for p0, p1, z0, z1 in zip(pts, pts[1:], z, z[1:])) > 0.3:
                     kind = 'steps'  # stairs off a footbridge
-            out.append(dict(turns=turns, own=mid, kind=kind, pts=pts, z=z, tube=tube, roof=wid in ROOFS, lanes=lanes, w=w, ow=ow, band=band and tube is None, layer=int(hnum(t.get('layer')) or 0), a=refs[a], b=refs[b],
-                            name=t.get('name', ''), drive=k in DRIVE and t.get('access') not in ('private', 'no'),
-                            crossing=k in ('footway', 'cycleway', 'path') and (t.get('footway') == 'crossing' or t.get('cycleway') == 'crossing') and t.get('crossing') not in ('unmarked', 'no')))
+            d = dict(turns=turns, own=mid, kind=kind, pts=pts, z=z, tube=tube, roof=wid in ROOFS, lanes=lanes, w=w, ow=ow, band=band and tube is None, layer=int(hnum(t.get('layer')) or 0), a=refs[a], b=refs[b],
+                     name=t.get('name', ''), drive=k in DRIVE and t.get('access') not in ('private', 'no') and t.get('highway') != 'busway',
+                     crossing=k in ('footway', 'cycleway', 'path') and (t.get('footway') == 'crossing' or t.get('cycleway') == 'crossing') and t.get('crossing') not in ('unmarked', 'no'))
+            for e in split_long(d, wid * 1024 + a) if long_ else [d]:
+                if not own or X0 <= e['own'][0] < X0 + L1 and Y0 <= e['own'][1] < Y0 + L1: out.append(e)
+    return out
+
+
+LONG = 500  # metres: a piece longer than this is cut at the detail tiles' edges
+
+
+def split_long(d, key):
+    """a long piece (a bridge's span, a motorway between interchanges) cut where it crosses a detail tile's edge, each
+    part in the tile it lies in (the page reads a tile's roads only near it, and loads tiles only near the view: the
+    Lions Gate Bridge, one 1.5 km way, lived in the tile at its north end), joined by nodes of our own (below 2^53)"""
+    P, Z, T = [d['pts'][0]], [d['z'][0]] if d['z'] else None, [d['tube'][0]] if d['tube'] else None
+    cuts = []
+    for n, (p, q) in enumerate(zip(d['pts'], d['pts'][1:])):
+        ts = sorted({(e * L0 - p[c]) / (q[c] - p[c]) for c in (0, 1) if q[c] != p[c] for e in range(math.floor(min(p[c], q[c]) / L0) + 1, math.floor(max(p[c], q[c]) / L0) + 1)})
+        for f in ts + [1.0]:
+            if 1e-6 < f < 1 - 1e-6 or f == 1.0:
+                P.append((p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f))
+                if Z: Z.append(d['z'][n] + (d['z'][n + 1] - d['z'][n]) * f)
+                if T: T.append(d['tube'][n + 1] if f == 1.0 else int(bool(d['tube'][n] or d['tube'][n + 1])))
+                if f < 1.0: cuts.append(len(P) - 1)
+    if not cuts: return [d]
+    out, ends = [], [0] + cuts + [len(P) - 1]
+    for c, (i, j) in enumerate(zip(ends, ends[1:])):
+        pts = P[i:j + 1]
+        out.append({**d, 'pts': pts, 'z': Z[i:j + 1] if Z else None, 'tube': T[i:j + 1] if T else None, 'own': ((pts[0][0] + pts[-1][0]) / 2, (pts[0][1] + pts[-1][1]) / 2),
+                    'a': d['a'] if c == 0 else (3 << 51) + key * 64 + c - 1, 'b': d['b'] if j == len(P) - 1 else (3 << 51) + key * 64 + c})
     return out
 
 
@@ -1289,7 +1380,7 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
 # trusses sit above the deck), samples far above the along-bridge profile dropped, the grade clamped, then smoothed.
 # Sidewalks and cycle decks mapped beside a road deck take that deck's height; a long bridge the LiDAR does not have
 # yet (stal̕əw̓asəm, 2024) or one under the trees spans between its abutments. Cached in data/decks<version>.pkl.
-DECK_VERSION = 5
+DECK_VERSION = 6
 DECK_CACHE = f'data/decks{DECK_VERSION}.pkl'
 GRADE = 0.07  # steepest deck grade kept, rise per metre
 STAIRS = 0.7  # rise per metre of the stairs down off a footbridge end where OpenStreetMap maps none
@@ -1343,6 +1434,33 @@ def deck_samples(coords, w):
     off = w / 2 + 25
     side = np.fmin(hr_lookup(*(P + n * off).T, 1), hr_lookup(*(P - n * off).T, 1))
     return P, s, low, side
+
+
+def guideway_deck(P, s, low):
+    """a guideway's profile (SkyTrain: no trusses or cables over it). Its OpenStreetMap line is often metres off the
+    structure (at stations, where the tracks fan out, on curves), so the LiDAR over the line sees the ground or the cut
+    beside it: at each sample the structure's low edge up to 6 m to either side where it stands well over what the
+    line sees, then the upper part of that along the way (gaps filled, a train on it ignored), the grade clamped"""
+    g = hr_lookup(P[:, 0], P[:, 1], 1)
+    ok = np.isfinite(low)
+    if not ok.any(): return None
+    lo = np.interp(s, s[ok], low[ok])
+    t = np.gradient(P, axis=0) if len(P) > 1 else np.array([[1.0, 0.0]]); t /= np.maximum(np.hypot(t[:, 0], t[:, 1]), 1e-6)[:, None]
+    n = np.stack([-t[:, 1], t[:, 0]], 1)
+    z = lo.copy()
+    for o in np.arange(-6.0, 6.5, 1.0):
+        q = P[:, None, :] + n[:, None, :] * (o + np.array([-1.5, 0.0, 1.5]))[None, :, None]
+        v = hr_lookup(q[..., 0], q[..., 1], 0).reshape(len(P), 3)
+        with np.errstate(all='ignore'):
+            v = np.nanmin(np.where(v < g[:, None] - 2, np.nan, v), axis=1)  # the structure's low edge there
+            z = np.where((lo - g < 4) & (v > lo + 3) & (v - g > 4) & (v > z), v, z)  # only where the line sees the ground
+    if len(z) >= 5: z = ndimage.percentile_filter(z, 60, size=min(len(z), 9), mode='nearest')
+    ds = np.diff(s)
+    for k in range(1, len(z)): z[k] = max(z[k], z[k - 1] - GRADE * ds[k - 1])  # dips filled, then spikes cut
+    for k in range(len(z) - 2, -1, -1): z[k] = max(z[k], z[k + 1] - GRADE * ds[k])
+    for k in range(1, len(z)): z[k] = min(z[k], z[k - 1] + GRADE * ds[k - 1])
+    for k in range(len(z) - 2, -1, -1): z[k] = min(z[k], z[k + 1] + GRADE * ds[k])
+    return ndimage.uniform_filter1d(z, 5, mode='nearest') if len(z) >= 5 else z
 
 
 def wooded(P, low, w):
@@ -1446,7 +1564,7 @@ def deck_profiles():
         elif wid not in roofs and ways[wid][3] in FOOT | {'service', 'residential', 'tertiary'} and L < 400 and wooded(P, low, road_shape(ways[wid][3], ways[wid][2])[1]):
             missing.add(wid); canopy.add(wid)  # a small bridge under the trees: the LiDAR sees their crowns, not the deck
         else:
-            z = robust_deck(s, low)
+            z = guideway_deck(P, s, low) if ways[wid][3] == 'lightrail' else robust_deck(s, low)
             if z is not None: prof[wid] = z
     # ends: a node shared by bridge ways gets one height
     ends = {}
@@ -1970,6 +2088,16 @@ def selftest():
              tree_look('ACER', r, 'NORWAY MAPLE NONE', 1.5)[0], tree_look('ACER', r, 'NORWAY MAPLE NONE', 1.0)[0], tree_look('THUJA', r, 'WESTERN RED CEDAR NONE')[0],
              tree_look('SALIX', r)[0], tree_look('ULMUS', r)[0], tree_look('PSEUDOTSUGA', r)[0], tree_look('TRACHYCARPUS', r)[0]]
     assert looks == [1, 8, 2, 0, 5, 3, 8, 4, 7], looks
+    # a 1.5 km span (the Lions Gate: one way) cut at the detail tiles' edges, joined end to end, heights carried on
+    parts = split_long(dict(pts=[(-2395.0, 2854.0), (-1592.0, 4182.0)], z=[51.0, 20.0], tube=None, own=(0, 0), a=1, b=2), 7 * 1024)
+    assert len(parts) == 4 and parts[0]['a'] == 1 and parts[-1]['b'] == 2 and all(p['b'] == q['a'] < 2 ** 53 for p, q in zip(parts, parts[1:]))
+    assert all(math.floor(p['own'][0] / L0) == math.floor(min(x for x, _ in p['pts']) / L0 + 1e-9) for p in parts) and parts[1]['z'][0] == parts[0]['z'][-1]
+    # the 8 m grid under a street along a cut's lip: the street's ground there, the cut's floor away from it kept
+    dtm = np.full((2048, 2048), 30.0, np.float32); dtm[:, 1003:1010] = 20.0  # a 14 m wide cut beside x = 2000
+    street = [dict(z=None, kind='primary', w=12.0, pts=[(2026.0, -3000.0), (2026.0, -1000.0)])]
+    G = road_ground(dtm, street, 0, -L1)
+    gx = lambda x, y: ndimage.map_coordinates(G, [[(-y) / 8], [x / 8]], order=1)[0]
+    assert abs(gx(2026, -2000) - 30) < 0.8 and abs(gx(2021, -2000) - 30) < 1.0 and gx(2008, -2000) < 21, (gx(2026, -2000), gx(2021, -2000), gx(2008, -2000))
     print('selftest ok')
 
 

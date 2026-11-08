@@ -1225,4 +1225,4 @@ function trees(t, terr) {
   return { pos, info }
 }
 
-export { parse, readLines, pois, carEnds, crosswalks } // for tools/crosswalk_check.mjs
+export { parse, build, readLines, pois, carEnds, crosswalks } // for tools/crosswalk_check.mjs, tools/drive_check.mjs

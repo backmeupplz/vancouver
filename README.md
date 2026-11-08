@@ -39,10 +39,18 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    is high over them, else with the roof under it, no steeper than a ramp); near a portal, where the roof isn't under the
    ground, the ground is cut and the page draws the tunnel's concrete box and portal face, and the whole way a dark tube
    round the road, so traffic, walkers and the van go through. Raised decks have railings along their edges. The terrain
-   is an 8 m grid in detail tiles, so streets sit on their embankments and in their cuts; piers and seawalls in the sea
-   keep their height. `tools/audit_elev.py public/tiles` checks a bake: streets off the ground, decks through
+   is an 8 m grid in detail tiles, so streets sit on their embankments and in their cuts, fitted to the streets and
+   rail lines (where an 8 m point lands in the cut, ravine or yard beside a street, the grid round it moves so the
+   drawn ground under the street is the LiDAR's); piers and seawalls in the sea keep their height. SkyTrain guideways
+   take the structure the LiDAR sees beside their line where OpenStreetMap draws it a few metres off (at stations),
+   long pieces (a bridge's span, one 1.5 km way on the Lions Gate) are cut at the detail tiles' edges so each tile has
+   the part over it, and busways are bus-only streets. `tools/audit_elev.py public/tiles` checks a bake: streets off the ground, decks through
    buildings, steps at abutments, steep or buried decks, tunnels on the surface or out of the ground (worst first, with
-   view links).
+   view links). `node tools/drive_check.mjs` checks it for driving: the drive plugin's own physics runs headless on the
+   tiles with an autopilot driving the 12 m or 18 m bus along every bus route each way and the van along the arterials
+   from a grid across the map (`--routes 99,R4`, `--grid 3000`, `--tiles <dir>` for another bake, `--out file.json`),
+   and logs every height jump, stuck vehicle, building or railing hit on the road, tilt, drop off a deck, deck through
+   the vehicle, GPS line or bus stop off the road, with view links.
    Roofs take their colour from the city's 2022 orthophoto: put its ECW tiles (7.5 cm, 800 x 500 m each) in
    `data/ortho/`, `tools/ortho.sh` turns them into 0.5 m GeoTIFFs (GDAL with the open libecwj2 3.3 plugin, in podman) and
    `uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/roofs.py` samples every footprint into

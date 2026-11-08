@@ -183,7 +183,7 @@ export function busGame(ctx, pick, d0) {
     for (let i = 0; i < n; i++) {
       const p = at(d0 + i * STEP), rx = p.dy, ry = -p.dx // right of the way
       if (i * STEP < 360 && !ctx.loaded(p.x, p.y)) lane.missing = true
-      const s = ctx.roadAlong(p.x, p.y, p.dx, p.dy, 16) // the street the shape runs along: onto its kerb lane
+      const s = ctx.roadAlong(p.x, p.y, p.dx, p.dy, 16, i ? lane.h[i - 1] : car.h) // the street the shape runs along, at the level it was on: onto its kerb lane
       let x = p.x + rx * 2.2, y = p.y + ry * 2.2, h = NaN, curb = 2.0, ok = 0
       if (s) {
         const nx = Math.sin(s.dir) * s.along, ny = -Math.cos(s.dir) * s.along, off = clamp(s.w / 2 - 2.1, 0, 7)

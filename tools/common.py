@@ -88,6 +88,7 @@ def line_kind(t):
         h = h.replace('_link', '')
         if h in ('motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'pedestrian', 'footway', 'cycleway', 'path', 'steps', 'track'): return h
         if h in ('unclassified', 'road'): return 'residential'
+        if h == 'busway': return 'service'  # bus-only (exchanges, loops): the bus plugin drives them, traffic doesn't (road_pieces)
         if h == 'living_street': return 'living'
         if h in ('bridleway', 'corridor'): return 'path'
         return None

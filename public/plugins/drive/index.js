@@ -190,28 +190,33 @@ export default function drive(city) {
           const s = b.segs[id]
           if ((walk ? !s.wlk : bus ? !s.bus : !s.drv) || (deck && s.z0 == null)) continue
           const dx = s.x1 - s.x0, dy = s.y1 - s.y0, L2 = dx * dx + dy * dy || 1
-          const u = clamp(((x - s.x0) * dx + (y - s.y0) * dy) / L2, 0, 1), px = s.x0 + dx * u, py = s.y0 + dy * u
+          const t = ((x - s.x0) * dx + (y - s.y0) * dy) / L2, u = clamp(t, 0, 1), px = s.x0 + dx * u, py = s.y0 + dy * u
           const d = Math.hypot(x - px, y - py) - s.p.w / 2, z = s.z0 == null ? null : s.z0 + (s.z1 - s.z0) * u
           const key = atZ != null && z != null && d < 1.2 ? Math.abs(z - atZ) - 1000 : d
-          if (key < bd) { bd = key; best = { s, u, px, py, d: Math.max(0, d), dist: Math.hypot(x - px, y - py), z, dir: Math.atan2(dy, dx), w: s.p.w } }
+          if (key < bd) { bd = key; best = { s, u, px, py, d: Math.max(0, d), dist: Math.hypot(x - px, y - py), z, dir: Math.atan2(dy, dx), w: s.p.w, over: (t < 0 ? -t : t > 1 ? t - 1 : 0) * Math.sqrt(L2) } }
         }
       }
     }
     return best
   }
-  // the nearest road (bus-only ones too) running along (dx, dy) within r of (x, y), never against a one-way:
-  // { px, py, dist, w, dir (its way, atan2), along (±1: with or against its points), z (a deck's height or null) }
+  // the nearest road (bus-only ones too) running along (dx, dy) within r of (x, y): { px, py, dist, w, dir (its way,
+  // atan2), along (±1: with or against its points), z (a deck's height or null) }. Rather one lined up within 25° and
+  // with its one-way, else one within 45° (a GPS shape cuts a bend's corner) or against a one-way (a contra-flow bus
+  // lane); h: the height the way was at (the last sample's), so a deck over the street or the street under one isn't it
   const RA = { px: 0, py: 0, dist: 0, w: 0, dir: 0, along: 1, z: null }
-  function roadAlong(x, y, dx, dy, r) {
-    let bd = r, hit = false
+  function roadAlong(x, y, dx, dy, r, h = null) {
+    let bd = Infinity, hit = false
     segsNear(x, y, r, (s) => {
       if (!s.bus) return
       const ex = s.x1 - s.x0, ey = s.y1 - s.y0, l2 = ex * ex + ey * ey || 1, al = (ex * dx + ey * dy) / Math.sqrt(l2)
-      if (Math.abs(al) < 0.9 || (s.p.oneway && al < 0)) return
+      if (Math.abs(al) < 0.7) return
       const u = clamp(((x - s.x0) * ex + (y - s.y0) * ey) / l2, 0, 1), px = s.x0 + ex * u, py = s.y0 + ey * u, d = Math.hypot(x - px, y - py)
-      if (d >= bd) return
-      bd = d; hit = true
-      Object.assign(RA, { px, py, dist: d, w: s.p.w, dir: Math.atan2(ey, ex), along: Math.sign(al), z: s.z0 == null ? null : s.z0 + (s.z1 - s.z0) * u })
+      if (d >= r) return
+      const z = s.z0 == null ? null : s.z0 + (s.z1 - s.z0) * u
+      const key = d + (Math.abs(al) < 0.9 ? 3 : 0) + (s.p.oneway && al < 0 ? 6 : 0) + (h != null && Math.abs((z == null ? city.world.heightAt(px, -py) + 0.2 : z + 0.58) - h) > 2.5 ? 12 : 0)
+      if (key >= bd) return
+      bd = key; hit = true
+      Object.assign(RA, { px, py, dist: d, w: s.p.w, dir: Math.atan2(ey, ex), along: Math.sign(al), z })
     })
     return hit ? RA : null
   }
@@ -668,6 +673,7 @@ export default function drive(city) {
   try { assist = localStorage.getItem('delivery.assist') !== '0' } catch {}
   assistLabel()
   const keys = new Set()
+  let autopilot = null, probe = null // ?drivedebug (tools/drive_check.mjs): the input instead of the keys; told of every hit
 
   const button = city.ui.addButton({ label: 'Drive', icon: '🚐', title: 'Explore the streets by van or on foot, or deliver parcels (D)', panel: true })
   button.panel.innerHTML = `<div class="dlv-menu">
@@ -1097,6 +1103,7 @@ export default function drive(city) {
       if (!q) continue
       car.x -= q.x; car.y -= q.y; boxes()
       const l = Math.hypot(q.x, q.y) || 1, vn = bounce(-q.x / l, -q.y / l, 0, 0, 0.2, clamp((x - car.x) * fx + (y - car.y) * fy, -hl, hl))
+      probe?.('post', x, y, vn)
       if (vn > 1) bumped(vn, metal && vn > 2 ? sfx.clank : null)
     }
   }
@@ -1177,16 +1184,27 @@ export default function drive(city) {
 
   // ---------------------------------------------------------------- driving
   // the surface under (x, north): a bridge deck when the van is on one, else the ground; y = height of the road top
-  // near a deck's end (where it meets the street, often a few metres off the terrain) the van may step up or down.
+  // the deck a little over or under the van's height (never one crossing over it: a street under an overpass, a
+  // motorway bridge under another deck); right at a deck's end (where it meets the street, sometimes a little off the
+  // terrain) it may step up or down a little more, not further along it.
   // In a tunnel: its road, under the ground, and roof the height of its ceiling
   function surface(x, y, curY) {
     const g = city.world.heightAt(x, -y) + 0.2 + (taxi ? taxi.rampAt(x, y) : 0) // (a Rush Fare stunt ramp)
     const r = nearestRoad(x, y, 16, true, false, false, curY - 0.58)
     if (!r) return { y: g, deck: false, end: false }
-    const P = r.s.p.pts, m = P.length - 2, end = Math.min(Math.hypot(x - P[0], y - P[1]), Math.hypot(x - P[m], y - P[m + 1])) < 25
+    const P = r.s.p.pts, m = P.length - 2, end = Math.min(Math.hypot(x - P[0], y - P[1]), Math.hypot(x - P[m], y - P[m + 1])) < 10
     const dz = r.z + 0.58
-    if (r.d < 1.2 && Math.abs(dz - curY) < (end ? 7 : 2.6)) return r.s.p.tunnel ? { y: dz, deck: true, end, roof: r.z + r.s.p.tunnel } : { y: Math.max(g, dz), deck: dz - g > 1.2, end }
+    if (r.over > 0.8 && !joined(r)) return { y: g, deck: false, end } // past a deck's end where nothing raised goes on: the street (not a disc of deck round its end)
+    if (r.d < 1.2 && Math.abs(dz - curY) < (end ? 4 : 1.2)) return r.s.p.tunnel ? { y: dz, deck: true, end, roof: r.z + r.s.p.tunnel } : { y: Math.max(g, dz), deck: dz - g > 1.2, end }
     return { y: g, deck: false, end }
+  }
+  // does another deck go on from the end of r's piece that (x, y) is past (a joint, not an abutment)
+  function joined(r) {
+    const p = r.s.p, n = r.u < 0.5 ? p.a : p.b
+    if (r.u < 0.5 ? r.s.i !== 0 : r.s.i !== p.pts.length / 2 - 2) return true // past a bend inside the piece
+    let on = false
+    segsNear(r.px, r.py, 2, (s) => { if (!on && s.z0 != null && s.p !== p && (s.p.a === n || s.p.b === n)) on = true })
+    return on
   }
   // how far (x, north) is past the railings (tile-worker.js railings), or a tunnel's walls (tubes), of the decks at about
   // height h: the least of them, so a deck splitting into pieces or one beside another is one surface; -Infinity on a
@@ -1240,6 +1258,7 @@ export default function drive(city) {
       return null
     }
     const why = (nx !== car.x || ny !== car.y) && blocked(nx, ny)
+    if (why) probe?.(why, nx, ny, Math.abs(car.speed))
     if (why === 'edge') { // the railing: back towards the middle of the deck
       const r = nearestRoad(car.x, car.y, 16, true), l = r ? Math.hypot(r.px - car.x, r.py - car.y) : 0
       if (l > 0.01) { const vn = bounce((r.px - car.x) / l, (r.py - car.y) / l, 0, 0, 0.25, 0); if (vn > 1.5) bumped(vn, vn > 3 ? sfx.clank : null) } else car.speed *= 0.5
@@ -1263,13 +1282,16 @@ export default function drive(city) {
     if (run) shift.km += Math.hypot(nx - car.x, ny - car.y) / 1000
     car.x = nx; car.y = ny
     tow(); boxes()
-    for (let i = 0; i < nsec && !car.deck; i++) { // buildings: circles along the van (and each section of a bus); not the ones under a bridge it is on
-      const B = secs[i], [offs, cr] = i ? [car.V.rear[2], 1.35] : car.V.circles
+    for (let i = 0; i < nsec && !car.deck; i++) { // buildings: circles along the van (and each section of a bus); not the ones under a bridge it is on,
+      const B = secs[i], [offs, cr] = i ? [car.V.rear[2], 1.35] : car.V.circles // nor one over the carriageway (a street through a building's passage, a footprint drawn over the road)
       for (const off of offs) {
         const p = collide(B.x + B.fx * off, B.y + B.fy * off, cr)
         if (!p) continue
+        const q = nearestRoad(B.x + B.fx * off, B.y + B.fy * off, 4, false, false, true)
+        if (q && q.z == null && q.dist < q.w / 2 - 0.3 && insideBuilding(q.px, q.py)) continue // (the building over the road's middle)
         car.x += p.x; car.y += p.y; boxes()
         const l = Math.hypot(p.x, p.y) || 1, vn = bounce(p.x / l, p.y / l, 0, 0, 0.15, i ? -car.V.hl : off)
+        probe?.('wall', B.x + B.fx * off - (p.x / l) * cr, B.y + B.fy * off - (p.y / l) * cr, vn)
         if (vn > 2.5) bumped(vn)
       }
     }
@@ -1766,7 +1788,7 @@ export default function drive(city) {
     }
     if (state !== 'play' || !(dt > 0)) return
     dt = Math.min(dt, 0.05)
-    const I = ui.sheet.hidden && !taxi?.frozen ? input() : STILL
+    const I = ui.sheet.hidden && !taxi?.frozen ? autopilot?.() || input() : STILL
     if (onFoot) { walk(dt, I); if (hasVan) drive(dt, { steer: 0, up: false, down: false, hand: true }) } else drive(dt, I)
     engineNote()
     publish()
@@ -1930,7 +1952,9 @@ export default function drive(city) {
 
   // ?drivedebug: the state, for tests in a browser (window.driveDebug)
   if (location.search.includes('drivedebug')) window.driveDebug = { car, man, goal, get run() { return run }, get hike() { return hike }, get errand() { return errand }, get shift() { return shift }, get state() { return state }, startHike: (id) => startHike(HIKES.find((h) => h.id === id)), propsNear, nearestRoad, wallHit, railPast,
-    get game() { return game }, get horn() { return !!horn }, get taxi() { return taxi }, showGarage, startTaxi: (x, y, c = { cab: 0, livery: 0, driver: 0 }) => { taxiChoice = c; start('taxi', carSpawn(x, y) || { x, y, yaw: 0 }, { x, y }) }, input, secs, start: (kind, x, y, yaw = 0) => start(kind, { x, y, yaw }, { x, y }), startBus: (name, dir = 0, from = 'first') => loadLines().then(({ man }) => { const ri = man.routes.findIndex((r) => r.name === name); return startBus({ ri, r: man.routes[ri], dir, from, man }) }) }
+    get game() { return game }, get horn() { return !!horn }, get taxi() { return taxi }, showGarage, startTaxi: (x, y, c = { cab: 0, livery: 0, driver: 0 }) => { taxiChoice = c; start('taxi', carSpawn(x, y) || { x, y, yaw: 0 }, { x, y }) }, input, secs, collide, surface, frame,
+    set autopilot(f) { autopilot = f }, set probe(f) { probe = f }, stop: () => { if (state === 'off') return; game?.dispose(); taxi?.dispose(); taxi = null; state = 'out'; finish() },
+    start: (kind, x, y, yaw = 0) => start(kind, { x, y, yaw }, { x, y }), startBus: (name, dir = 0, from = 'first') => loadLines().then(({ man }) => { const ri = man.routes.findIndex((r) => r.name === name); return startBus({ ri, r: man.routes[ri], dir, from, man }) }) }
   return {
     dispose() {
       cancelPick()
