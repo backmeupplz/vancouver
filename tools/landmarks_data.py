@@ -54,6 +54,9 @@ BRIDGES = {
                    deck=[(0, 'g'), (560, 20), (800, 26), (1000, 18), (1115, 'g')], girder=[620, 980], piers=[680, 740, 860, 920]),
     'arthurlaing': dict(name='Arthur Laing Bridge', ways=[20669374, 23188860, 30605187, 338169325, 50783656], type='girder', steel='weathering',
                         deck=[(0, 'g'), (235, 23), (370, 24), (505, 23), (998, 'g')], girder=[150, 590], piers=[235, 505], haunch=True),
+    # the Golden Ears: four pylons, spans of 121 + 3 x 242 + 121 m centred on the Fraser (840..1720 m on the MRDEM)
+    'goldenears': dict(name='Golden Ears Bridge', ways=[181029021, 138672906, 567046714, 181029022, 460814863, 460814862, 567046707, 128363957], type='stayed', pylon='H',
+                       deck=[(0, 'g'), (796, 32), (1280, 42), (1764, 32), (2349, 'g')], towers=[917, 1159, 1401, 1643], top=95, back=[796, 1764]),
     'oakstreet': dict(name='Oak Street Bridge', ways=[24530021, 182607985, 24530023, 182607986, 338171747, 1274838145], type='girder',
                       deck=[(0, 'g'), (1000, 20), (1155, 22), (1310, 20), (1825, 'g')], girder=[900, 1400], piers=[1000, 1090, 1220, 1310]),
 }
