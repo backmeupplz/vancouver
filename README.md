@@ -68,6 +68,10 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    rooftop plant;
    Mapillary street photos (`tools/mapillary.py`, token through the vault, CC BY-SA 4.0) give wall colours seen from
    the street; a short list of landmarks (`LOOKS`) is set by hand from public photos.
+   About 25 landmarks get a mesh of their own from that LiDAR (`uv run --with numpy,scipy,shapely,pyproj,rasterio,scikit-image,fast-simplification
+   python3 tools/landmark_scan.py [ids]` → `public/plugins/landmarks/data/`, in git, ~1 MB): sliced as above, marching
+   cubes, decimated to a few thousand flat triangles, roofs in the LiDAR's colours; the landmarks plugin loads each as
+   the view nears it and draws its footprint massing further off.
 6. `tools/publish.sh` copies the tiles to the server. They are not in git.
 
 ## How it runs

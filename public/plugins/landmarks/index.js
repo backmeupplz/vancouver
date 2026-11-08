@@ -4,6 +4,7 @@
 // per terminal), built once; nothing animates.
 // Map data (c) OpenStreetMap contributors, ODbL. Ground under the bridges: MRDEM (NRCan), OGL-Canada.
 import { mulberry32 as mulberry, inPoly, getJSON } from '../../core/util.js'
+import scans, { scanned } from './scans.js'
 const data = await getJSON(new URL('./data.json', import.meta.url))
 const pairs = (f) => { const o = []; for (let i = 0; i < f.length; i += 2) o.push([f[i], f[i + 1]]); return o }
 
@@ -261,7 +262,7 @@ export default function landmarks(city) {
     return n > 0.75 ? 0x9da259 : n > 0.2 ? 0x7f9e4b : n > -0.6 ? 0x729646 : 0x668c42
   }
   // ---------- Harbour Centre and its Lookout saucer ----------
-  {
+  if (!scanned.has('harbourcentre')) { // else scans.js draws it
     const lm = L.harbourcentre, g = groundOf(ringXZ(lm.rings[0]))
     at(...ringXZ(lm.rings[0])[0])
     for (const p of lm.parts) {
@@ -275,19 +276,19 @@ export default function landmarks(city) {
     }
   }
   // ---------- Hotel Vancouver: grey stone château with the green copper roof ----------
-  {
+  if (!scanned.has('hotelvancouver')) { // else scans.js draws it
     const lm = L.hotelvancouver, g = groundOf(ringXZ(lm.rings[0]))
     at(...ringXZ(lm.rings[0])[0])
     for (const p of lm.parts) part(p, g, (q) => ({ wall: 0xbfb4a0, roof: q.roof && q.roof !== 'flat' ? 0x5e9c84 : 0x8d8b86, bands: [3.4, 0.9, 0x8c8478] }))
   }
   // ---------- Marine Building: terracotta art deco setbacks ----------
-  {
+  if (!scanned.has('marine')) { // else scans.js draws it
     const lm = L.marine, g = groundOf(ringXZ(lm.rings[0]))
     at(...ringXZ(lm.rings[0])[0])
     for (const p of lm.parts) part(p, g, (q) => ({ wall: 0xc79470, roof: q.roof === 'hipped' ? 0x6e9f8e : 0x8f7e70, bands: [3.6, 1.3, 0x6e5a4c] }))
   }
   // ---------- Shangri-La: the slim glass tower ----------
-  {
+  if (!scanned.has('shangrila')) { // else scans.js draws it
     const lm = L.shangrila, g = groundOf(ringXZ(lm.rings[0]))
     at(...ringXZ(lm.rings[0])[0])
     for (const p of lm.parts) part(p, g, (q, h) => ({ wall: h > 100 ? 0x9cb6c8 : 0xc9cdd0, roof: 0x8f9aa2, bands: h > 100 ? [3.3, 2.2, 0x6f8ea6] : [4, 2, 0x7d97aa] }))
@@ -331,6 +332,41 @@ export default function landmarks(city) {
     box(x, g, z, 1.4, 0.6, 1.4, 0, 0x6c4a32); box(x, g + 0.6, z, 1.0, 3.4, 1.0, 0, 0x5b3d2a)
     box(x, g + 4, z, 1.3, 1.3, 1.3, 0, 0xc9a24a); box(x, g + 4.15, z, 1.34, 1.0, 1.34, 0, 0xf0ead8)
     geo(prim('cone4', () => new THREE.ConeGeometry(1, 1, 4)), _m.compose(_p.set(x, g + 5.9, z), _q.setFromAxisAngle(Y, Math.PI / 4), _s.set(1.1, 1.4, 1.1)), 0x5b3d2a)
+  }
+  // ---------- what the LiDAR scans (scans.js) can't carry: the neon signs, the Woodward's W, the totem poles ----------
+  // Granville Street's blade signs over the sidewalk, 1 m out from the facade; u: the way they point (east, north)
+  function blade([la, lo], [ue, un], y0, h, out, panel, trim, letters, marquee) {
+    const [x, z] = P(la, lo), g = city.world.heightAt(x, z), rot = Math.atan2(un, ue)
+    at(x, z)
+    box(x, g + y0 - 0.2, z, out + 0.3, h + 0.4, 0.4, rot, trim)
+    box(x, g + y0, z, out, h, 0.6, rot, panel)
+    const n = letters.length, step = (h - 1) / n
+    for (let i = 0; i < n; i++) box(x, g + y0 + h - 0.5 - (i + 0.85) * step, z, out * 0.55, step * 0.7, 0.7, rot, letters[i])
+    if (marquee) { // the canopy over the doors, out over the sidewalk
+      const [w, hex, band] = marquee, mx = x - ue * 0.6, mz = z + un * 0.6
+      box(mx, g + 3.6, mz, 3.2, 1.5, w, rot, hex); box(mx, g + 4.05, mz, 3.3, 0.5, w + 0.1, rot, band)
+    }
+  }
+  blade([49.2804229, -123.1210533], [0.71, -0.704], 5.6, 13, 1.9, 0xb3202a, 0xf2c14e, Array(7).fill(0xfff4d6), [9, 0xf3efe6, 0xc0282d]) // Orpheum
+  blade([49.2805796, -123.1208169], [0.71, -0.704], 5.2, 8.5, 1.6, 0xf1ead8, 0xc0282d, Array(9).fill(0xd6262e), [11, 0x2b2b30, 0xd6262e]) // Commodore Ballroom
+  { // Woodward's: the red W on its lattice tower over the old store's roof (where the LiDAR has the tower: 22 m up, 44 at the top)
+    const [x, z] = P(49.28241, -123.10763), g = city.world.heightAt(x, z), y0 = g + 22, y1 = g + 40
+    at(x, z)
+    for (const [a, b] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) beam(V(x + a * 2.2, y0, z + b * 2.2), V(x + a * 0.5, y1, z + b * 0.5), 0.35, 0xeeeeea)
+    for (let k = 0; k < 4; k++) { const t = k / 4, r = 2.2 - 1.7 * t, y = y0 + (y1 - y0) * t; box(x, y, z, r * 2, 0.3, r * 2, 0, 0xeeeeea) }
+    const W = [[-2.6, 3.4], [-1.3, 0], [0, 2.2], [1.3, 0], [2.6, 3.4]] // the letter, facing Hastings (south)
+    for (let i = 0; i < 4; i++) beam(V(x + W[i][0], y1 + 0.5 + W[i][1], z), V(x + W[i + 1][0], y1 + 0.5 + W[i + 1][1], z), 0.75, 0xe0252c, 0.5)
+  }
+  { // Brockton Point's totem poles (OSM artwork nodes): carved cedar in bands of black, red, teal and white
+    const POLES = [[49.2990879, -123.121252, 8], [49.2991349, -123.1207516, 9.5], [49.2991868, -123.1207571, 12], [49.2992088, -123.1208487, 5.5, 1],
+      [49.2993236, -123.120892, 11], [49.2993202, -123.1207704, 12.5], [49.299372, -123.120777, 11.5], [49.2992636, -123.1207594, 12, 1]]
+    const BANDS = [0x8a5a3a, 0x232326, 0x8a5a3a, 0xa83a2e, 0x6e4a32, 0x2f7f7a, 0x232326, 0x8a5a3a, 0xd9d2c2]
+    POLES.forEach(([la, lo, h, wings], k) => {
+      const [x, z] = P(la, lo), g = city.world.heightAt(x, z)
+      at(x, z)
+      for (let y = 0, i = k; y < h; y += 1.3, i += 2) cyl(x, g + y, z, 0.6 - y * 0.012, Math.min(1.3, h - y), BANDS[(i * 5 + k * 3) % BANDS.length], 8)
+      if (wings) box(x, g + h - 1.6, z, 4.2, 0.5, 0.5, k * 0.7, 0x2f8a86) // a thunderbird's spread wings
+    })
   }
   // ---------- Granville Island: the Public Market shed and the Ocean Concrete silos painted as giants ----------
   {
@@ -846,11 +882,12 @@ export default function landmarks(city) {
   showYards()
   for (const o of objs) { o.userData.landmarks = true; city.scene.add(o) }
   for (const r of masks) city.world.suppressBuildings?.(r)
+  const scan = scans(city)
   city.landmarks = { piers }
   city.requestRender()
   return {
     dispose() {
-      offView(); offTiles(); clearTimeout(bT)
+      offView(); offTiles(); clearTimeout(bT); scan.dispose()
       delete city.landmarks
       for (const o of objs) { city.scene.remove(o); o.geometry !== cbox && o.geometry.dispose() }
       cbox.dispose(); mat.dispose(); cmat.dispose()
