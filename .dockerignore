@@ -1,0 +1,6 @@
+.git
+data
+public/tiles
+server/target
+**/.DS_Store
+**/__pycache__
