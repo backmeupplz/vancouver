@@ -291,14 +291,18 @@ const ink = new THREE.ShaderMaterial({
     uniform sampler2D tBloom; uniform float bloomK;
     #endif
     vec2 uv;
+    // the depth taps on whole texels, step texels apart from the centre's: below full resolution (0.8) every 5th row and
+    // column falls on a texel edge, where the centre and its neighbours rounded to texels on their own, so a flat road
+    // read as a ladder of edges in front of the van
+    float z(vec2 o) { vec2 n = vec2(textureSize(tDepth, 0)); return texelFetch(tDepth, ivec2(clamp(floor(uv * n) + o * floor(px * n + 0.5), vec2(0.0), lim * n)), 0).x; }
     #ifdef PERSP
     uniform float cnear, cfar; uniform vec2 fade, inkFade;
     #ifdef SKYFOG
     uniform sampler2D tSky; uniform vec3 fogCol, zenCol; uniform float domeK; varying vec3 vRay;
     #endif
-    float d(vec2 o) { return (cfar - texture2D(tDepth, min(uv + o * px, lim)).x * (cfar - cnear)) / (cnear * cfar); }
+    float d(vec2 o) { return (cfar - z(o) * (cfar - cnear)) / (cnear * cfar); }
     #else
-    float d(vec2 o) { return texture2D(tDepth, min(uv + o * px, lim)).x * range; }
+    float d(vec2 o) { return z(o) * range; }
     #endif
     void main() {
       uv = vUv * uvs + off;
