@@ -88,6 +88,8 @@ function build(t, level) {
     out.signs = signs(t, b.fronts)
     out.parked = parked(t, terr, lines, ps, b.footprints)
     out.footprints = withCars(b.footprints, out.parked.lot, t)
+    out.beach = beach(t, terr)
+    if (out.beach) out.footprints = withBoxes(out.footprints, out.beach.solid, t)
   }
   out.trees = trees(t, terr)
   return out
@@ -917,15 +919,21 @@ function lights(t, terr, lines, ps, b) {
   return { pos: new Float32Array(pos), lamps, poles: poles.length ? new Float32Array(poles) : null }
 }
 // the parked cars in the lots are footprints too (plugins bump into them; the kerbs' are left out, traffic passes them)
-function withCars(fp, cars, t) {
-  if (!cars) return fp
+// more solid boxes on the footprints the walker and the van bump into: tile-local (x, north, angle, half length, half width) each
+function withBoxes(fp, boxes, t) {
+  if (!boxes.length) return fp
   const pts = fp ? [...fp.pts] : [], start = fp ? [...fp.start] : [0]
-  for (let i = 0; i < cars.length; i += 5) {
-    const x = cars[i] + t.ox, y = -cars[i + 2] + t.oy, fx = Math.cos(cars[i + 3]), fy = Math.sin(cars[i + 3]), l = CAR_L / 2, w = CAR_W / 2
+  for (const [bx, by, a, l, w] of boxes) {
+    const x = bx + t.ox, y = by + t.oy, fx = Math.cos(a), fy = Math.sin(a)
     for (const [p, q] of [[1, 1], [-1, 1], [-1, -1], [1, -1]]) pts.push(x + fx * p * l + fy * q * w, y + fy * p * l - fx * q * w)
     start.push(pts.length)
   }
   return { pts: new Float32Array(pts), start: new Uint32Array(start) }
+}
+function withCars(fp, cars, t) {
+  const boxes = []
+  for (let i = 0; cars && i < cars.length; i += 5) boxes.push([cars[i], -cars[i + 2], cars[i + 3], CAR_L / 2, CAR_W / 2])
+  return withBoxes(fp, boxes, t)
 }
 const ROOFW = (seed) => [0, 0, 999, seed]
 // What stands on a flat roof, seen from the map's 30° (detail tiles, close zooms): small HVAC units the LiDAR's 2 m grid
@@ -1255,6 +1263,25 @@ function boats(t, terr) {
     out.set([x, Math.max(0, heightAt(terr, x, y)), -y, (dv.getUint8(o + 4) / 256) * Math.PI * 2, dv.getUint8(o + 5) / 10, dv.getUint8(o + 6)], i * 6)
   }
   return out
+}
+
+// ---------------------------------------------------------------- the beaches: driftwood logs, lifeguard towers, volleyball nets
+// the LOGS section (tools/tiles.py beach_bits: x, north, angle 1/256 turn, length 1/10 m, diameter 1/100 m, kind: 0-7 a
+// log, +4 with a root ball; 16 a lifeguard tower; 17 a net) -> { d: 8 floats each (tile-local x, height of the ground
+// under its middle, z, angle (from east towards north), length, diameter, kind, rise from end to end), solid: boxes } or null
+function beach(t, terr) {
+  const s = t.sections.LOGS
+  if (!s) return null
+  const dv = t.dv, n = dv.getUint32(s.off, true), d = new Float32Array(n * 8), solid = []
+  for (let i = 0, o = s.off + 4; i < n; i++, o += 8) {
+    const x = dv.getInt16(o, true) * t.k, y = dv.getInt16(o + 2, true) * t.k, a = (dv.getUint8(o + 4) / 256) * Math.PI * 2
+    const len = dv.getUint8(o + 5) / 10, dia = dv.getUint8(o + 6) / 100, kind = dv.getUint8(o + 7), ex = (Math.cos(a) * len) / 2, ey = (Math.sin(a) * len) / 2
+    const h0 = heightAt(terr, x - ex, y - ey), h1 = heightAt(terr, x + ex, y + ey)
+    d.set([x, Math.max(0, kind < 16 ? (h0 + h1) / 2 : heightAt(terr, x, y)), -y, a, len, dia, kind, kind < 16 ? h1 - h0 : 0], i * 8)
+    if (kind < 16) solid.push([x, y, a, len / 2, dia / 2])
+    else if (kind === 16) solid.push([x, y, a, 1.1, 1.1])
+  }
+  return n ? { d, solid } : null
 }
 
 // ---------------------------------------------------------------- trees

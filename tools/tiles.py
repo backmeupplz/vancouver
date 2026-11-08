@@ -138,6 +138,7 @@ def lidar_sections():
 
 TREES = city_trees()
 SECTIONS = lidar_sections()
+BEACH = np.load('data/beachlogs.npz') if os.path.exists('data/beachlogs.npz') else None  # tools/beachlogs.py
 print('inputs ready', len(TREES), 'city trees', len(SECTIONS), 'lidar sections', flush=True)
 
 
@@ -416,6 +417,8 @@ def build(ij):
         k = 1 if am == 'cafe' or t.get('shop') in ('coffee', 'bakery', 'tea') else 2 if am in ('restaurant', 'fast_food', 'ice_cream', 'food_court') else 3 if am in ('bar', 'pub', 'nightclub') else 0 if t.get('shop') else 4 if am in SHOP_AMENITY else 5 if 'office' in t or 'craft' in t else None
         if nm and k is not None and X0 <= x < X0 + L1 and Y0 <= y < Y0 + L1: shopn.append((k, x, y, nm))
 
+    beach = beach_bits(X0, Y0, polys, builds)
+
     # ---- write the 16 detail tiles and the medium tile
     n = 0
     ground8 = road_ground(dtm, road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0, own=False), X0, Y0, lines)  # 8 m, fitted to the streets
@@ -425,7 +428,7 @@ def build(ij):
             out = Out(tx, ty, L0)
             ti_, tj_ = i * 4 + a, j * 4 + b
             terr = ground8[(3 - b) * 128:(4 - b) * 128 + 1, a * 128:a * 128 + 129]  # 8 m: embankments, cuts and seawalls under the roads
-            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, shops=shopn, boats=boats, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes):
+            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, shops=shopn, boats=boats, beach=beach, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes):
                 continue
             os.makedirs(f'{OUT}/0', exist_ok=True)
             open(f'{OUT}/0/{ti_}_{tj_}.bin', 'wb').write(out.bytes()); n += 1
@@ -435,6 +438,30 @@ def build(ij):
     os.makedirs(f'{OUT}/1', exist_ok=True)
     open(f'{OUT}/1/{i}_{j}.bin', 'wb').write(out.bytes())
     return ij, 'ok', round(time.time() - t0, 1), n, len(builds), len(trees), f'trunks off streets: {moved} moved, {dropped} dropped'
+
+
+BEACH_OFF = ('water', 'pool', 'pier', 'road', 'arterial', 'sidewalk', 'blvd', 'walk', 'cycle', 'parking', 'plaza', 'pitch', 'playground')
+
+
+def beach_bits(X0, Y0, polys, builds):
+    """the driftwood logs, lifeguard towers and volleyball nets (tools/beachlogs.py) in this 4 km tile, off the water,
+    streets, paths and buildings as drawn -> [(x, y, angle, length, diameter, kind)]: kind 0-7 a log (shape bits, 4 a
+    root ball), 16 a lifeguard tower (angle: the way it faces), 17 a net (angle: along it)"""
+    if BEACH is None: return []
+    from shapely.strtree import STRtree
+    items = [(float(x), float(y), float(a), float(ln), float(d), int(k)) for x, y, a, ln, d, k in BEACH['logs'] if X0 <= x < X0 + L1 and Y0 <= y < Y0 + L1]
+    items += [(float(x), float(y), float(a), float(ln), 0.0, 15 + int(k)) for x, y, a, k, ln in BEACH['things'] if X0 <= x < X0 + L1 and Y0 <= y < Y0 + L1]
+    if not items: return []
+    off = [g for k in BEACH_OFF for g in polys.get(k, [])] + [Polygon(b['ring']) for b in builds if len(b['ring']) >= 3]
+    tree = STRtree(off) if off else None
+    out = []
+    for x, y, a, ln, d, k in items:
+        if k == 17: continue  # nets stand on their courts (pitches)
+        ux, uy = math.cos(a) * ln / 2, math.sin(a) * ln / 2
+        g = LineString([(x - ux, y - uy), (x + ux, y + uy)]) if k < 16 else shapely.Point(x, y).buffer(1.2)
+        if tree is not None and len(tree.query(g, predicate='intersects')): continue
+        out.append((x, y, a, ln, d, k))
+    return out + [it for it in items if it[5] == 17]
 
 
 def crossing_paint(t):
@@ -1928,7 +1955,7 @@ def pack_ring(out, ring):
     return b
 
 
-def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None, shops=()):
+def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None, shops=(), beach=()):
     tb = box(tx, ty, tx + size, ty + size)
     n = terr.shape[0]
     out.section('TERR', struct.pack('<H', n) + np.clip(np.round(terr * 10), -32768, 32767).astype('<i2').tobytes())
@@ -2064,6 +2091,10 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     out.section('POIS', struct.pack('<I', npo) + bytes(pb))
     sb = [struct.pack('<BhhB', k, *out.q(x, y), len(nm)) + nm for k, x, y, nm in shops if tx <= x < tx + size and ty <= y < ty + size]
     if sb: out.section('SHOP', struct.pack('<I', len(sb)) + b''.join(sb))  # the page ignores tiles without it
+    # beach things (beach_bits): centre, angle (1/256 turn), length (1/10 m), diameter (1/100 m), kind; old pages skip it
+    lb = [struct.pack('<hhBBBB', *out.q(x, y), int(round(a / (2 * math.pi) * 256)) & 255, int(min(255, round(ln * 10))), int(min(255, round(d * 100))), k)
+          for x, y, a, ln, d, k in beach if tx <= x < tx + size and ty <= y < ty + size]
+    if lb: out.section('LOGS', struct.pack('<I', len(lb)) + b''.join(lb))
     return runs > 0 or nb > 0 or len(sel) > 0
 
 

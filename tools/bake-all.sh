@@ -15,6 +15,7 @@ python3 tools/hrdem.py "$P"           # resumable: only missing LiDAR tiles are 
 python3 tools/osm_split.py
 python3 tools/sea.py
 [ -f data/roofs.npz ] || echo "no data/roofs.npz (tools/roofs.py): roofs keep their palette colours"
+[ -f data/beachlogs.npz ] || echo "no data/beachlogs.npz (tools/beachlogs.py): no driftwood, lifeguard towers or volleyball nets on the beaches"
 [ -f data/facades.npz ] || echo "no data/facades.npz (tools/facades.py): walls keep their palettes and the page's own rules"
 rm -rf out/0 out/1
 OUT=out python3 tools/tiles.py "$P"   # also caches data/mrdem32.npz, which heights.py needs

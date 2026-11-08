@@ -55,6 +55,11 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    `data/ortho/`, `tools/ortho.sh` turns them into 0.5 m GeoTIFFs (GDAL with the open libecwj2 3.3 plugin, in podman) and
    `uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/roofs.py` samples every footprint into
    `data/roofs.npz` (`tools/roofs.py preview` draws photo vs colours). Only roofs.npz is needed to bake.
+   The beaches get their driftwood from the same photo: `tools/beachlogs.py` cuts the beaches from the ECW tiles at
+   12.5 cm (podman again), finds every log on the dry sand (a bright straight stripe with its shadow) and writes
+   `data/beachlogs.npz`; beyond the photo (the North Shore, White Rock, Crescent Beach...) it lays logs in rows along
+   the shore, and adds lifeguard towers on the guarded beaches and nets on the volleyball courts
+   (`tools/beachlogs.py preview kits|english|spanish` draws what it found over the photo). Optional to bake.
    Walls follow the real buildings where the data knows them (`tools/facades.py` → `data/facades.npz`, optional): the
    city's property tax report gives every building its year built, which picks 1960s-80s concrete towers with solid
    balcony fronts on their long sides, 1990s green glass with glass balconies all round, window walls after 2005, and

@@ -89,6 +89,44 @@ function boatGeos() {
   return geos
 }
 
+// the beaches (tile-worker.js beach): a driftwood log 1 long along +x and 1 thick, its middle on the origin: a
+// bark-less trunk, seven-sided, knobbly and a little bent, thicker at its butt (+x); the root ball at a butt (1 across,
+// facing +x, its middle on the origin); a lifeguard tower facing +x (white legs and seat, a red and white sunshade);
+// a beach volleyball net 9.5 long along x (posts, net, white tape). Colours: instance colour (logs) or vertex colours.
+function beachGeos() {
+  const k = kit(THREE), seg = 7, rnd = (i) => { const v = Math.sin(i * 127.1 + 311.7) * 43758.5453; return v - Math.floor(v) }
+  const rings = [[-0.5, 0.4, 0], [-0.2, 0.47, 0.03], [0.15, 0.5, 0.04], [0.5, 0.55, 0]] // x, radius, bend (y)
+  const pt = (r, j) => { const [x, rad, bend] = rings[r], a = (j / seg) * Math.PI * 2, w = rad * (0.88 + 0.24 * rnd(r * 13 + j)); return [x, Math.sin(a) * w + bend, Math.cos(a) * w] }
+  k.c(null)
+  for (let r = 0; r < rings.length - 1; r++) for (let j = 0; j < seg; j++) k.quad(pt(r, j), pt(r + 1, j), pt(r + 1, j + 1), pt(r, j + 1))
+  k.c(0xe0d4c0, 1) // sawn ends, paler
+  for (let j = 0; j < seg; j++) { k.tri([-0.5, 0, 0], pt(0, j), pt(0, j + 1)); k.tri([0.5, 0, 0], pt(3, j + 1), pt(3, j)) }
+  const log = k.geometry(true)
+  const r = kit(THREE).c(0xe4e0d8)
+  r.cyl(0.32, 0.5, 0.35, 7, 3).rot(0, 'z', -Math.PI / 2) // the stump flaring out towards +x
+  for (let i = 0; i < 7; i++) { const a = (i / 7) * Math.PI * 2 + rnd(i) * 0.5, l = 0.55 + rnd(i + 7) * 0.35; r.rod([0.3, 0, 0], [0.35 + rnd(i + 3) * 0.25, Math.sin(a) * l, Math.cos(a) * l], 0.09, 0.03, 5) }
+  const roots = r.geometry(true)
+  const t = kit(THREE), W = 0xf4f2ee, RED = 0xc8302c
+  t.c(W)
+  for (const [x, z] of [[-0.6, -0.6], [-0.6, 0.6], [0.6, -0.6], [0.6, 0.6]]) t.rod([x, 0, z], [x * 0.75, 1.9, z * 0.75], 0.07, 0.06, 5)
+  t.box(-0.6, 0.6, 1.85, 1.97, -0.6, 0.6) // platform
+  t.box(-0.5, -0.38, 1.97, 2.85, -0.45, 0.45).box(-0.1, 0.3, 1.97, 2.3, -0.4, 0.4) // backrest, seat
+  t.rod([0.75, 0, -0.3], [0.5, 1.9, -0.3], 0.04).rod([0.75, 0, 0.3], [0.5, 1.9, 0.3], 0.04) // ladder
+  for (let y = 0.4; y < 1.9; y += 0.45) t.box(0.73 - y * 0.13, 0.77 - y * 0.13, y - 0.03, y + 0.03, -0.3, 0.3)
+  t.c(0x8a8a88).rod([-0.42, 1.97, 0], [-0.42, 3.3, 0], 0.03)
+  for (let i = 0; i < 8; i++) { const s = t.at(); t.c(i % 2 ? W : RED).cyl(1.1, 0.05, 0.45, 2, 2, (i / 8) * Math.PI * 2, ((i + 1) / 8) * Math.PI * 2).move(s, -0.42, 3.05, 0) }
+  t.c(RED).box(-0.62, 0.62, 1.6, 1.85, 0.6, 0.64).box(-0.62, 0.62, 1.6, 1.85, -0.64, -0.6) // red side boards
+  const tower = t.geometry(true)
+  const n = kit(THREE)
+  n.c(0xd8d6d0).rod([-4.75, 0, 0], [-4.75, 2.55, 0], 0.06).rod([4.75, 0, 0], [4.75, 2.55, 0], 0.06)
+  n.c(0x2c2e30).box(-4.5, 4.5, 1.5, 2.37, -0.015, 0.015)
+  n.c(0xf4f2ee).box(-4.5, 4.5, 2.37, 2.43, -0.02, 0.02)
+  const net = n.geometry(true)
+  for (const g of [log, roots, tower, net]) g.userData.shared = true
+  return { log, roots, tower, net }
+}
+const DRIFT = [0xb9b5ad, 0xc4c0b8, 0xaaa59c, 0xa89a88, 0xcfcac0, 0x9c968c] // sun-bleached silver-grey, a few browner
+
 export class Tiles {
   // lights: core/lights.js (night lights; optional)
   constructor({ scene, treeScene, mats, farMats = mats, lights, base = 'tiles/', onLoad, onUnload, onChange }) {
@@ -107,6 +145,7 @@ export class Tiles {
     this.unitMat = new THREE.MeshLambertMaterial()
     this.quad = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0)
     this.boatGeo = boatGeos()
+    this.beachGeo = beachGeos()
     this.carGeo = carGeo(); this.carMat = kitMaterial(THREE, night); this.poleGeo = poleGeo()
     this.cars = 2 // parked cars shown: 0 none, 1 in the lots (not the kerbs'), 2 all (setDetail)
     this.balconies = true; this.fine = true
@@ -467,6 +506,7 @@ export class Tiles {
       sails.forEach((i, k) => { parts[0].getMatrixAt(i, M); parts[2].setMatrixAt(k, M); parts[2].setColorAt(k, c.setHex(0xd4d6d8)) })
       for (const im of parts) if (im.count) { im.computeBoundingSphere(); im.matrixAutoUpdate = false; g.add(im) }
     }
+    if (res.beach) { t.beach = this.beachMeshes(res.beach.d); for (const o of t.beach) { o.visible = this.fine; g.add(o) } } // from 0.3 on the map (1-2 px a metre)
     this.scene.add(g)
     t.group = g
     t.side = [] // drawn elsewhere than the tile's group (trees and lamp heads after the ink pass, lights.js), shown with it
@@ -479,6 +519,35 @@ export class Tiles {
   }
 
   showAll(t, on) { t.group.visible = on; for (const o of t.side) o.visible = on }
+
+  beachMeshes(B) { // 8 floats a thing (tile-worker.js beach): logs lie on the sand (sunk a little, tilted with it), roll at random
+    const n = B.length / 8, G = this.beachGeo, M = new THREE.Matrix4(), q = new THREE.Quaternion(), r = new THREE.Quaternion(), p = new THREE.Vector3(), sc = new THREE.Vector3(), c = new THREE.Color()
+    const up = new THREE.Vector3(0, 1, 0), ax = new THREE.Vector3(1, 0, 0), az = new THREE.Vector3(0, 0, 1)
+    const count = (f) => { let m = 0; for (let i = 0; i < n; i++) if (f(B[i * 8 + 6])) m++; return m }
+    const im = (geo, m, shadow = true) => { const o = new THREE.InstancedMesh(geo, this.carMat, m); o.castShadow = shadow; o.receiveShadow = true; o.count = 0; return o }
+    const logs = im(G.log, count((k) => k < 16)), roots = im(G.roots, count((k) => k < 16 && k & 4), false), tower = im(G.tower, count((k) => k === 16)), net = im(G.net, count((k) => k === 17), false)
+    for (let i = 0; i < n; i++) {
+      const x = B[i * 8], h = B[i * 8 + 1], z = B[i * 8 + 2], a = B[i * 8 + 3], len = B[i * 8 + 4], dia = B[i * 8 + 5], kind = B[i * 8 + 6], rise = B[i * 8 + 7]
+      const seed = Math.abs(Math.sin(x * 12.9898 + z * 78.233) * 43758.5453) % 1
+      q.setFromAxisAngle(up, a)
+      if (kind < 16) {
+        q.multiply(r.setFromAxisAngle(az, Math.atan2(rise, len))).multiply(r.setFromAxisAngle(ax, seed * Math.PI * 2))
+        M.compose(p.set(x, h + dia * 0.38, z), q, sc.set(len, dia, dia))
+        logs.setMatrixAt(logs.count, M); logs.setColorAt(logs.count++, c.setHex(DRIFT[Math.floor(seed * DRIFT.length)]))
+        if (kind & 4) { // the root ball at the butt end
+          q.setFromAxisAngle(up, a).multiply(r.setFromAxisAngle(az, Math.atan2(rise, len)))
+          M.compose(p.set(x + (Math.cos(a) * len) / 2, h + rise / 2 + dia * 0.45, z - (Math.sin(a) * len) / 2), q, sc.setScalar(dia * 2.2))
+          roots.setMatrixAt(roots.count, M); roots.setColorAt(roots.count++, c.setHex(DRIFT[Math.floor(seed * DRIFT.length)]))
+        }
+      } else {
+        const o = kind === 16 ? tower : net
+        o.setMatrixAt(o.count++, M.compose(p.set(x, h, z), q, sc.set(kind === 17 ? len / 9.5 : 1, 1, 1)))
+      }
+    }
+    const out = [logs, roots, tower, net].filter((o) => o.count)
+    for (const o of out) { o.matrixAutoUpdate = false; o.computeBoundingSphere() }
+    return out
+  }
 
   parkedCars(A) { // 5 floats a car (tile-worker.js parked)
     const n = A.length / 5, m = new THREE.InstancedMesh(this.carGeo, this.carMat, n), M = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), one = new THREE.Vector3(1, 1, 1), up = new THREE.Vector3(0, 1, 0), c = new THREE.Color()
@@ -568,6 +637,7 @@ export class Tiles {
       if (t.lot) t.lot.visible = cars > 0
       if (t.kerb) t.kerb.visible = cars > 1
       if (t.coarse) { t.ground.visible = fine; t.coarse.visible = !fine }
+      if (t.beach) for (const o of t.beach) o.visible = fine
     }
   }
 
