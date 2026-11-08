@@ -158,11 +158,11 @@ export function peopleModels(THREE) {
 }
 
 // A Vancouver signal pole, in the frame of its mast arm (+x, over the lanes; heads face -z, the oncoming traffic),
-// origin at its foot: the pole, a near-side head and a pedestrian head on it, and a street-name blade on the arm.
+// origin at its foot: the pole, a near-side head and a pedestrian head on it (the street-name blade: blades.js).
 // The arm (a unit long, scaled to each) and the overhead head (origin where it hangs from the arm) are their own
 // models; LENSES are where the lit discs and pedestrian squares go, in those frames.
 export const ARM_Y = 6.1
-const SIG_POLE = 0x3a3e44, SIG_YELLOW = 0xd9a51e, SIG_BLACK = 0x1a1b1d, BLADE = 0x1f4f9a
+const SIG_POLE = 0x3a3e44, SIG_YELLOW = 0xd9a51e, SIG_BLACK = 0x1a1b1d
 function signalHead(k, x, y, z, plate) { // a three-lens head facing -z, top centre at (x, y, z): visors and a backplate
   k.c(SIG_YELLOW).prism([x - 0.17, y - 1.04, x + 0.17, y - 1.04, x + 0.17, y, x - 0.17, y], z - 0.13, z + 0.13, { bevel: 0.03 })
   if (plate) { k.c(SIG_YELLOW).box(x - 0.4, x + 0.4, y - 1.16, y + 0.08, z + 0.135, z + 0.155); k.c(SIG_BLACK).box(x - 0.37, x + 0.37, y - 1.13, y + 0.05, z + 0.11, z + 0.14) }
@@ -174,17 +174,18 @@ function signalHead(k, x, y, z, plate) { // a three-lens head facing -z, top cen
     k.prism(arc, z - 0.36, z - 0.13)
   }
 }
+// Street-name blades (blades.js draws them, only where the name is known): centred at x, y, along x, w by h; on the
+// mast arm (resting on it) a little larger than life so the name reads from down the block, and two crossed on a
+// corner post at junctions without signals (turn: about the post)
+export const ARM_BLADE = { x: 2.5, y: ARM_Y + 0.37, w: 2.8, h: 0.56 }
+export const POST_BLADES = [{ x: 0, y: 2.8, w: 1.7, h: 0.34, turn: 0 }, { x: 0, y: 3.18, w: 1.7, h: 0.34, turn: Math.PI / 2 }]
+export function postModel(THREE) { return kit(THREE).c(SIG_POLE).cyl(0.045, 0.04, 3.36, 6).geometry(true) }
 export function signalModels(THREE) {
   const pole = kit(THREE)
   pole.c(SIG_POLE).cyl(0.2, 0.17, 0.45, 8).cyl(0.11, 0.085, ARM_Y + 0.4, 8)
   signalHead(pole, 0, 4.35, -0.27, false) // the near-side head, on the pole
   pole.c(SIG_POLE).box(-0.05, 0.05, 3.45, 4.2, -0.2, -0.08)
   pole.c(SIG_BLACK).prism([0.08, 2.6, 0.42, 2.6, 0.42, 3.05, 0.08, 3.05], -0.18, 0.18, { bevel: 0.02 }) // pedestrian head (faces +x)
-  pole.c(0xf0f0ea).box(0.95, 2.65, ARM_Y + 0.17, ARM_Y + 0.53, -0.012, 0.012) // street-name blade: white border, blue face,
-  pole.c(BLADE).box(0.98, 2.62, ARM_Y + 0.2, ARM_Y + 0.5, -0.022, 0.022)
-  pole.c(0xf0f0ea) // and white words
-  for (const [a, b] of [[1.08, 1.2], [1.28, 1.9], [1.98, 2.18], [2.3, 2.52]]) pole.box(a, b, ARM_Y + 0.31, ARM_Y + 0.39, -0.026, 0.026)
-  pole.c(SIG_POLE).box(0.9, 0.96, ARM_Y + 0.05, ARM_Y + 0.55, -0.02, 0.02).box(2.62, 2.68, ARM_Y + 0.05, ARM_Y + 0.55, -0.02, 0.02)
   const arm = kit(THREE)
   const a = arm.at(); arm.c(SIG_POLE).cyl(0.09, 0.055, 1, 6, 1); arm.rot(a, 'z', -Math.PI / 2)
   const head = kit(THREE)

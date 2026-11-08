@@ -363,12 +363,14 @@ def build(ij):
     trees = canopy_trees(dsm, dtm, fp, water_r, X0, Y0, rnd, polys, nogo)
     trees, moved, dropped = off_streets(trees, polys, lambda x, y: fp[min(N - 1, max(0, int((Y0 + L1 - y) / HR))), min(N - 1, max(0, int((x - X0) / HR)))])
 
-    # ---- points the simulation uses: signals, crossings, stops, street lamps, benches, transit stops
+    # ---- points the simulation uses: signals, crossings, stops, street lamps, benches, transit stops; painted
+    # crossings are their own kinds (7 bars, 8 two lines: the client draws their crosswalks)
     POI = {'traffic_signals': 0, 'crossing': 1, 'stop': 2, 'street_lamp': 3, 'bench': 4, 'bus_stop': 5, 'give_way': 6}
     pois = []
     for nid, (x, y), t in feat.get('nodes', []):
         k = t.get('highway') if t.get('highway') in POI else 'bench' if t.get('amenity') == 'bench' else 'bus_stop' if t.get('public_transport') == 'platform' and t.get('bus') == 'yes' else None
-        if k and X0 <= x < X0 + L1 and Y0 <= y < Y0 + L1: pois.append((POI[k], nid, x, y))
+        paint = crossing_paint(t) if k == 'crossing' else 0
+        if k and X0 <= x < X0 + L1 and Y0 <= y < Y0 + L1: pois.append((6 + paint if paint else POI[k], nid, x, y))
 
     # ---- write the 16 detail tiles and the medium tile
     n = 0
@@ -388,6 +390,14 @@ def build(ij):
     os.makedirs(f'{OUT}/1', exist_ok=True)
     open(f'{OUT}/1/{i}_{j}.bin', 'wb').write(out.bytes())
     return ij, 'ok', round(time.time() - t0, 1), n, len(builds), len(trees), f'trunks off streets: {moved} moved, {dropped} dropped'
+
+
+def crossing_paint(t):
+    """how a crossing (node) is painted: 0 not (or not known), 1 continental bars, 2 two lines (OSM crossing:markings)"""
+    m, c = t.get('crossing:markings', ''), t.get('crossing')
+    if m in ('no', 'surface') or c in ('unmarked', 'no', 'informal'): return 0
+    if m and m not in ('yes', 'zebra', 'ladder', 'ladder:skewed', 'ladder:paired') and 'zebra' not in m: return 2  # lines, dashes, dots
+    return 1 if m or c in ('traffic_signals', 'uncontrolled', 'marked', 'zebra') else 0
 
 
 def flat_water(dtm, sea, water):

@@ -8,7 +8,7 @@ const KIND = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'resident
 const K = Object.fromEntries(KIND.map((k, i) => [k, i]))
 
 let MASKS = [] // world-metre rings where plugins draw their own buildings (landmarks): generic ones are skipped
-onmessage = async ({ data }) => {
+globalThis.onmessage = async ({ data }) => { // (globalThis: tools/crosswalk_check.mjs imports this under node)
   if (data.masks) { MASKS = data.masks.map((r) => ({ r, bb: bbox(r) })); return }
   const { id, url, level } = data
   try {
@@ -72,10 +72,11 @@ function build(t, level) {
   const out = { terrain: terr }
   out.ground = ground(t, terr, level)
   const lines = readLines(t)
-  const rd = roads(t, terr, lines, level)
+  const ps = pois(t)
+  const rd = roads(t, terr, lines, level, ps)
   out.roads = rd.surf; out.paint = rd.paint
   out.graph = graph(t, lines)
-  out.graph.pois = pois(t)
+  out.graph.pois = ps
   const b = buildings(t, terr, level)
   out.buildings = b.walls; out.balconies = b.balconies; out.units = b.units
   if (level === 0) { out.footprints = b.footprints; out.water = water(t); out.carriage = roadMask(t); out.boats = boats(t, terr) }
@@ -256,16 +257,18 @@ function readLines(t) {
 
 // road surfaces as strips. Two layers: the "band" (sidewalks, boulevards, kerbs) under everything, then the
 // carriageways on top, so a big road's sidewalk never covers a side street. Markings are drawn by the shader
-// from per-vertex (along, across) coordinates; they fade out near junctions.
-function roads(t, terr, lines, level) {
+// from per-vertex (along, across) coordinates, measured from the edge of the junction box (setback()): lane lines
+// fade out before it, the stop line stands behind the crosswalk.
+function roads(t, terr, lines, level, ps) {
   // Road surfaces, sidewalks and paths are part of the ground (baked as non-overlapping polygons). Here: bridge
   // decks (full surfaces, raised on their LiDAR heights) and, as thin decals on the ground, the paint: lane lines,
-  // stop lines, the crosswalks OpenStreetMap maps, and rails.
+  // stop lines, the crosswalks OpenStreetMap maps (crosswalks()), and rails.
   const deg = new Map()
   for (const L of lines) for (const n of [L.a, L.b]) deg.set(n, (deg.get(n) || 0) + 1)
   const mk = () => ({ P: [], A: [], B: [], I: [], nv: 0 })
   const surf = mk(), paint = mk()
-  const strip = (T, pts, zs, half, lift, kind, extra, w, junctionA, junctionB) => {
+  // jA, jB: how far from each end the junction box there reaches (null: no junction, no stop line)
+  const strip = (T, pts, zs, half, lift, kind, extra, w, jA, jB) => {
     const xs = [], ys = [], zz = []
     for (let i = 0; i < pts.length / 2 - 1; i++) {
       const x0 = pts[i * 2], y0 = pts[i * 2 + 1], x1 = pts[i * 2 + 2], y1 = pts[i * 2 + 3]
@@ -297,7 +300,7 @@ function roads(t, terr, lines, level) {
         const y = zz[i] ?? heightAt(terr, px, py) // decals follow the ground under each edge, not the centre line
         T.P.push(px, y + lift, -py)
         T.A.push(cum[i], side * half, w, kind)
-        T.B.push(extra, junctionA ? cum[i] : 999, junctionB ? len - cum[i] : 999, len)
+        T.B.push(extra, jA == null ? 999 : cum[i] - jA, jB == null ? 999 : len - cum[i] - jB, len)
       }
       if (i) { const b = T.nv + (i - 1) * 2; T.I.push(b, b + 2, b + 1, b + 1, b + 2, b + 3) }
     }
@@ -305,23 +308,27 @@ function roads(t, terr, lines, level) {
   }
   const len = (L) => { let s = 0; for (let i = 0; i < L.pts.length / 2 - 1; i++) s += Math.hypot(L.pts[i * 2 + 2] - L.pts[i * 2], L.pts[i * 2 + 3] - L.pts[i * 2 + 1]); return s }
   const order = [...lines].sort((p, q) => q.kind - p.kind)
+  const ends = level === 0 ? carEnds(lines) : null
+  const box = (L, e) => setback(ends, L, e)
   for (const L of order) {
     const ja = (deg.get(L.a) || 0) >= 3, jb = (deg.get(L.b) || 0) >= 3
     if (L.z) { // bridges: the whole surface, raised
       if (L.kind > K.track && L.kind !== K.rail && L.kind !== K.lightrail) continue
-      if (L.band) { const bl = L.kind === K.residential || L.kind === K.tertiary ? 0 : 0, walk = 2.0; strip(surf, L.pts, L.z, L.w / 2 + walk, 0.3, 100, bl * 256 + walk * 16, L.w, false, false) }
-      strip(surf, L.pts, L.z, L.w / 2, 0.36 + (18 - L.kind) * 0.004, L.kind, L.lanes + (L.oneway ? 32 : 0), L.w, ja, jb)
+      if (L.band) { const bl = L.kind === K.residential || L.kind === K.tertiary ? 0 : 0, walk = 2.0; strip(surf, L.pts, L.z, L.w / 2 + walk, 0.3, 100, bl * 256 + walk * 16, L.w, null, null) }
+      strip(surf, L.pts, L.z, L.w / 2, 0.36 + (18 - L.kind) * 0.004, L.kind, L.lanes + (L.oneway ? 32 : 0), L.w, ja ? 0 : null, jb ? 0 : null)
       continue
     }
     if (level !== 0) continue // the overview shows surfaces only
     const l = len(L)
     if (L.kind <= K.living && (L.lanes >= 2 || L.kind <= K.trunk) && l > 12) {
-      strip(paint, L.pts, null, L.w / 2, 0.05, L.kind, L.lanes + (L.oneway ? 32 : 0), L.w, ja && l > 30, jb && l > 30)
-    } else if (L.crossing) {
-      strip(paint, L.pts, null, Math.max(1.5, L.w / 2 + 0.4), 0.06, 102, 0, L.w, false, false) // zebra
+      strip(paint, L.pts, null, L.w / 2, 0.05, L.kind, L.lanes + (L.oneway ? 32 : 0), L.w, ja && l > 30 ? box(L, 0) ?? 0 : null, jb && l > 30 ? box(L, 1) ?? 0 : null)
     } else if (L.kind === K.rail || L.kind === K.lightrail) {
-      strip(paint, L.pts, null, 1.3, 0.05, L.kind, 0, L.w, false, false)
+      strip(paint, L.pts, null, 1.3, 0.05, L.kind, 0, L.w, null, null)
     }
+  }
+  if (ends) for (const c of crosswalks(lines, ends, ps, t.ox, t.oy)) { // kerb to kerb, square across the carriageway
+    const nx = -c.ty * c.w / 2, ny = c.tx * c.w / 2
+    strip(paint, [c.x - nx, c.y - ny, c.x + nx, c.y + ny], null, CW / 2, 0.06, 102, c.lines, CW, null, null)
   }
   const pack = (T) => {
     if (!T.nv) return null
@@ -329,6 +336,139 @@ function roads(t, terr, lines, level) {
     return { position: PP, normal: normals(terr, PP), aRoad: new Float32Array(T.A), aRoad2: new Float32Array(T.B), index: T.nv > 65535 ? new Uint32Array(T.I) : new Uint16Array(T.I) }
   }
   return { surf: pack(surf), paint: pack(paint) }
+}
+
+// ---------------------------------------------------------------- crosswalks
+// One per crossing leg, square across the carriageway it crosses and kerb to kerb as drawn, from OpenStreetMap's
+// crossing ways (footway / cycleway=crossing, often split in two at the road) and its marked crossing nodes (POIs 7:
+// bars, 8: two lines), which often map the same crossing twice. Near a junction it stands just outside the junction
+// box, in line with the corners and in front of the stop line, whichever way OSM drew it (diagonally through the
+// box, past the kerbs); elsewhere where it is mapped.
+const CW = 3 // crosswalk width, metres
+const CAR = (L) => L.kind <= K.living && !L.z && !L.crossing
+// the carriageway ends at each node: { L, e (0 its start, 1 its end), dx, dy (unit, away from the node) }
+function carEnds(lines) {
+  const ends = new Map()
+  for (const L of lines) {
+    if (!CAR(L)) continue
+    const P = L.pts, m = P.length - 2
+    for (const e of [0, 1]) {
+      const i = e ? m : 0, j = e ? m - 2 : 2, dx = P[j] - P[i], dy = P[j + 1] - P[i + 1], l = Math.hypot(dx, dy) || 1, id = e ? L.b : L.a
+      let a = ends.get(id); if (!a) ends.set(id, (a = []))
+      a.push({ L, e, dx: dx / l, dy: dy / l })
+    }
+  }
+  return ends
+}
+// how far the junction box at end e of L reaches along it: the half widths of the carriageways across it there,
+// longer when they cross at a slant; null where three or more carriageways don't meet (no junction)
+function setback(ends, L, e) {
+  const a = ends?.get(e ? L.b : L.a)
+  if (!a || a.length < 3) return null
+  const q = a.find((o) => o.L === L && o.e === e)
+  let s = 0
+  for (const o of a) { const sin = Math.abs(q.dx * o.dy - q.dy * o.dx); if (o !== q && sin > 0.35) s = Math.max(s, o.L.w / 2 / sin) }
+  return Math.min(s, 20)
+}
+// the point d metres along L from end e (on past it in a straight line), with the tangent pointing on from that end
+function along(L, e, d) {
+  const P = L.pts, n = P.length / 2
+  for (let k = 0; k < n - 1; k++) {
+    const i = e ? n - 1 - k : k, j = e ? i - 1 : i + 1
+    const x0 = P[i * 2], y0 = P[i * 2 + 1], dx = P[j * 2] - x0, dy = P[j * 2 + 1] - y0, l = Math.hypot(dx, dy) || 1
+    if (d <= l || k === n - 2) return { x: x0 + (dx / l) * d, y: y0 + (dy / l) * d, tx: dx / l, ty: dy / l }
+    d -= l
+  }
+}
+// -> [{ x, y, tx, ty (along the carriageway), w (its width), lines (1: two lines, 0: bars) }], tile-local
+function crosswalks(lines, ends, ps, ox, oy) {
+  const cars = lines.filter(CAR), grid = new Map(), G = 16
+  const cell = (x, y) => Math.floor(x / G) * 4096 + Math.floor(y / G)
+  cars.forEach((L, k) => { for (let i = 0; i < L.pts.length / 2 - 1; i++) { // (car, segment) pairs on a grid
+    const P = L.pts, n = Math.ceil(Math.hypot(P[i * 2 + 2] - P[i * 2], P[i * 2 + 3] - P[i * 2 + 1]) / G)
+    for (let s = 0; s <= n; s++) {
+      const f = s / n || 0, c = cell(P[i * 2] + (P[i * 2 + 2] - P[i * 2]) * f, P[i * 2 + 1] + (P[i * 2 + 3] - P[i * 2 + 1]) * f)
+      let a = grid.get(c); if (!a) grid.set(c, (a = [])); if (a.at(-2) !== k || a.at(-1) !== i) a.push(k, i)
+    }
+  } })
+  // the carriageway points within 1 m of segment a-b (or of point a): { L, x, y, u (metres along L), sin (how square it is crossed) }
+  const hits = (ax, ay, bx, by) => {
+    const out = [], seen = new Set()
+    for (let gx = Math.floor((Math.min(ax, bx) - 1) / G); gx <= Math.floor((Math.max(ax, bx) + 1) / G); gx++) for (let gy = Math.floor((Math.min(ay, by) - 1) / G); gy <= Math.floor((Math.max(ay, by) + 1) / G); gy++) {
+      const a = grid.get(gx * 4096 + gy) || []
+      for (let k = 0; k < a.length; k += 2) {
+        const L = cars[a[k]], i = a[k + 1], key = a[k] * 65536 + i
+        if (seen.has(key)) continue
+        seen.add(key)
+        const P = L.pts, x0 = P[i * 2], y0 = P[i * 2 + 1], dx = P[i * 2 + 2] - x0, dy = P[i * 2 + 3] - y0, l2 = dx * dx + dy * dy || 1
+        const ex = bx - ax, ey = by - ay, den = dx * ey - dy * ex
+        let f = -1
+        if (Math.abs(den) > 1e-9) { // segments crossing
+          const s = ((ax - x0) * ey - (ay - y0) * ex) / den, r = ((ax - x0) * dy - (ay - y0) * dx) / den
+          if (s >= 0 && s <= 1 && r >= 0 && r <= 1) f = s
+        }
+        if (f < 0) for (const [px, py] of [[ax, ay], [bx, by]]) { // an end of the crossing on (or just off) the carriageway
+          const s = Math.max(0, Math.min(1, ((px - x0) * dx + (py - y0) * dy) / l2))
+          if (Math.hypot(x0 + dx * s - px, y0 + dy * s - py) < 1) { f = s; break }
+        }
+        if (f < 0) continue
+        let u = 0
+        for (let j = 0; j < i; j++) u += Math.hypot(P[j * 2 + 2] - P[j * 2], P[j * 2 + 3] - P[j * 2 + 1])
+        const el = Math.hypot(ex, ey)
+        out.push({ L, x: x0 + dx * f, y: y0 + dy * f, u: u + Math.sqrt(l2) * f, sin: el > 1e-6 ? Math.abs(dx * ey - dy * ex) / Math.sqrt(l2) / el : 1, tx: dx / Math.sqrt(l2), ty: dy / Math.sqrt(l2) })
+      }
+    }
+    return out
+  }
+  const lens = new Map(), len = (L) => {
+    let s = lens.get(L)
+    if (s === undefined) { s = 0; for (let j = 0; j < L.pts.length / 2 - 1; j++) s += Math.hypot(L.pts[j * 2 + 2] - L.pts[j * 2], L.pts[j * 2 + 3] - L.pts[j * 2 + 1]); lens.set(L, s) }
+    return s
+  }
+  // where a crossing at hit h goes: just outside the junction box when a junction is near, else where it is.
+  // (cx, cy): which way the crossing lies from the hit, to tell the legs apart when OSM ends it in the junction
+  const place = (h, cx, cy) => {
+    let best = null
+    for (const e of [0, 1]) {
+      const sb = setback(ends, h.L, e), dist = e ? len(h.L) - h.u : h.u
+      if (sb == null || dist > sb + 12) continue
+      const p = along(h.L, e, sb + 1 + CW / 2), side = p.tx * cx + p.ty * cy
+      if (!best || dist < best.dist - 0.5 || (Math.abs(dist - best.dist) <= 0.5 && side > best.side)) best = { ...p, dist, side, jct: true }
+    }
+    return best || { x: h.x, y: h.y, tx: h.tx, ty: h.ty, dist: 0, side: 0, jct: false }
+  }
+  const out = []
+  const add = (g, cx, cy, ls, node) => { // hits g at one spot (the road's pieces meet there): the one placed best
+    let h = null, p = null
+    for (const o of g) { const q = place(o, cx - o.x, cy - o.y); if (!p || (q.jct ? 10 : 0) + q.side > (p.jct ? 10 : 0) + p.side) { h = o; p = q } }
+    const c = { x: p.x, y: p.y, tx: p.tx, ty: p.ty, w: h.L.w, lines: ls, node, jct: p.jct }
+    const o = out.find((o) => Math.hypot(o.x - c.x, o.y - c.y) < 3.5 && Math.abs(o.tx * c.tx + o.ty * c.ty) > 0.8)
+    if (!o) return out.push(c)
+    if (c.jct && !o.jct) Object.assign(o, { x: c.x, y: c.y, tx: c.tx, ty: c.ty, w: c.w, jct: true })
+    if (node && !o.node) Object.assign(o, { lines: ls, node })
+  }
+  for (const q of ps) { // marked crossing nodes on a carriageway (not in the middle of a junction: which way would it go?)
+    if (q.kind !== 7 && q.kind !== 8) continue
+    const x = q.x - ox, y = q.y - oy, hs = hits(x, y, x, y)
+    if (!hs.length || hs.some((h) => [0, 1].some((e) => (e ? len(h.L) - h.u : h.u) < 1 && setback(ends, h.L, e) != null))) continue
+    add(hs, x, y, q.kind === 8 ? 1 : 0, true)
+  }
+  for (const C of lines) {
+    if (!C.crossing) continue
+    const P = C.pts, n = P.length / 2
+    let hs = []
+    for (let i = 0; i < n - 1; i++) hs.push(...hits(P[i * 2], P[i * 2 + 1], P[i * 2 + 2], P[i * 2 + 3]))
+    if (!hs.length) continue
+    const top = Math.max(...hs.map((h) => h.sin))
+    hs = hs.filter((h) => h.sin >= top - 0.2) // the carriageway it crosses, not one it runs along
+    let mx = 0, my = 0
+    for (let i = 0; i < n; i++) { mx += P[i * 2] / n; my += P[i * 2 + 1] / n }
+    // hits within 2 m of each other are one crossing (the road's pieces meet there); a crossing of two carriageways (a divided road) is two
+    const groups = []
+    for (const h of hs) { const g = groups.find((g) => Math.hypot(g[0].x - h.x, g[0].y - h.y) < 2); if (g) g.push(h); else groups.push([h]) }
+    for (const g of groups) add(g, mx, my, 0, false)
+  }
+  return out
 }
 
 // drivable/walkable graph for plugins (traffic, people): pieces with global node ids and world points
@@ -678,3 +818,5 @@ function trees(t, terr) {
   }
   return { pos, info }
 }
+
+export { parse, readLines, pois, carEnds, crosswalks } // for tools/crosswalk_check.mjs

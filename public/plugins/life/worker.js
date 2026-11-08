@@ -953,7 +953,7 @@ function buildWalk() {
     // may people cross here? at junctions, and where a crossing or signal is mapped
     n.crossOK = n.dX > 0
   }
-  for (const q of poisOf([0, 1], area.vx, area.vy, r)) { const n = nodes.get(q.id); if (n) n.crossOK = true }
+  for (const q of poisOf([0, 1, 7, 8], area.vx, area.vy, r)) { const n = nodes.get(q.id); if (n) n.crossOK = true }
   for (const n of nodes.values()) if (!n.car) n.crossOK = false
   const foot = wps.filter((w) => !w.bike), cycl = wps.filter((w) => w.bike)
   // benches and bus stops, facing the nearest path or street
@@ -1380,7 +1380,29 @@ function signalHeads() {
       heads.push(px, py, L.h[m], Math.atan2(fx, -fy), arm, Math.atan2(-fy, -fx), ctl.id, group)
     }
   }
-  return { heads: new Float32Array(heads), ctls: new Float32Array(ctls), simT, benches: walk && opts.people ? walk.benches.map((b) => [b.x, b.y, b.h, b.ang]).flat() : [] }
+  // a street-name post on a corner of each junction without signals (one where a divided road makes it two):
+  // x, north, ground, heading of the main street and of the one across it
+  const posts = [], pg = grid(30)
+  for (const n of net.nodes.values()) {
+    if (n.deg < 3 || n.ctl) continue
+    const legs = new Map()
+    for (const L of n.outs) legs.set(L.p, startHeading(L))
+    for (const L of n.ins) if (!legs.has(L.p)) legs.set(L.p, endHeading(L) + Math.PI)
+    let A = null
+    for (const p of legs.keys()) if (p.kind >= 2 && p.kind <= 5 && (!A || p.kind < A.kind || (p.kind === A.kind && p.w > A.w))) A = p
+    if (!A) continue
+    const a = legs.get(A)
+    let B = null, bs = 0.6
+    for (const [p, b] of legs) { const sn = Math.abs(Math.sin(b - a)); if (p.kind >= 2 && p.kind <= 5 && sn > bs) { bs = sn; B = p } }
+    if (!B) continue
+    const b = legs.get(B), x = n.x + Math.cos(a) * (B.w / 2 + 1.6) + Math.cos(b) * (A.w / 2 + 1.6), y = n.y + Math.sin(a) * (B.w / 2 + 1.6) + Math.sin(b) * (A.w / 2 + 1.6)
+    let near = false
+    pg.near(x, y, (q) => { if (Math.hypot(q[0] - x, q[1] - y) < 18) near = true })
+    if (near) continue
+    pg.add(x, y, [x, y])
+    posts.push(x, y, groundH(x, y), a, b)
+  }
+  return { heads: new Float32Array(heads), ctls: new Float32Array(ctls), posts: new Float32Array(posts), simT, benches: walk && opts.people ? walk.benches.map((b) => [b.x, b.y, b.h, b.ang]).flat() : [] }
 }
 
 function tick({ dt, buf }) {

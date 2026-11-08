@@ -25,6 +25,7 @@ import { makeWalker, poseWalker } from './walker.js'
 import { makeProps, LAMP, STOP, YIELD, BUS, BOLLARD, BENCH } from './props.js'
 import { makeKerbs } from './kerbs.js'
 import { clamp, smooth, wrap, esc, vancouver, circleBox } from '../../core/util.js'
+import { cellsNear, nearestStreet, abbr } from '../../core/streets.js'
 import { typing, buzz, MOVE_KEYS, mapPicker, mapCameraPose, poseOf, dive, streetSky, touchButtons, audioContext, tone as toneInto } from '../../core/play.js'
 
 const DRIVE_MAX_KIND = 7 // motorway .. living street (graph piece kinds): where a van belongs
@@ -64,16 +65,6 @@ const ITEMS = {
   library: ['a pile of returned books'], tea: ['a tin of loose-leaf tea'], gift: ['a wrapped present'], clothes: ['a knitted sweater'], outdoor: ['a new rain jacket'],
   chocolate: ['a box of truffles'], deli: ['a picnic basket'], pub: ['a growler of local ale'], seafood: ['a cooler of fresh salmon'], 'post office': ['a sack of letters'],
 }
-// OpenStreetMap spells street names out; addresses abbreviate them
-const ABBR = { Avenue: 'Ave', Street: 'St', Drive: 'Dr', Road: 'Rd', Boulevard: 'Blvd', Place: 'Pl', Crescent: 'Cres', Court: 'Ct', Highway: 'Hwy', Lane: 'Ln', Way: 'Way', Mall: 'Mall', Square: 'Sq', Terrace: 'Terr', Parkway: 'Pkwy' }
-const DIRS = { East: 'E', West: 'W', North: 'N', South: 'S' }
-function abbr(name) {
-  const w = name.split(' ')
-  if (w.length >= 3 && DIRS[w[0]]) w[0] = DIRS[w[0]]
-  if (w.length >= 2 && ABBR[w[w.length - 1]]) w[w.length - 1] = ABBR[w[w.length - 1]]
-  return w.join(' ')
-}
-
 export default function drive(city) {
   const { THREE } = city
   const v3 = new THREE.Vector3(), v4 = new THREE.Vector3()
@@ -304,61 +295,7 @@ export default function drive(city) {
     return { nx: bx, ny: by, depth: best }
   }
 
-  // ================================================================ street names and shops (OpenStreetMap, per 4 km cell)
-  const cells = new Map() // "I_J" -> null while loading, then { segs, name, grid, names, places }
-  let cellList = null
-  fetch(new URL('./data/index.json', import.meta.url)).then((r) => r.json()).then((l) => { cellList = new Set(l) }).catch(() => { cellList = new Set() })
-  function cellsNear(x, y, r) { // the loaded cells within r; starts loading the missing ones
-    const out = []
-    if (!cellList) return out
-    for (let I = Math.floor((x - r) / 4096); I <= Math.floor((x + r) / 4096); I++) for (let J = Math.floor((y - r) / 4096); J <= Math.floor((y + r) / 4096); J++) {
-      const k = `${I}_${J}`
-      if (!cellList.has(k)) continue
-      if (!cells.has(k)) {
-        cells.set(k, null)
-        fetch(new URL(`./data/${k}.json`, import.meta.url)).then((r) => r.json()).then((d) => cells.set(k, prepCell(d))).catch((e) => { console.warn('drive: no street names for', k, e); cells.set(k, { segs: [], name: [], grid: new Map(), names: [], places: [], bollards: new Map() }) })
-      }
-      const c = cells.get(k)
-      if (c) out.push(c)
-    }
-    return out
-  }
-  function prepCell(d) {
-    const [ox, oy] = d.o, segs = [], name = [], grid = new Map()
-    for (const row of d.s) for (let i = 1; i + 3 < row.length; i += 2) {
-      const x0 = row[i] + ox, y0 = row[i + 1] + oy, x1 = row[i + 2] + ox, y1 = row[i + 3] + oy, id = name.push(row[0]) - 1
-      segs.push(x0, y0, x1, y1)
-      const n = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 24)
-      for (let k = 0; k <= n; k++) {
-        const f = k / n || 0, key = ckey(Math.floor((x0 + (x1 - x0) * f) / 48), Math.floor((y0 + (y1 - y0) * f) / 48))
-        let a = grid.get(key); if (!a) grid.set(key, (a = [])); if (a[a.length - 1] !== id) a.push(id)
-      }
-    }
-    const places = d.p.map(([x, y, nm, k, addr]) => ({ x: x + ox, y: y + oy, name: nm, kind: d.k[k], addr }))
-    const bollards = new Map()
-    for (let i = 0; i + 1 < (d.b || NONE).length; i += 2) {
-      const x = ox + d.b[i] / 10, y = oy + d.b[i + 1] / 10, key = ckey(Math.floor(x / CELL), Math.floor(y / CELL))
-      let a = bollards.get(key); if (!a) bollards.set(key, (a = [])); a.push(x, y)
-    }
-    return { segs, name, grid, names: d.n, places, bollards }
-  }
-  // the nearest named street within r metres: { name, x0, y0, x1, y1, px, py, d }
-  function nearestStreet(x, y, r) {
-    let best = null, bd = r
-    for (const c of cellsNear(x, y, r)) {
-      const seen = new Set()
-      for (let gx = Math.floor((x - r) / 48); gx <= Math.floor((x + r) / 48); gx++) for (let gy = Math.floor((y - r) / 48); gy <= Math.floor((y + r) / 48); gy++) {
-        for (const id of c.grid.get(ckey(gx, gy)) || NONE) {
-          if (seen.has(id)) continue
-          seen.add(id)
-          const x0 = c.segs[id * 4], y0 = c.segs[id * 4 + 1], dx = c.segs[id * 4 + 2] - x0, dy = c.segs[id * 4 + 3] - y0
-          const u = clamp(((x - x0) * dx + (y - y0) * dy) / (dx * dx + dy * dy || 1), 0, 1), px = x0 + dx * u, py = y0 + dy * u, d = Math.hypot(x - px, y - py)
-          if (d < bd) { bd = d; best = { name: c.names[c.name[id]], x0, y0, x1: x0 + dx, y1: y0 + dy, px, py, d } }
-        }
-      }
-    }
-    return best
-  }
+  // ================================================================ shops (OpenStreetMap, per 4 km cell: core/streets.js)
   function placesNear(x, y, r0, r1) {
     const out = []
     for (const c of cellsNear(x, y, r1)) for (const p of c.places) { const d = Math.hypot(p.x - x, p.y - y); if (d >= r0 && d <= r1) out.push(p) }

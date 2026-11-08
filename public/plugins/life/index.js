@@ -7,12 +7,14 @@
 // It publishes city.traffic (see PLUGINS.md): where the cars, people and signal poles are, obstacles (a player's van)
 // they brake for, and bumps (a car hit stops a moment, a person knocked stumbles or falls over and gets up again).
 
-import { carModels, peopleModels, signalModels, DETAIL, ARM_Y, LENSES, POLE_LENSES, PED_LENSES } from './models.js'
+import { carModels, peopleModels, signalModels, postModel, DETAIL, ARM_Y, ARM_BLADE, POST_BLADES, LENSES, POLE_LENSES, PED_LENSES } from './models.js'
+import { blades } from './blades.js'
 import { kit, SHADE } from '../../core/kit.js'
 import { vancouver } from '../../core/util.js'
+import { nearestStreet } from '../../core/streets.js'
 
 const CAR_ZOOM = 0.08, PEOPLE_ZOOM = 0.25
-const NEAR = [150, 70, 240], SIG_CAP = 200 // metres (cars, people, signals): under a perspective camera, the detailed models (models.js) within these, times the quality tier's `near`
+const NEAR = [150, 70, 240, 150], SIG_CAP = 200, POST_CAP = 150 // metres (cars, people, signals, street names): under a perspective camera, the detailed models (models.js) within these, times the quality tier's `near`
 const KEY = 'vancouver.life'
 const MOBILE = matchMedia('(pointer: coarse)').matches || innerWidth < 700
 const MAX_CARS = MOBILE ? 2000 : 4000, MAX_PEOPLE = MOBILE ? 1500 : 3000, MAX_BIKES = 300, MAX_NEAR = 600
@@ -26,8 +28,8 @@ export default function life(city) {
 
   // ---------------------------------------------------------------- models
   const uni = { uNight: { value: 0 }, uTime: { value: 0 }, uRain: { value: 0 }, uCam: { value: new THREE.Vector3() } }
-  let NEAR_CARS, NEAR_PEOPLE, SIG_NEAR
-  const nearRadii = () => { [NEAR_CARS, NEAR_PEOPLE, SIG_NEAR] = NEAR.map((r) => r * (city.quality?.tier.near ?? 1)) }
+  let NEAR_CARS, NEAR_PEOPLE, SIG_NEAR, NAME_NEAR
+  const nearRadii = () => { [NEAR_CARS, NEAR_PEOPLE, SIG_NEAR, NAME_NEAR] = NEAR.map((r) => r * (city.quality?.tier.near ?? 1)) }
   nearRadii()
   const nearCars = { value: 0 }, nearPeople = { value: 0 }
   // boxes: [x0, x1, y0, y1, z half-width, colour (null = the instance's colour), part, taper (top scale), swing, z centre]
@@ -325,6 +327,66 @@ export default function life(city) {
     D.at.x = x; D.at.z = z
     sig.state.fill(-1); sig.ped.fill(-1); sigAt = -1
   }
+  // ---------------------------------------------------------------- street names
+  // the real names (core/streets.js) on the signals' mast-arm blades (the street ahead, across the approach, as in
+  // Vancouver) and on a post at a corner of junctions without signals (one blade along each street), within NAME_NEAR
+  const names = { at: { x: NaN, z: NaN }, arm: [], post: [], posts: null, mesh: null, low: null, words: null }
+  const postGeo = postModel(THREE)
+  const relook = () => { names.at.x = NaN } // a cell of names came in: pick again
+  const across = (fx, fy) => (dx, dy) => Math.abs(dx * fx + dy * fy) < 0.5 * Math.hypot(dx, dy)
+  const along = (a) => (dx, dy) => Math.abs(dx * Math.cos(a) + dy * Math.sin(a)) > 0.87 * Math.hypot(dx, dy)
+  function buildPosts(p) {
+    names.mesh?.removeFromParent(); names.mesh?.dispose()
+    names.posts = p; names.post = []; names.mesh = null; names.at.x = NaN
+    const n = p.length / 5
+    for (let i = 0; i < n; i++) { const q = city.world.offRoad(p[i * 5], -p[i * 5 + 1], 0.5, 6); if (q) { p[i * 5] = q.x; p[i * 5 + 1] = -q.z; p[i * 5 + 2] = city.world.heightAt(q.x, q.z) } }
+    if (!n) return
+    names.mesh = new THREE.InstancedMesh(postGeo, benchMat, Math.min(n, POST_CAP))
+    Object.assign(names.mesh, { count: 0, frustumCulled: false, castShadow: false, receiveShadow: true, visible: !!sig.near })
+    names.mesh.userData.near = true
+    sig.group.add(names.mesh)
+  }
+  function nearNames(x, z) {
+    const tier = city.quality?.tier.name === 'low'
+    if (names.low !== tier) { // the atlas follows the quality tier
+      names.words?.mesh.removeFromParent(); names.words?.dispose()
+      names.words = blades(THREE, city.renderer, SIG_CAP + POST_CAP * 2, tier); names.low = tier
+      names.words.mesh.visible = !!sig.near; names.words.mesh.userData.near = true; sig.group.add(names.words.mesh)
+    }
+    names.at.x = x; names.at.z = z
+    const near = [], R2 = NAME_NEAR * NAME_NEAR, M = new THREE.Matrix4(), T = new THREE.Matrix4()
+    const H = sig.heads, D = sig.d
+    if (D) for (let i = 0; i < H.length / 8; i++) { // the signals in the near set
+      const dx = H[i * 8] - x, dz = -H[i * 8 + 1] - z, d = dx * dx + dz * dz
+      if (D.slot[i] < 0 || d > R2) continue
+      const a = H[i * 8 + 3], fx = Math.sin(a), fy = -Math.cos(a) // the approach, from the arm's yaw
+      names.arm[i] ||= nearestStreet(H[i * 8] + fx * 7, H[i * 8 + 1] + fy * 7, 20, across(fx, fy), relook)?.name
+      if (names.arm[i]) near.push({ d, m: new THREE.Matrix4().fromArray(D.mats.pole, i * 16).multiply(T.makeTranslation(ARM_BLADE.x, ARM_BLADE.y, 0)), b: ARM_BLADE, name: names.arm[i] })
+    }
+    const P = names.posts, mesh = names.mesh
+    if (mesh) {
+      mesh.count = 0
+      const Q = new THREE.Quaternion(), V = new THREE.Vector3(), Y = new THREE.Vector3(0, 1, 0), one = new THREE.Vector3(1, 1, 1)
+      for (let i = 0; i < P.length / 5; i++) {
+        const px = P[i * 5], py = P[i * 5 + 1], dx = px - x, dz = -py - z, d = dx * dx + dz * dz
+        if (d > R2 || mesh.count >= mesh.instanceMatrix.count) continue
+        for (let k = 0; k < 2; k++) names.post[i * 2 + k] ||= nearestStreet(px, py, 22, along(P[i * 5 + 3 + k]), relook)?.name
+        if (!names.post[i * 2] && !names.post[i * 2 + 1]) continue // a post for names only
+        M.compose(V.set(px, P[i * 5 + 2], -py), Q.setFromAxisAngle(Y, P[i * 5 + 3]), one)
+        mesh.setMatrixAt(mesh.count++, M)
+        for (let k = 0; k < 2; k++) {
+          const nm = names.post[i * 2 + k]
+          if (nm) near.push({ d, m: M.clone().multiply(T.makeTranslation(0, POST_BLADES[k].y, 0)).multiply(T.makeRotationY(POST_BLADES[k].turn)), b: POST_BLADES[k], name: nm })
+        }
+      }
+      mesh.instanceMatrix.needsUpdate = true
+    }
+    near.sort((a, b) => a.d - b.d) // the nearest names first, should the atlas run out of slots
+    names.words.begin()
+    for (const o of near) names.words.add(o.m, o.b.w, o.b.h, o.name)
+    names.words.end()
+  }
+
   let benchMesh = null
   function buildBenches(b) {
     if (benchMesh) { benchMesh.removeFromParent(); benchMesh.dispose() }
@@ -424,6 +486,8 @@ export default function life(city) {
     else if (m.type === 'net') {
       if (window.lifeDebug) console.log(`life: network ${m.ms.toFixed(0)} ms, ${m.heads.length / 8} signal heads`)
       buildSignals(m.heads, m.ctls)
+      names.arm = []
+      buildPosts(m.posts)
       buildBenches(m.benches)
       city.requestRender()
     }
@@ -577,7 +641,7 @@ export default function life(city) {
     if (active) { sendOpts(); schedule() }
   }
   const offView = city.on('view', check)
-  const offWeather = city.on('weather', () => sendOpts()), offQuality = city.on('quality', () => { nearRadii(); if (sig.d) sig.d.at.x = NaN; sendOpts() }) // NaN: the signals' near set is picked again
+  const offWeather = city.on('weather', () => sendOpts()), offQuality = city.on('quality', () => { nearRadii(); if (sig.d) sig.d.at.x = NaN; names.at.x = NaN; sendOpts() }) // NaN: the signals' near set is picked again
   const onVis = () => check()
   document.addEventListener('visibilitychange', onVis)
   const clock = setInterval(() => active && sendOpts(), 15000)
@@ -585,9 +649,11 @@ export default function life(city) {
     if (!active) return
     uni.uNight.value = city.light.night; uni.uTime.value = t; uni.uRain.value = /rain|storm|drizzle/.test(city.weather?.kind) ? 1 : 0
     const persp = !!city.view.camera.isPerspectiveCamera
-    if (sig.near !== persp) { sig.near = persp; for (const m of sig.meshes) m.visible = !!m.userData.near === persp }
+    if (sig.near !== persp) { sig.near = persp; for (const m of [...sig.meshes, names.mesh, names.words?.mesh]) if (m) m.visible = !!m.userData.near === persp }
     const cp = city.view.camera.position
     if (persp && sig.d && !(Math.hypot(cp.x - sig.d.at.x, cp.z - sig.d.at.z) <= SIG_NEAR * 0.25)) nearSignals(cp.x, cp.z)
+    if (persp && !(Math.hypot(cp.x - names.at.x, cp.z - names.at.z) <= NAME_NEAR * 0.2)) nearNames(cp.x, cp.z)
+    names.words?.night(city.light.night)
     for (const p of pools) p.visible = city.light.night > 0.08
     if (sig.glow) { glowMat.size = Math.max(3, 2.6 * 6 * city.view.zoom) * city.renderer.getPixelRatio(); glowMat.opacity = glowNear.opacity = 0.45 + 0.55 * city.light.night }
     accDt += dt
@@ -637,7 +703,7 @@ export default function life(city) {
       group.removeFromParent(); glowGroup.removeFromParent()
       for (const o of [...carMeshes, people, bikes, ...allNear]) o.m.geometry.dispose()
       for (const m of [...pools, ...sig.meshes]) m.geometry?.dispose()
-      benchMesh?.dispose()
+      benchMesh?.dispose(); names.mesh?.dispose(); names.words?.dispose(); postGeo.dispose()
       for (const m of [carMat, personMat, bikeMat, carNearMat, personNearMat, ...pools.map((p) => p.material), greyMat, housingMat, lampMat, benchMat, glowMat, glowNear]) m.dispose()
       for (const g of [...Object.values(sigGeo), discGeo, squareGeo]) g.dispose()
       glowTex.dispose()

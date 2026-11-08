@@ -91,7 +91,7 @@ close. New tiles are built and uploaded to the GPU a few MB per frame, so stream
   empty arrays where not mapped): 1 left, 2 slight left, 4 through, 8 slight right, 16 right, 32 u-turn, 64 merge
   (0: not given).
 - `tile.graph.pois`: `{ kind, id, x, y }` points (detail tiles): `kind` 0 traffic signals, 1 crossing, 2 stop sign,
-  3 street lamp, 4 bench, 5 bus stop, 6 give way; `id` is the OSM node id (signals on a junction share the id of
+  3 street lamp, 4 bench, 5 bus stop, 6 give way, 7 painted crossing (bars), 8 painted crossing (two lines); `id` is the OSM node id (signals on a junction share the id of
   the graph pieces' end there).
 - `tile.terrain`: `{ n, h, size }`, an `n`×`n` height grid over the tile, row 0 north.
 - `tile.footprints` (detail tiles): building outlines for collisions, `{ pts, start }`: ring `r` is the world x,
@@ -149,6 +149,9 @@ Plugins may import from `core/` (relative paths, e.g. `'../../core/util.js'`):
 - `core/kit.js`: the low-poly model kit (see the player, below); `k.geometry(true)` with `kitMaterial(THREE)` for
   plain vertex-coloured models.
 - `core/play.js`: for a plugin with its own camera (above).
+- `core/streets.js`: OpenStreetMap street names (and named places, bollards) per 4 km cell, loaded lazily and
+  shared: `nearestStreet(x, north, r, ok?, onLoad?)` (`ok(dx, dy)` keeps only segments running that way; `onLoad`
+  is called when a missing cell comes in), `cellsNear`, `abbr` ("West 4th Avenue" → "W 4th Ave").
 
 ## Shared between plugins
 

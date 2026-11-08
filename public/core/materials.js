@@ -149,9 +149,9 @@ export function roadMaterial(decal = false) {
           float rail = band(at, 0.66, 0.78, ft);
           col = mix(col, srgb(vec3(0.62, 0.62, 0.64)), rail);
           dPaint = max(sleeper * detail * 0.9, rail); dCol = rail > 0.5 ? srgb(vec3(0.62, 0.62, 0.64)) : srgb(vec3(0.42, 0.32, 0.24));
-        } else if (kind == 102) { // a mapped crosswalk: zebra bars across the walk
+        } else if (kind == 102) { // a crosswalk, kerb to kerb (s): continental bars centred on the road, or two lines (vR2.x 1)
           col = srgb(vec3(0.94, 0.94, 0.9));
-          dPaint = band(fract(s / 1.1), 0.0, 0.5, fs / 1.1) * step(at, w * 0.5 + 0.2); dCol = col;
+          dPaint = (vR2.x > 0.5 ? band(at, w * 0.5 - 0.3, w * 0.5, ft) : band(fract((s - 0.5 * vR2.w) / 1.1 + 0.25), 0.0, 0.5, fs / 1.1)) * band(s, 0.3, vR2.w - 0.3, fs); dCol = col;
         } else if (kind >= 9 && kind <= 13) { // footway, cycleway, path, steps, track
           col = kind == 10 ? srgb(vec3(0.40, 0.42, 0.44)) : kind == 11 || kind == 13 ? srgb(vec3(0.72, 0.64, 0.50)) : srgb(vec3(0.71, 0.70, 0.67));
           col *= grain;
