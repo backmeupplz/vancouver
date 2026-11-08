@@ -10,11 +10,11 @@
 # Fetch: tools/fetch.sh (tax report, parcels, heritage); the LiDAR's 1 km zips (data/lidar2022/urls.json) sit behind a
 # browser check: download them by hand into data/lidar2022/ and `unzip -j -o '*.zip' '*.las' -d las`.
 # Run: uv run --with numpy,shapely,pyproj python3 tools/facades.py [procs]      (... check: self-test)
-import csv, glob, json, math, os, pickle, struct, sys, time
+import csv, glob, json, math, os, struct, sys, time
 from multiprocessing import Pool
 import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
-from world import xy, latlon, L1
+from common import xy, latlon, L1, save_rings, load_feat
 from roofs import ring_db, ring_match
 
 OUT = 'data/facades.npz'
@@ -51,9 +51,7 @@ def footprints():
     out = []
     for i in range(CITY[0], CITY[1] + 1):
         for j in range(CITY[2], CITY[3] + 1):
-            p = f'data/feat/{i}_{j}.pkl'
-            if not os.path.exists(p): continue
-            for oid, prs, t in pickle.load(open(p, 'rb')).get('buildings', []):
+            for oid, prs, t in load_feat(i, j).get('buildings', []):
                 for outer, inners in prs:
                     r = outer[:-1] if outer[0] == outer[-1] else outer
                     c = np.mean(r, axis=0)
@@ -255,9 +253,7 @@ def bake(procs):
             if L.get('wall'): wall[k], wsrc[k] = L['wall'], 2
             balc[k], pattern[k] = L.get('balc', 0), L.get('pattern', 0)
             if L.get('storey'): storey[k] = round(L['storey'] * 20)
-    rc = np.array([p for _, r, _ in fps for p in r], np.float32)
-    ro = np.cumsum([0] + [len(r) for _, r, _ in fps]).astype(np.int32)
-    np.savez_compressed(OUT, rc=rc, ro=ro, year=year, units=units, heritage=her, wall=wall, wsrc=wsrc, storey=storey,
+    save_rings(OUT, [r for _, r, _ in fps], year=year, units=units, heritage=her, wall=wall, wsrc=wsrc, storey=storey,
                         balc=balc, facing=facing, pattern=pattern, mly=mly)
     print(n, 'facades ->', OUT, f'{os.path.getsize(OUT) / 1e6:.1f} MB', f'{time.time() - t0:.0f}s', flush=True)
 

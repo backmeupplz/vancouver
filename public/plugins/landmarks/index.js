@@ -3,16 +3,14 @@
 // Everything is merged into one vertex-coloured mesh per 2.5 km cell (plus one instanced mesh of containers
 // per terminal), built once; nothing animates.
 // Map data (c) OpenStreetMap contributors, ODbL. Ground under the bridges: MRDEM (NRCan), OGL-Canada.
-const data = await fetch(new URL('./data.json', import.meta.url)).then((r) => r.json())
+import { mulberry32 as mulberry, inPoly, getJSON } from '../../core/util.js'
+const data = await getJSON(new URL('./data.json', import.meta.url))
 const pairs = (f) => { const o = []; for (let i = 0; i < f.length; i += 2) o.push([f[i], f[i + 1]]); return o }
 
 // Deck height profiles of the modelled bridges, for the core to share: `line` is the centre line
 // (lat, lon pairs, one every `step` metres from the southern end), `deck` the deck top there in metres above
 // the water under the bridge (MRDEM sea level; `ground` is the MRDEM ground under each point, so a frame
 // whose water sits at W puts the deck at W + deck[i]), `half` the half-width of the deck in metres.
-export const bridgeProfiles = Object.fromEntries(Object.entries(data.bridges).map(([k, b]) =>
-  [k, { name: b.name, step: b.step, line: pairs(b.line), deck: b.deck, ground: b.ground, half: b.half }]))
-
 // Footprints (rings of [lat, lon]) where generic OSM buildings should not be drawn: the landmarks stand there.
 export const masks = [
   ...Object.entries(data.landmarks).filter(([k]) => k !== 'vancouverhouse').flatMap(([, l]) => l.rings.map(pairs)),
@@ -841,20 +839,4 @@ function resample(r, n) { // n points evenly spaced along a closed ring
     out.push([ring[i][0] + (ring[i + 1][0] - ring[i][0]) * t, ring[i][1] + (ring[i + 1][1] - ring[i][1]) * t])
   }
   return out
-}
-function inPoly(x, z, pts) {
-  let c = false
-  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-    const a = pts[i], b = pts[j]
-    if ((a[1] > z) !== (b[1] > z) && x < ((b[0] - a[0]) * (z - a[1])) / (b[1] - a[1]) + a[0]) c = !c
-  }
-  return c
-}
-function mulberry(a) {
-  return () => {
-    a |= 0; a = (a + 0x6d2b79f5) | 0
-    let t = Math.imul(a ^ (a >>> 15), 1 | a)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
 }

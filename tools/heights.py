@@ -6,7 +6,7 @@ import glob, os, struct, sys, gzip
 import numpy as np
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(__file__))
-from world import extent, L1
+from common import extent, L1
 
 C = 64.0
 X0, Y0, X1, Y1 = extent()

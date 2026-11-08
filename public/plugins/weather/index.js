@@ -7,6 +7,7 @@
 // draws a sky dome (sun, moon and stars, clouds, lightning bolts), and the rain and snow are a world-space volume
 // around the camera instead of the map's screen-space layer, with splashes. The ground gets wet or snowy in both
 // views (city.surface).
+import { vancouver, getJSON, NOISE_GLSL } from '../../core/util.js'
 
 const LAT = 49.2827, LON = -123.1207 // downtown Vancouver
 const API = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&current=temperature_2m,weather_code,cloud_cover,precipitation,wind_speed_10m,wind_direction_10m&wind_speed_unit=ms`
@@ -49,9 +50,8 @@ export function solar(ms, lat = LAT, lon = LON) {
 }
 
 // Vancouver wall-clock time: hour of day and the UTC time of local midnight
-const FMT = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Vancouver', hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' })
 export function vanTime(ms) {
-  const p = Object.fromEntries(FMT.formatToParts(ms).map((x) => [x.type, +x.value]))
+  const p = Object.fromEntries(Object.entries(vancouver(ms).p).map(([k, v]) => [k, +v]))
   const offset = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - Math.floor(ms / 1000) * 1000
   return { hour: p.hour + p.minute / 60, midnight: Date.UTC(p.year, p.month - 1, p.day) - offset }
 }
@@ -111,10 +111,8 @@ export default function weather(city) {
     vertexShader: `uniform vec2 uG0, uGx, uGy; varying vec2 vG;
       void main() { vG = uG0 + uGx * position.x + uGy * position.y; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
     fragmentShader: `uniform vec2 uDrift; uniform float uCov, uShade, uHaze; uniform vec3 uHazeCol; varying vec2 vG;
-      float h(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-      float n(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
-        return mix(mix(h(i), h(i + vec2(1.0, 0.0)), f.x), mix(h(i + vec2(0.0, 1.0)), h(i + 1.0), f.x), f.y); }
-      float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int k = 0; k < 4; k++) { s += a * n(p); p = p * 2.07 + 17.3; a *= 0.5; } return s; }
+      ${NOISE_GLSL}
+      float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int k = 0; k < 4; k++) { s += a * noise(p); p = p * 2.07 + 17.3; a *= 0.5; } return s; }
       void main() {
         float shade = 1.0;
         if (uShade > 0.0) {
@@ -162,7 +160,7 @@ export default function weather(city) {
           : (1.0 - vUv.x) * (1.0 - vUv.y * vUv.y);
         gl_FragColor = vec4(uCol.rgb, uCol.a * a);
       }`,
-    transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+    transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true,
   }))
   drops.frustumCulled = false; drops.renderOrder = 1000; drops.visible = false
   city.overlay.add(drops)
@@ -207,7 +205,7 @@ export default function weather(city) {
         float a = uSnow > 0.5 ? 1.0 - smoothstep(0.25, 1.0, length(vec2(vUv.x * 2.0 - 1.0, vUv.y))) : (1.0 - abs(vUv.y)) * smoothstep(0.0, 0.5, vUv.x);
         gl_FragColor = vec4(uCol.rgb, uCol.a * a * vA);
       }`,
-    transparent: true, depthTest: true, depthWrite: false, side: THREE.DoubleSide,
+    transparent: true, depthTest: true, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true,
   }))
   fall3.frustumCulled = false; fall3.renderOrder = 1000; fall3.visible = false
   city.overlay.add(fall3)
@@ -248,10 +246,8 @@ export default function weather(city) {
     vertexShader: 'varying vec3 vDir; void main() { vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
     fragmentShader: `uniform vec3 uHor, uZen, uCloud, uCloudDk, uSunDir, uSunCol, uMoonDir; uniform float uSun, uMoon, uStars, uCov, uDeck, uBolt, uBoltAz, uBoltSeed, uAlpha; uniform vec2 uDrift; varying vec3 vDir;
       float h1(float x) { return fract(sin(x * 127.1) * 43758.5453); }
-      float h2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-      float n2(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
-        return mix(mix(h2(i), h2(i + vec2(1.0, 0.0)), f.x), mix(h2(i + vec2(0.0, 1.0)), h2(i + 1.0), f.x), f.y); }
-      float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int k = 0; k < 5; k++) { s += a * n2(p); p = p * 2.03 + 17.3; a *= 0.5; } return s; }
+      ${NOISE_GLSL}
+      float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int k = 0; k < 5; k++) { s += a * noise(p); p = p * 2.03 + 17.3; a *= 0.5; } return s; }
       float zig(float x) { float i = floor(x); return mix(h1(i), h1(i + 1.0), fract(x)) - 0.5; } // jagged 1D noise
       void main() {
         vec3 d = normalize(vDir);
@@ -260,7 +256,7 @@ export default function weather(city) {
         float s = max(dot(d, uSunDir), 0.0), m = max(dot(d, uMoonDir), 0.0), cl = 0.0;
         vec3 lights = uSunCol * uSun * (pow(s, 1800.0) * 14.0 + pow(s, 120.0) * 0.6) // sun disc and glow, moon, stars: behind the clouds
           + vec3(0.85, 0.88, 0.95) * uMoon * (smoothstep(0.99955, 0.9997, m) * 1.6 + pow(m, 60.0) * 0.12);
-        if (uStars > 0.0) { vec3 g = floor(d * 260.0); lights += vec3(0.8, 0.85, 1.0) * uStars * step(0.996, h2(g.xy + g.z * 7.13)) * smoothstep(0.01, 0.08, up) * 1.4; }
+        if (uStars > 0.0) { vec3 g = floor(d * 260.0); lights += vec3(0.8, 0.85, 1.0) * uStars * step(0.996, hash(g.xy + g.z * 7.13)) * smoothstep(0.01, 0.08, up) * 1.4; }
         col += uSunCol * uSun * pow(s, 10.0) * 0.18 * (1.0 - uDeck); // the bright part of the sky around the sun
         if (h > 0.0 && (uCov > 0.0 || uDeck > 0.0)) { // clouds on a plane overhead, thinning into the horizon haze
           vec2 q = d.xz / (h + 0.06) * 0.7 + uDrift;
@@ -294,7 +290,6 @@ export default function weather(city) {
     u.uAlpha.value = THREE.MathUtils.smoothstep(cam.fov, 14, 40) // fades in through the plugin's dive from the map
   }
   city.scene.add(dome)
-  const sky = { zen: new THREE.Color(), hor: new THREE.Color(), drift: new THREE.Vector2() }
 
   // ---------- state -> lights, grade, effects
   const fx = { tint: [1, 1, 1], desat: 0, flash: 0, precip: 0, snow: false, storm: false, wind: [0, 0] } // grade before a lightning flash
@@ -549,7 +544,7 @@ export default function weather(city) {
     if (document.hidden || busy) return
     busy = true
     try {
-      const j = await fetch(API).then((r) => { if (!r.ok) throw new Error(r.status); return r.json() })
+      const j = await getJSON(API)
       live = fromOpenMeteo(j.current); fetchedAt = Date.now()
       apply()
     } catch (e) { console.warn('weather: Open-Meteo', e); if (!live) { live = false; ui() } } finally { busy = false }

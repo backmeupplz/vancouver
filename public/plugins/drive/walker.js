@@ -2,7 +2,7 @@
 // kit like the people on the sidewalks (bevelled head and torso, sleeves and hands, a cap and a parcel bag).
 // Local frame like the van: forward -z, up +y, origin on the ground between the feet; 1.75 m tall.
 // pose(walker, phase, amount, run) swings the legs and arms (amount 0 standing .. 1 full stride).
-import { kit, shaded } from '../life/kit.js'
+import { kit, kitMaterial } from '../../core/kit.js'
 
 const CREAM = 0xf6ead2, PANTS = 0x3b4a5e, SKIN = 0xe2b48c, HAIR = 0x4a3428, SHOE = 0x2b2e33, CAP = 0xf2a07e
 
@@ -11,13 +11,12 @@ export function makeWalker(THREE, colour = 0xe8735a, look = {}) { // colour: the
   const { pants = PANTS, hair = HAIR, skin = SKIN, courier = true } = look
   const root = new THREE.Group(), body = new THREE.Group(), night = { value: 0 }
   root.add(body)
-  const mat = shaded(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), night, false)
+  const mat = kitMaterial(THREE, night, false)
   const shirt = new THREE.Color(colour).getHex()
   // a part built facing +x (the kit's way), turned to face -z, hung at (x, y) in `parent`
   const part = (parent, x, y, build) => {
     const k = kit(THREE); build(k)
-    const g = k.geometry().rotateY(Math.PI / 2)
-    g.setAttribute('color', g.attributes.aCol)
+    const g = k.geometry(true).rotateY(Math.PI / 2)
     const o = new THREE.Group(); o.position.set(x, y, 0); o.add(new THREE.Mesh(g, mat)); parent.add(o)
     return o
   }

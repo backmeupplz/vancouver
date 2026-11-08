@@ -2,15 +2,12 @@
 # whole map, reprojected onto the world grid, one 4096 m tile per file: data/hr/<i>_<j>.npz (dsm, dtm as
 # float32 2048x2048, row 0 = north, NaN = no data). Tiles already on disk are skipped, so it can resume.
 # Run: uv run --with rasterio,numpy python3 tools/hrdem.py [processes]
-import math, os, sys
+import os, sys
 from multiprocessing import Pool
 import numpy as np
+sys.path.insert(0, os.path.dirname(__file__))
+from common import LON_O, LAT_O, KX, KY, L1 as T, HR as RES, all_tiles, retry
 
-LAT_O, LON_O, SC = 49.28606407, -123.10901045, 0.99744659
-KX = 111320 * math.cos(math.radians(49.2845)) / SC
-KY = 110574 / SC
-BBOX = (48.99, -123.33, 49.48, -122.40)  # S, W, N, E: Lower Mainland and the North Shore mountains
-T, RES = 4096, 2.0
 N = int(T / RES)
 URL = '/vsicurl/https://canelevation-dem.s3.ca-central-1.amazonaws.com/hrdem-mosaic-2m/2_3-mosaic-2m-{}.tif'
 os.environ.setdefault('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
@@ -19,22 +16,9 @@ os.environ.setdefault('GDAL_HTTP_MERGE_CONSECUTIVE_RANGES', 'YES')
 os.environ.setdefault('VSI_CACHE', 'TRUE')
 
 
-def world(lat, lon):
-    return (lon - LON_O) * KX, (lat - LAT_O) * KY
-
-
-def tiles():
-    x0, y0 = world(BBOX[0], BBOX[1]); x1, y1 = world(BBOX[2], BBOX[3])
-    return [(i, j) for i in range(math.floor(x0 / T), math.floor(x1 / T) + 1) for j in range(math.floor(y0 / T), math.floor(y1 / T) + 1)]
-
-
 def fetch(ij):
-    for attempt in range(4):
-        try: return fetch_once(ij)
-        except Exception as e:
-            err = e
-            import time; time.sleep(5 * (attempt + 1))
-    return ij, f'failed: {err}'
+    try: return retry(lambda: fetch_once(ij), 4, 5)
+    except Exception as e: return ij, f'failed: {e}'
 
 
 def fetch_once(ij):
@@ -61,7 +45,7 @@ def fetch_once(ij):
 
 if __name__ == '__main__':
     os.makedirs('data/hr', exist_ok=True)
-    ts = tiles()
+    ts = all_tiles()
     print(len(ts), 'tiles', flush=True)
     with Pool(int(sys.argv[1]) if len(sys.argv) > 1 else 12) as p:
         for n, (ij, st) in enumerate(p.imap_unordered(fetch, ts), 1):

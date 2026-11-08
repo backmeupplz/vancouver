@@ -1,24 +1,22 @@
 # Step 3: the map tiles. For every 4096 m tile with data, writes sixteen 1024 m detail tiles (public/tiles/0/)
 # and one 4096 m medium tile (public/tiles/1/), each a small gzipped binary the page streams in as you look
-# around. Format: see public/core/tile-format.md. Inputs: data/feat (osm_split.py), data/hr (hrdem.py),
+# around. Format: Out below, read by parse() in public/core/tile-worker.js. Inputs: data/feat (osm_split.py), data/hr (hrdem.py),
 # data/sea.npz (sea.py), City of Vancouver trees + 2009 LiDAR sections, MRDEM where HRDEM has no data.
-# Run: uv run --with numpy,scipy,pillow,shapely,mapbox-earcut,rasterio python3 tools/tiles.py [procs] [i_j ...]
+# Run: uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/tiles.py [procs] [i_j ...]
 import csv, gzip, json, math, os, pickle, random, struct, sys, time
 from multiprocessing import Pool
 import numpy as np
 import shapely
-from shapely.geometry import Polygon, MultiPolygon, box, LineString
+from shapely.geometry import Polygon, box, LineString
 from shapely.ops import unary_union
 from PIL import Image, ImageDraw
 from scipy import ndimage
-import mapbox_earcut as earcut
 sys.path.insert(0, os.path.dirname(__file__))
-from world import xy, latlon, extent, L0, L1, KX, KY, LAT_O, LON_O
+from common import xy, extent, L0, L1, KX, KY, LAT_O, LON_O, HR, KINDS, KI, DRIVE, SHOP_AMENITY, line_kind, hnum, densify, all_tiles, HR_CACHE, hr_lookup, tile_args, load_feat
 from roofs import roof_lookup
 from facades import facade_lookup, NONE as B_NONE, GLASS as B_GLASS, SOLID as B_SOLID
 
 OUT = os.environ.get('OUT', 'public/tiles')
-HR = 2.0  # HRDEM cell, metres
 VERSION = 2
 
 # ---------------------------------------------------------------- ground classes (draw order = list order)
@@ -57,34 +55,7 @@ def ground_class(t):
     return None
 
 
-# ---------------------------------------------------------------- roads and other lines
-# kind ids shared with the page (public/core/kinds.js)
-KINDS = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living', 'pedestrian', 'footway', 'cycleway',
-         'path', 'steps', 'track', 'rail', 'lightrail', 'runway', 'taxiway']
-KI = {k: i for i, k in enumerate(KINDS)}
-DRIVE = {'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living'}
-
-
-def line_kind(t):
-    h = t.get('highway', ''); r = t.get('railway', ''); a = t.get('aeroway', '')
-    if h:
-        h = h.replace('_link', '')
-        if h in ('motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'pedestrian', 'footway', 'cycleway', 'path', 'steps', 'track'): return h
-        if h in ('unclassified', 'road'): return 'residential'
-        if h == 'living_street': return 'living'
-        if h in ('bridleway', 'corridor'): return 'path'
-        return None
-    if r in ('rail', 'preserved', 'narrow_gauge') and t.get('usage') != 'industrial' or r == 'rail': return 'rail'
-    if r in ('light_rail', 'subway', 'tram', 'monorail'): return 'lightrail'
-    if a in ('runway', 'taxiway'): return a
-    return None
-
-
-def hnum(v):
-    try: return float(str(v).split(';')[0].replace('m', '').replace(',', '.').strip())
-    except (ValueError, TypeError): return None
-
-
+# ---------------------------------------------------------------- roads and other lines (kinds: common.py)
 def road_shape(kind, t):
     """(lanes total, width m, oneway, sidewalk band)"""
     ow = t.get('oneway') in ('yes', '1', '-1', 'true') or t.get('junction') == 'roundabout' or kind == 'motorway' and t.get('oneway') != 'no'
@@ -117,17 +88,6 @@ class Out:
 
     def bytes(self):
         return gzip.compress(bytes(self.b), 7)
-
-
-def tri_poly(poly):
-    """earcut a shapely Polygon -> (verts Nx2 float, idx)"""
-    rings = [np.asarray(poly.exterior.coords)[:-1]] + [np.asarray(r.coords)[:-1] for r in poly.interiors]
-    rings = [r for r in rings if len(r) >= 3]
-    if not rings: return None, None
-    v = np.concatenate(rings).astype(np.float64)
-    ends = np.cumsum([len(r) for r in rings]).astype(np.uint32)
-    idx = earcut.triangulate_float64(v, ends)
-    return v, idx
 
 
 # ---------------------------------------------------------------- shared inputs (loaded in the parent; children fork)
@@ -221,8 +181,7 @@ def build(ij):
     i, j = ij
     t0 = time.time()
     rnd = random.Random(i * 7919 + j)
-    fpath = f'data/feat/{i}_{j}.pkl'
-    feat = pickle.load(open(fpath, 'rb')) if os.path.exists(fpath) else {}
+    feat = load_feat(i, j)
     X0, Y0 = i * L1, j * L1
     # rasters on the tile's 2 m grid (row 0 = north)
     N = int(L1 / HR)
@@ -305,8 +264,6 @@ def build(ij):
     # ---- canopy as forest: where the LiDAR sees trees over 6 m in a sizeable patch, the ground is woods (most of the
     # North Shore, Pacific Spirit, Stanley Park and every big back-yard grove is mapped only partly in OSM)
     if dsm is not None:
-        import rasterio.features as rf
-        from rasterio.transform import Affine
         chm = ndimage.uniform_filter(np.nan_to_num(dsm - dtm), 5)
         wood = ndimage.binary_opening(chm > 6, iterations=2) & ~water_r
         lab, nl = ndimage.label(wood)
@@ -457,14 +414,12 @@ MATERIAL = {'brick': BRICK, 'masonry': BRICK, 'clay': BRICK, 'stone': STONE, 'gr
 ROOF_MAT = {'metal': 0xa8b0b4, 'tin': 0xa8b0b4, 'steel': 0xa8b0b4, 'copper': 0x5f9a84, 'roof_tiles': 0xa8583c, 'tile': 0xa8583c, 'tiles': 0xa8583c, 'slate': 0x4a5058,
             'asphalt': 0x50545a, 'asphalt_shingle': 0x585450, 'shingle': 0x585450, 'concrete': 0xc0c0bc, 'glass': 0x8ab4c8, 'grass': 0x6a9a50, 'plants': 0x6a9a50,
             'gravel': 0xa8a49c, 'tar_paper': 0x4a4c50, 'eternit': 0x8a8c8c, 'wood': 0x7a6048, 'thatch': 0xa08850}
-SHOP_AMENITY = {'restaurant', 'cafe', 'fast_food', 'bar', 'pub', 'bank', 'pharmacy', 'ice_cream', 'clinic', 'dentist', 'doctors', 'post_office',
-                'library', 'cinema', 'theatre', 'nightclub', 'food_court', 'bureau_de_change', 'veterinary', 'marketplace', 'community_centre'}
 ROOF = {'flat': 0, 'gabled': 1, 'hipped': 2, 'pyramidal': 3, 'dome': 4, 'skillion': 5, 'round': 6, 'half-hipped': 2, 'gambrel': 1, 'mansard': 2, 'onion': 4}
 CROSS, FLIP = 16, 32  # roof byte bits: ridge along the footprint's short axis; a shed roof's high side on the other edge
 COLOURS = {'white': 0xf2f0ea, 'black': 0x303236, 'grey': 0x9a9c9e, 'gray': 0x9a9c9e, 'red': 0xb04a3a, 'brown': 0x7a5a48, 'beige': 0xd8c8a8, 'yellow': 0xe0c060,
            'blue': 0x5a80b0, 'green': 0x5a8a5a, 'silver': 0xc0c4c8, 'tan': 0xc8b090, 'cream': 0xeee4cc, 'orange': 0xd08040, 'darkgrey': 0x5a5c60,
            'lightgrey': 0xc8cacc, 'maroon': 0x7a2a2a, 'pink': 0xe0a8a8, 'teal': 0x4a9a9a}
-# rough outlines in world metres (world.py) of places whose building stock has a look of its own; first match wins
+# rough outlines in world metres (common.py) of places whose building stock has a look of its own; first match wins
 ZONES = [
     ('historic', Polygon([(-230, -60), (350, -60), (1300, -250), (1300, -560), (720, -560), (700, -1000), (250, -800), (-120, -480), (-300, -260)])),  # Gastown, Victory Sq, Chinatown, Railtown: 1890s-1920s brick
     ('historic', Polygon([(-629, -872), (-491, -988), (-871, -1448), (-1009, -1332)])),  # Yaletown's warehouse district
@@ -715,7 +670,7 @@ def from_lidar(r, a, z, ok, fx, shape, rnd, roofm):
 def house_kind(info, main):
     """Vancouver's two classic houses, told apart by their roofs: the character house (1900s-1930s, steep gables, wood
     siding, a porch) and the Vancouver Special (1965-85, two storeys, a shallow gable, stucco over a brick base)"""
-    t, btype, a = info['t'], info['btype'], info['a']
+    btype, a = info['btype'], info['a']
     if not (btype in HOUSES or btype == 'yes' and 60 < a < 400) or main['h'] > 11: return None
     year = info['year']
     if year and year < 1940: return CHARACTER
@@ -1042,7 +997,6 @@ def canopy_trees(dsm, dtm, fp, water, X0, Y0, rnd, polys, nogo):
     near = {}
     for x, y, genus, common, h in TREES:
         if X0 - 5 <= x < X0 + L1 + 5 and Y0 - 5 <= y < Y0 + L1 + 5: near.setdefault((int(x // 4), int(y // 4)), []).append((x, y, genus, h))
-    forest = unary_union(polys.get('forest', [])) if polys.get('forest') else None
     out = []
     used = set()
     for x, y, h in keep:
@@ -1107,7 +1061,6 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
         for r in refs: use[r] = use.get(r, 0) + 1
         use[refs[0]] += 1; use[refs[-1]] += 1
     out = []
-    N = dtm.shape[0]
     for wid, coords, refs, t, k in ways:
         lanes, w, ow, band = road_shape(k, t)
         if t.get('oneway') == '-1': coords, refs = coords[::-1], refs[::-1]
@@ -1147,35 +1100,8 @@ DECK_VERSION = 3
 DECK_CACHE = f'data/decks{DECK_VERSION}.pkl'
 GRADE = 0.07  # steepest deck grade kept, rise per metre
 FOOT = {'footway', 'cycleway', 'path', 'pedestrian', 'steps', 'track'}
-HR_CACHE = {}
 DECKS = None
 APPROACH = {}  # at-grade way id -> [(deck end node, touchdown node, new node or None, points, distance along, height)]
-MISSING = set()  # ways whose deck the LiDAR does not have (filled by deck_profiles, for checking)
-
-
-def hr_tile(i, j):
-    """(dsm, dtm) of a 4 km HRDEM tile, or None"""
-    if (i, j) not in HR_CACHE:
-        p = f'data/hr/{i}_{j}.npz'
-        d = np.load(p) if os.path.exists(p) else None
-        HR_CACHE[(i, j)] = (d['dsm'], d['dtm']) if d is not None and 'dsm' in d and 'dtm' in d else None
-        if len(HR_CACHE) > 12: HR_CACHE.pop(next(iter(HR_CACHE)))
-    return HR_CACHE[(i, j)]
-
-
-def hr_lookup(xs, ys, k):
-    """LiDAR surface (k=0) or ground (k=1) at world points, NaN where there is none"""
-    xs, ys = np.asarray(xs, float).ravel(), np.asarray(ys, float).ravel()
-    out = np.full(xs.shape, np.nan, np.float32)
-    ti, tj = np.floor(xs / L1).astype(int), np.floor(ys / L1).astype(int)
-    for i, j in set(zip(ti.tolist(), tj.tolist())):
-        a = hr_tile(i, j)
-        if a is None: continue
-        sel = (ti == i) & (tj == j)
-        r = ((((j + 1) * L1) - ys[sel]) / HR).astype(int).clip(0, a[k].shape[0] - 1)
-        c = ((xs[sel] - i * L1) / HR).astype(int).clip(0, a[k].shape[1] - 1)
-        out[sel] = a[k][r, c]
-    return out
 
 
 def deck_samples(coords, w):
@@ -1330,7 +1256,6 @@ def deck_profiles():
             u = np.clip((raw[w][0] - a) @ ax / max(Lb, 1e-6), 0, 1)
             prof[w] = h0 + (h1 - h0) * u + crest * 4 * u * (1 - u)
     for wid in missing: ways[wid] = ways[wid][:4]
-    MISSING.clear(); MISSING.update(missing)
     # sidewalks and cycle decks beside a road deck (within 25 m, same layer) ride on it
     from shapely.strtree import STRtree
     roads = {}
@@ -1490,14 +1415,6 @@ def deck_heights(wid, pts):
     return [float(np.interp(line.project(shapely.geometry.Point(p)), s, z)) for p in pts]
 
 
-def densify(pts, step):
-    out = [pts[0]]
-    for p, q in zip(pts, pts[1:]):
-        L = math.dist(p, q); n = max(1, int(L / step))
-        for k in range(1, n + 1): out.append((p[0] + (q[0] - p[0]) * k / n, p[1] + (q[1] - p[1]) * k / n))
-    return out
-
-
 # ---------------------------------------------------------------- tile writer
 def pack_ring(out, ring):
     """ring -> count + delta-encoded int16 points (first absolute)"""
@@ -1636,11 +1553,6 @@ def safe_build(ij):
     except Exception: return ij, 'FAILED', traceback.format_exc().splitlines()[-1]
 
 
-def all_tiles():
-    x0, y0, x1, y1 = EX
-    return [(i, j) for i in range(int(x0 // L1), int(x1 // L1) + 1) for j in range(int(y0 // L1), int(y1 // L1) + 1)]
-
-
 def write_index():
     ls = lambda lv: sorted(f[:-4] for f in os.listdir(f'{OUT}/{lv}') if f.endswith('.bin')) if os.path.isdir(f'{OUT}/{lv}') else []
     json.dump({'version': VERSION, 'origin': [LAT_O, LON_O], 'k': [KX, KY], 'extent': EX, 'sizes': [L0, L1], 'ground': GROUND, 'kinds': KINDS,
@@ -1685,7 +1597,7 @@ def selftest():
 if __name__ == '__main__':
     if sys.argv[1:] == ['selftest']: selftest(); sys.exit()
     procs = int(sys.argv[1]) if len(sys.argv) > 1 else 10
-    want = [tuple(map(int, a.split('_'))) for a in sys.argv[2:]] or all_tiles()
+    want = tile_args(sys.argv[2:]) or all_tiles()
     t0 = time.time()
     deck_profiles()  # once, before the workers fork
     if procs == 1:

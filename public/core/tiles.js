@@ -3,8 +3,10 @@
 // Decoding and geometry building happen in workers; this file only makes three.js objects from their buffers.
 import * as THREE from 'three'
 import { FAMILY } from './materials.js'
+import { sampleGrid } from './util.js'
 
 const SIZES = [1024, 4096]
+const ij = (level, i, j) => (level * 4096 + i + 2048) * 4096 + j + 2048 // a tile's number (|i|, |j| < 2048)
 const DETAIL_ZOOM = 0.11 // camera.zoom from which detail tiles load (a 1 km tile is ~700 px wide)
 // tiles kept off screen (detail, overview) for coming back, at most: a detail tile is ~4 MB of geometry, held twice
 // (JS and GPU), so phones keep fewer (a 3 GB iPhone's tab is killed somewhere past 1 GB); the quality tier may keep fewer
@@ -22,6 +24,7 @@ export class Tiles {
     Object.assign(this, { scene, treeScene, mats, onLoad, onUnload, onChange })
     this.base = new URL(base, location.href).href // absolute: workers resolve relative URLs against their own path
     this.tiles = new Map() // "level/i_j" -> tile
+    this.byIJ = new Map() // numeric ij(level, i, j) -> tile, for lookups many times a frame (no key strings)
     this.queue = []
     this.busy = 0
     this.frame = 0
@@ -183,7 +186,7 @@ export class Tiles {
   get(level, i, j) {
     const k = this.key(level, i, j)
     let t = this.tiles.get(k)
-    if (!t) { t = { level, i, j, ox: i * SIZES[level], oy: j * SIZES[level], state: 'new', used: 0, visible: false }; this.tiles.set(k, t) }
+    if (!t) { t = { level, i, j, ox: i * SIZES[level], oy: j * SIZES[level], state: 'new', used: 0, visible: false }; this.tiles.set(k, t); this.byIJ.set(ij(level, i, j), t) }
     return t
   }
 
@@ -210,7 +213,8 @@ export class Tiles {
   pump(renderer) {
     if (!this.made.length && !this.warming.length) return
     if (!this.warmScene) { // a 1×1 target and a plain material: drawing a mesh there uploads all its buffers
-      this.warmScene = new THREE.Scene(); this.warmScene.overrideMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, depthTest: false })
+      // (one material per kind of mesh: a shared one would be recompiled between instanced and plain meshes)
+      this.warmScene = new THREE.Scene(); this.warmMats = [0, 1, 2].map(() => new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, depthTest: false }))
       this.warmTarget = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: false }); this.warmCam = new THREE.Camera()
     }
     const alive = (t) => this.tiles.get(this.key(t.level, t.i, t.j)) === t
@@ -246,9 +250,9 @@ export class Tiles {
   }
 
   upload(renderer, m) {
-    const geo = m.geometry, w = this.warmScene
+    const geo = m.geometry, w = this.warmScene, M = this.warmMats
     if (!bytes(m)) return
-    const proxy = m.isInstancedMesh ? new THREE.InstancedMesh(geo, w.overrideMaterial, 0) : new THREE.Mesh(geo, w.overrideMaterial)
+    const proxy = m.isInstancedMesh ? new THREE.InstancedMesh(geo, M[m.instanceColor ? 2 : 1], 0) : new THREE.Mesh(geo, M[0])
     if (m.isInstancedMesh) Object.assign(proxy, { instanceMatrix: m.instanceMatrix, instanceColor: m.instanceColor, count: m.count })
     proxy.frustumCulled = false
     w.add(proxy)
@@ -399,18 +403,15 @@ export class Tiles {
       o.traverse((m) => { if (m.geometry && m.geometry !== this.unitGeo && m.geometry !== this.quad) m.geometry.dispose() })
     }
     this.tiles.delete(this.key(t.level, t.i, t.j))
+    this.byIJ.delete(ij(t.level, t.i, t.j))
   }
 
   // ground height (metres) at world x east, y north: from the finest loaded tile
+  // (called hundreds of times a frame: looked up by number, nothing allocated)
   heightAt(x, y) {
-    for (const level of [0, 1]) {
-      const s = SIZES[level], t = this.tiles.get(this.key(level, Math.floor(x / s), Math.floor(y / s)))
-      if (t?.terrain) {
-        const { n, h } = t.terrain, c = s / (n - 1), lx = x - t.ox, ly = y - t.oy
-        const fx = Math.min(n - 1.0001, Math.max(0, lx / c)), fy = Math.min(n - 1.0001, Math.max(0, (s - ly) / c))
-        const i = fx | 0, j = fy | 0, u = fx - i, v = fy - j
-        return h[j * n + i] * (1 - u) * (1 - v) + h[j * n + i + 1] * u * (1 - v) + h[(j + 1) * n + i] * (1 - u) * v + h[(j + 1) * n + i + 1] * u * v
-      }
+    for (let level = 0; level < 2; level++) {
+      const s = SIZES[level], t = this.byIJ.get(ij(level, Math.floor(x / s), Math.floor(y / s)))
+      if (t?.terrain) return sampleGrid(t.terrain.h, t.terrain.n, s, x - t.ox, y - t.oy)
     }
     const g = this.coarse
     if (!g) return 0

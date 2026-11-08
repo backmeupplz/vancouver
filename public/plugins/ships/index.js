@@ -4,6 +4,7 @@
 // Simulated on the clock (Vancouver time, the same for everyone); set AIS_URL below for live positions.
 // Routes and berths: tools/ships_data.py → data.json, from OpenStreetMap (© OpenStreetMap contributors, ODbL).
 // The SeaBus belongs to the transit plugin.
+import { mulberry32, vancouver, getJSON } from '../../core/util.js'
 
 // ---- LIVE AIS: the one switch -------------------------------------------------------------------------------
 // A same-origin URL returning the vessels in the area as JSON, polled every 15 s while the page is visible:
@@ -25,15 +26,6 @@ const WHITE = 0xf3f3ee, NAVY = 0x1d3463
 const BOXES = [0x2b6cb0, 0xc0392b, 0xe8e8e3, 0x7d8590, 0x2f8f5b, 0xe67e22, 0xf1c40f, 0x1d3a5f, 0x8e44ad, 0xb5651d, 0x16a085]
 const HULLS = [0x1d3a5f, 0x7a1f1f, 0x23262b, 0x1f5f4a, 0x2b4a7a, 0x3a3f47]
 
-function rng(seed) { // mulberry32
-  let a = seed >>> 0
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0
-    let t = Math.imul(a ^ (a >>> 15), 1 | a)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
-}
 
 // Models: parts [geometry, x (along, + = bow), y (bottom, 0 = waterline), z (across), length, height, width, colour, tilt]
 // H: ship hull with a pointed bow, F: double-ended ferry hull, B: box, S: triangular sail
@@ -99,7 +91,7 @@ const pick = (r, a) => a[Math.floor(r() * a.length)]
 
 export default async function ships(city) {
   const { THREE } = city
-  const data = await fetch(DATA).then((r) => r.json())
+  const data = await getJSON(DATA)
   const ground = (x, z) => city.world.heightAt(x, z)
   const xz = (lat, lon) => { const v = city.world.fromLatLon(lat, lon); return [v.x, v.z] }
 
@@ -114,7 +106,7 @@ export default async function ships(city) {
   }
 
   // ---------- the fleet: dynamic vessels first (their instances are re-uploaded each frame), then static ----------
-  const r = rng(20261106)
+  const r = mulberry32(20261106)
   const dyn = [], stat = []
   const add = (list, model, place, extra) => { const v = { ...model, place, ...extra }; list.push(v); return v }
   const sec = localClock()
@@ -253,7 +245,7 @@ export default async function ships(city) {
     wakeGeo.setAttribute('position', new THREE.Float32BufferAttribute(P, 3))
     wakeGeo.setAttribute('color', new THREE.Float32BufferAttribute(C, 4))
   }
-  const wakes = new THREE.InstancedMesh(wakeGeo, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, side: THREE.DoubleSide }), Math.max(1, dyn.length))
+  const wakes = new THREE.InstancedMesh(wakeGeo, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true }), Math.max(1, dyn.length))
   wakes.frustumCulled = false
   wakes.count = 0
   city.overlay.add(wakes)
@@ -267,9 +259,9 @@ export default async function ships(city) {
   function put(v, x, z, h, k = 1) {
     pos.set(x, water(x, z, h, v.L * k), z)
     W4.compose(pos, q.setFromAxisAngle(up, Math.PI / 2 - h), one.setScalar(k))
-    for (const [g, i, m] of v.parts) meshes[g].setMatrixAt(i, M4.multiplyMatrices(W4, m))
+    for (const p of v.parts) meshes[p[0]].setMatrixAt(p[1], M4.multiplyMatrices(W4, p[2]))
   }
-  const hide = (v) => { for (const [g, i] of v.parts) meshes[g].setMatrixAt(i, ZERO) }
+  const hide = (v) => { for (const p of v.parts) meshes[p[0]].setMatrixAt(p[1], ZERO) }
   for (const v of stat) put(v, v.x, v.z, v.h)
   for (const v of dyn) hide(v)
   const out = [0, 0, 0, 0]
@@ -337,7 +329,7 @@ export default async function ships(city) {
   async function pollAIS() {
     if (!document.hidden) {
       try {
-        const list = await fetch(AIS_URL, { cache: 'no-store' }).then((r) => r.json()), t = Date.now() / 1000, byM = new Map()
+        const list = await fetch(AIS_URL, { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(`AIS: HTTP ${r.status}`); return r.json() }), t = Date.now() / 1000, byM = new Map()
         for (const v of dyn) if (v.live) byM.set(v.live.mmsi, v)
         const fresh = new Set()
         for (const s of list) {
@@ -358,7 +350,7 @@ export default async function ships(city) {
   }
   if (AIS_URL) pollAIS()
 
-  const credit = addCredit(AIS_URL ? 'Ships: live AIS' : 'Ships: simulated · routes © OpenStreetMap')
+  const credit = city.ui.credit(AIS_URL ? 'Ships: live AIS' : 'Ships: simulated · routes © OpenStreetMap')
 
   // for games (the sail plugin): vessels within r metres of their hull's end, like city.traffic.nearby
   // ({ id, x, y, z, heading, length, width, speed }, forward = (sin heading, cos heading) in x / z)
@@ -408,7 +400,7 @@ function path(P) {
     at(s, out, back) {
       let i = 1
       while (i < S.length - 1 && S[i] < s) i++
-      const [ax, az] = P[i - 1], [bx, bz] = P[i], u = Math.min(1, Math.max(0, (s - S[i - 1]) / (S[i] - S[i - 1] || 1)))
+      const ax = P[i - 1][0], az = P[i - 1][1], bx = P[i][0], bz = P[i][1], u = Math.min(1, Math.max(0, (s - S[i - 1]) / (S[i] - S[i - 1] || 1)))
       out[0] = ax + (bx - ax) * u; out[1] = az + (bz - az) * u
       out[2] = Math.atan2(bx - ax, -(bz - az)) + (back ? Math.PI : 0)
       return out
@@ -430,26 +422,8 @@ function localClock() {
   return (t) => {
     if (t - at > 600) {
       at = t
-      const d = new Date(t * 1000), p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Vancouver', hourCycle: 'h23', hour: 'numeric', minute: 'numeric', second: 'numeric' }).formatToParts(d).map((x) => [x.type, +x.value]))
-      off = p.hour * 3600 + p.minute * 60 + p.second - (Math.floor(t) % 86400)
+      off = Math.floor(vancouver(Math.floor(t) * 1000).sec) - (Math.floor(t) % 86400)
     }
     return (((Math.floor(t) % 86400) + off) % 86400 + 86400) % 86400 + (t % 1)
   }
-}
-
-// a line in the shared credits strip at the bottom of the page
-function addCredit(text, href) {
-  let el = document.getElementById('credits')
-  if (!el) {
-    el = document.createElement('div')
-    el.id = 'credits'
-    el.className = 'panel'
-    Object.assign(el.style, { left: '50%', bottom: '12px', transform: 'translateX(-50%)', padding: '4px 10px', fontSize: '11px', color: 'var(--muted)', zIndex: 15, display: 'flex', gap: '10px', whiteSpace: 'nowrap', maxWidth: 'calc(100% - 24px)', overflow: 'hidden' })
-    document.body.append(el)
-  }
-  const s = document.createElement(href ? 'a' : 'span')
-  s.textContent = text
-  if (href) { s.href = href; s.target = '_blank'; s.rel = 'noopener'; s.style.color = 'inherit' }
-  el.append(s)
-  return { set text(v) { s.textContent = v }, remove() { s.remove(); if (!el.children.length) el.remove() } }
 }

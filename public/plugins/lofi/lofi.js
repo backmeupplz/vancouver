@@ -2,7 +2,7 @@
 // `lofi(city?)` adds a small player pill (bottom-left; move it with --lofi-left / --lofi-bottom / --lofi-z
 // on :root or override the .lofi class) and returns { dispose() }. The pill has a vibe menu; "Auto" follows
 // the weather plugin (`city.weather` / 'weather' events) or, without one, the time of day in Vancouver.
-// `renderOffline()` renders a track to an AudioBuffer, for testing.
+import { mulberry32, vancouver } from '../../core/util.js'
 
 const PLACES = ['Kitsilano', 'Gastown', 'Yaletown', 'Strathcona', 'Kerrisdale', 'Jericho', 'Lonsdale', 'Dunbar',
   'Fairview', 'Burrard', 'Cambie', 'Davie', 'Robson', 'Hastings', 'Granville', 'Chinatown', 'Marpole', 'Shaughnessy',
@@ -51,7 +51,7 @@ const CHILL = {
   mix: { tone: [6500, 8500], keysLP: 2400, trem: 0.18, drums: 0.42, drumsLP: 9000, verb: 0.7, crackle: 0.22, hiss: 0.02, rain: 0, bassLP: 420 },
 }
 const vibe = (o) => ({ ...CHILL, ...o, mix: { ...CHILL.mix, ...o.mix } })
-export const VIBES = {
+const VIBES = {
   chill: CHILL,
   rainy: vibe({
     label: 'Rainy day', icon: '🌧️', bpm: [64, 76], key: 45, scale: MINPENT, chordBars: [2],
@@ -123,10 +123,10 @@ export const VIBES = {
     mix: { tone: [5200, 6000], keysLP: 2100, trem: 0.14, drums: 0.26, drumsLP: 3500, verb: 1.2, crackle: 0.2, bassLP: 340 },
   }),
 }
-export const MENU = ['auto', 'chill', 'rainy', 'sunny', 'late', 'jazz', 'study']
+const MENU = ['auto', 'chill', 'rainy', 'sunny', 'late', 'jazz', 'study']
 
 // Auto: weather plugin first (see the event contract in the brief), else night/day in Vancouver.
-export function autoVibe(w, date = new Date()) {
+function autoVibe(w, date = new Date()) {
   if (w && w.kind) {
     if (/rain|drizzle|storm/.test(w.kind)) return 'rainy'
     if (w.kind === 'snow') return 'snow'
@@ -135,24 +135,15 @@ export function autoVibe(w, date = new Date()) {
     if (w.kind === 'overcast' || w.kind === 'cloudy') return 'chill'
     return 'sunny'
   }
-  const h = +new Intl.DateTimeFormat('en-US', { timeZone: 'America/Vancouver', hour: 'numeric', hourCycle: 'h23' }).format(date)
+  const h = Math.floor(vancouver(+date).sec / 3600)
   return h >= 21 || h < 6 ? 'late' : 'chill'
 }
 
-function rng(seed) { // mulberry32
-  let a = seed >>> 0
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0
-    let t = Math.imul(a ^ (a >>> 15), 1 | a)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
-}
 const mtof = (m) => 440 * 2 ** ((m - 69) / 12)
 
-export function makeTrack(seed, vibeName = 'chill') {
+function makeTrack(seed, vibeName = 'chill') {
   const V = VIBES[vibeName] || CHILL
-  const r = rng(seed)
+  const r = mulberry32(seed)
   const pick = (a) => a[Math.floor(r() * a.length)]
   const other = (a, x) => a[(a.indexOf(x) + 1) % a.length] // differs from x when a has 2+ entries
   const name = pick(PLACES) + ' ' + pick(V.moods)
@@ -462,19 +453,6 @@ function createEngine(ac, dest, onTrackEnd) {
 }
 
 const newSeed = () => (Math.random() * 2 ** 32) >>> 0
-
-// `then: [vibe, seconds]` switches vibe mid-render, like picking one in the menu.
-export async function renderOffline(seconds = 20, seed = 1, rate = 44100, vibe = 'chill', then) {
-  const ac = new OfflineAudioContext(2, Math.ceil(seconds * rate), rate)
-  const e = createEngine(ac, ac.destination, (t) => makeTrack(t.seed + 1, t.vibe))
-  e.start(makeTrack(seed, vibe), 0.05)
-  if (then) {
-    e.tick(then[1])
-    e.change(makeTrack(seed + 1, then[0]))
-  }
-  e.tick(seconds)
-  return ac.startRendering()
-}
 
 const CSS = `
 .lofi{position:fixed;left:var(--lofi-left,12px);bottom:var(--lofi-bottom,56px);z-index:var(--lofi-z,20);display:flex;align-items:center;gap:2px;box-sizing:border-box;max-width:calc(100vw - 24px);padding:4px 10px 4px 4px;background:rgba(11,16,22,.72);color:#cfd8e0;font:12px/1.2 system-ui,-apple-system,sans-serif;border-radius:8px;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);user-select:none;-webkit-user-select:none}

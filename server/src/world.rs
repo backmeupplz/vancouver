@@ -78,7 +78,8 @@ pub struct State {
     pub speed: f32,
 }
 
-/// Parses a binary state message; None when malformed.
+/// Parses a binary state message: None when malformed or, while playing (mode > 0), off the map; heading and
+/// speed clamped to what they can be.
 pub fn parse_state(b: &[u8]) -> Option<State> {
     if b.len() != 18 || b[0] != 1 || b[1] > 4 {
         return None;
@@ -86,17 +87,29 @@ pub fn parse_state(b: &[u8]) -> Option<State> {
     let f = |i: usize| f32::from_le_bytes(b[i..i + 4].try_into().unwrap());
     let h = |i: usize| i16::from_le_bytes([b[i], b[i + 1]]) as f32;
     let s = State { mode: b[1], x: f(2), y: f(6), z: f(10), heading: h(14) / 1e4, speed: h(16) / 100.0 };
-    (s.x.is_finite() && s.y.is_finite() && s.z.is_finite()).then_some(s)
+    if !(s.x.is_finite() && s.y.is_finite() && s.z.is_finite()) {
+        return None;
+    }
+    let [x0, x1, z0, z1, y0, y1] = EXTENT;
+    if s.mode > 0 && !((x0..=x1).contains(&s.x) && (z0..=z1).contains(&s.z) && (y0..=y1).contains(&s.y)) {
+        return None;
+    }
+    Some(State { heading: s.heading.clamp(-std::f32::consts::PI, std::f32::consts::PI), speed: s.speed.clamp(-80.0, 80.0), ..s })
 }
 
-/// Encodes a state the way the client sends it (used by tests and the load script's twin).
-pub fn encode_state(s: &State) -> Vec<u8> {
-    let mut b = vec![1, s.mode];
+/// x, y, z, heading and speed as the wire has them (the client's state message, the server's snapshots)
+fn put_state(b: &mut Vec<u8>, s: &State) {
     for v in [s.x, s.y, s.z] {
         b.extend(v.to_le_bytes());
     }
     b.extend(((s.heading * 1e4).round() as i16).to_le_bytes());
     b.extend(((s.speed * 100.0).round() as i16).to_le_bytes());
+}
+
+/// Encodes a state the way the client sends it (used by tests and the load script's twin).
+pub fn encode_state(s: &State) -> Vec<u8> {
+    let mut b = vec![1, s.mode];
+    put_state(&mut b, s);
     b
 }
 
@@ -162,6 +175,9 @@ impl Client {
     fn json(&self, v: &Value) {
         self.send(Out::Text(v.to_string()));
     }
+    fn error(&self, msg: &str) {
+        self.json(&json!({ "t": "error", "msg": msg }));
+    }
 }
 
 /// Whether a and b must not see each other (either blocked the other).
@@ -205,8 +221,11 @@ pub struct World {
     sent_now: usize,
 }
 
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
 fn unix() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+    (unix_ms() / 1000) as i64
 }
 
 fn hex(b: &[u8]) -> String {
@@ -393,7 +412,7 @@ impl World {
     fn rename(&mut self, slot: u32, name: Option<&str>, colour: Option<&str>, now: Instant) {
         let c = self.clients.get_mut(&slot).unwrap();
         if !c.names.take(now) {
-            return c.json(&json!({ "t": "error", "msg": "Wait a moment before changing that again." }));
+            return c.error("Wait a moment before changing that again.");
         }
         let id = c.id.clone().unwrap();
         let mut changed = false;
@@ -425,7 +444,7 @@ impl World {
                 Ok(Claim::Wait(s)) => return refuse(&self.clients[&slot], "wait", s),
                 Err(e) => {
                     eprintln!("saving a username: {e}");
-                    return self.clients[&slot].json(&json!({ "t": "error", "msg": "Couldn't save that, try again." }));
+                    return self.clients[&slot].error("Couldn't save that, try again.");
                 }
             }
             // every tab of this browser takes the new name
@@ -485,18 +504,18 @@ impl World {
         let near = match ch {
             "g" => false,
             "n" if c.state.is_some() => true,
-            "n" => return c.json(&json!({ "t": "error", "msg": "Start exploring to talk to people near you." })),
+            "n" => return c.error("Start exploring to talk to people near you."),
             _ => return,
         };
         let Some(text) = clean_text(text, CHAT_MAX) else { return };
         if !c.chats.take(now) {
-            return c.json(&json!({ "t": "error", "msg": "Slow down a little." }));
+            return c.error("Slow down a little.");
         }
         if c.last_chat.as_ref().is_some_and(|(t, at)| *t == text && now.duration_since(*at) < Duration::from_secs(30)) {
-            return c.json(&json!({ "t": "error", "msg": "You just said that." }));
+            return c.error("You just said that.");
         }
         c.last_chat = Some((text.clone(), now));
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        let ts = unix_ms();
         let c = &self.clients[&slot];
         let line = json!({ "t": "chat", "ch": ch, "id": c.id, "name": c.name, "chosen": c.chosen, "colour": c.colour, "text": text, "ts": ts }).to_string();
         let me = c.state;
@@ -543,7 +562,7 @@ impl World {
                 if b.state.is_none() {
                     continue;
                 }
-                a.send(Out::Text(if is { json!({ "t": "leave", "s": b.slot }) } else { roster_msg(b) }.to_string()));
+                a.send(Out::Text(if is { leave_msg(b) } else { roster_msg(b) }.to_string()));
             }
         }
         Ok(())
@@ -562,11 +581,6 @@ impl World {
             }
             return Ok(());
         }
-        let [x0, x1, z0, z1, y0, y1] = EXTENT;
-        if !(x0..=x1).contains(&s.x) || !(z0..=z1).contains(&s.z) || !(y0..=y1).contains(&s.y) {
-            return self.strike(slot, now);
-        }
-        let s = State { heading: s.heading.clamp(-std::f32::consts::PI, std::f32::consts::PI), speed: s.speed.clamp(-80.0, 80.0), ..s };
         let joined = c.state.is_none();
         if let Some(p) = c.state {
             // faster than a car (or a runner) can go: a respawn now and then is fine, else ignore it
@@ -590,22 +604,20 @@ impl World {
         Ok(())
     }
 
-    fn broadcast_join(&self, c: &Client) {
-        let msg = roster_msg(c).to_string();
+    /// msg to everyone else who has said hello and isn't blocked either way
+    fn broadcast(&self, c: &Client, msg: &Value) {
+        let msg = msg.to_string();
         for o in self.clients.values() {
             if o.slot != c.slot && o.id.is_some() && !hidden(c, o) {
                 o.send(Out::Text(msg.clone()));
             }
         }
     }
-
+    fn broadcast_join(&self, c: &Client) {
+        self.broadcast(c, &roster_msg(c));
+    }
     fn broadcast_leave(&self, c: &Client) {
-        let msg = json!({ "t": "leave", "s": c.slot }).to_string();
-        for o in self.clients.values() {
-            if o.slot != c.slot && o.id.is_some() && !hidden(c, o) {
-                o.send(Out::Text(msg.clone()));
-            }
-        }
+        self.broadcast(c, &leave_msg(c));
     }
 
     // ------------------------------------------------------------------ the 10 Hz tick
@@ -652,11 +664,7 @@ impl World {
             for (_, b) in &near {
                 let s = b.state.as_ref().unwrap();
                 buf.extend(b.slot.to_le_bytes());
-                for v in [s.x, s.y, s.z] {
-                    buf.extend(v.to_le_bytes());
-                }
-                buf.extend(((s.heading * 1e4).round() as i16).to_le_bytes());
-                buf.extend(((s.speed * 100.0).round() as i16).to_le_bytes());
+                put_state(&mut buf, s);
                 buf.push(s.mode);
             }
             a.send(Out::Bin(buf.into()));
@@ -787,6 +795,10 @@ fn roster_msg(c: &Client) -> Value {
     let mut v = roster(c);
     v["t"] = "join".into();
     v
+}
+
+fn leave_msg(c: &Client) -> Value {
+    json!({ "t": "leave", "s": c.slot })
 }
 
 #[cfg(test)]

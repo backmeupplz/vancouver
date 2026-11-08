@@ -1,7 +1,7 @@
 // node tools/models_check.mjs: the low-poly kit (public/plugins/life/kit.js) winds every face outwards (else the
 // near faces are culled and a model shows its insides), and the street-level models build at sane sizes
 import * as THREE from '../public/vendor/three.module.min.js'
-import { kit } from '../public/plugins/life/kit.js'
+import { kit } from '../public/core/kit.js'
 import { carModels, peopleModels, signalModels } from '../public/plugins/life/models.js'
 import assert from 'node:assert/strict'
 

@@ -24,6 +24,8 @@ import { loadLines, loadRoute, picker, busGame, accentOf, CSS as BUS_CSS } from 
 import { makeWalker, poseWalker } from './walker.js'
 import { makeProps, LAMP, STOP, YIELD, BUS, BOLLARD, BENCH } from './props.js'
 import { makeKerbs } from './kerbs.js'
+import { clamp, smooth, wrap, esc, vancouver, circleBox } from '../../core/util.js'
+import { typing, buzz, MOVE_KEYS, mapPicker, mapCameraPose, poseOf, dive, streetSky, touchButtons, audioContext, tone as toneInto } from '../../core/play.js'
 
 const DRIVE_MAX_KIND = 7 // motorway .. living street (graph piece kinds): where a van belongs
 const WALK_MAX_KIND = 13 // .. steps, tracks: where a person can walk (plus the sidewalks of roads)
@@ -43,12 +45,9 @@ const HIKES = [
   { id: 'lighthouse', name: 'Lighthouse Park', from: [49.33656, -123.26265], to: [49.33153, -123.26449], goal: 'the viewpoint by Point Atkinson lighthouse', ele: 25, view: 160, blurb: 'Old-growth firs down to the rocks: 700 m' },
   { id: 'dog', name: 'Dog Mountain', from: [49.36844, -122.94914], to: [49.37373, -122.97043], goal: 'Dog Mountain’s bluff over the city', ele: 1054, view: 225, blurb: 'Mount Seymour, through the forest to the view: 2.5 km' },
 ]
-const EASE = (t) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2)
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
-const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t) }
-const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a))
 const pick = (a) => a[Math.floor(Math.random() * a.length)]
 const ckey = (cx, cy) => cx * 8192 + cy
+const NONE = [] // an empty cell (instead of a new [] per lookup)
 
 const FIRST = ['Mei', 'Arjun', 'Sofia', 'Daniel', 'Priya', 'Kenji', 'Amara', 'Liam', 'Noor', 'Jasmine', 'Tomás', 'Hana', 'Owen', 'Leilani', 'Ravi', 'Grace', 'Mateo', 'Yuki', 'Farah', 'Theo', 'Ines', 'Sam', 'Marguerite', 'Kai', 'Harpreet', 'Wei', 'Olivia', 'Jun', 'Aiyana', 'Connor', 'Fatima', 'Diego', 'Elodie', 'Min-jun', 'Rosa', 'Ezra']
 const LAST = ['Chen', 'Sandhu', 'Nguyen', 'MacLeod', 'Wong', 'Gill', 'Tremblay', 'Kim', 'Singh', 'Lee', 'Fraser', 'Santos', 'Park', 'Dhillon', 'Campbell', 'Ito', 'Hassan', 'Martin', 'Leung', 'Grewal', 'Okafor', 'Novak', 'Reyes', 'Thompson', 'Lam', 'Jackson']
@@ -80,10 +79,10 @@ export default function drive(city) {
   const v3 = new THREE.Vector3(), v4 = new THREE.Vector3()
 
   // ================================================================ the street index (detail tiles, lazily)
-  const infos = new Map(), overview = new Map(), built = new Map() // "i_j" -> tile info / its index
+  const infos = new Map(), overview = new Map(), built = new Map() // ckey(i, j) -> tile info / its index
   const offTiles = [
-    city.world.eachTile((t) => { const k = `${t.i}_${t.j}`; if (t.level === 0) { infos.set(k, t); built.delete(k) } else overview.set(k, t) }),
-    city.on('tile:unload', (t) => { const k = `${t.i}_${t.j}`; if (t.level === 0) { infos.delete(k); built.delete(k) } else overview.delete(k) }),
+    city.world.eachTile((t) => { const k = ckey(t.i, t.j); if (t.level === 0) { infos.set(k, t); built.delete(k) } else overview.set(k, t) }),
+    city.on('tile:unload', (t) => { const k = ckey(t.i, t.j); if (t.level === 0) { infos.delete(k); built.delete(k) } else overview.delete(k) }),
   ]
   const walkable = (p) => p.kind <= WALK_MAX_KIND && p.kind > 1 // not motorways or trunk roads
   const drivable = (p) => p.drive && p.kind <= DRIVE_MAX_KIND
@@ -117,11 +116,11 @@ export default function drive(city) {
   function furniture(b) {
     const t = b.t, K = 1024 / CELL, P = []
     const KIND = { 3: LAMP, 2: STOP, 6: YIELD, 5: BUS, 4: BENCH }
-    for (const q of t.graph.pois || []) {
+    for (const q of t.graph.pois || NONE) {
       const kind = KIND[q.kind]
       if (!kind) continue
       let x = q.x, y = q.y, ang = 0, best = kind === BENCH ? -99 : 6
-      for (const id of b.rg.get(ckey(Math.floor(x / CELL), Math.floor(y / CELL))) || []) { // the road it stands by
+      for (const id of b.rg.get(ckey(Math.floor(x / CELL), Math.floor(y / CELL))) || NONE) { // the road it stands by
         const s = b.segs[id]
         if (!s.drv || s.z0 != null) continue
         const dx = s.x1 - s.x0, dy = s.y1 - s.y0, L2 = dx * dx + dy * dy || 1, u = clamp(((x - s.x0) * dx + (y - s.y0) * dy) / L2, 0, 1)
@@ -164,22 +163,26 @@ export default function drive(city) {
     }
   }
   let stamp = 0 // dedupe marks (instead of a Set per query: these run several times a frame)
-  function each(x, y, r, fn) { // fn(tileIndex) for detail tiles near (x, north)
+  const NEAR = [] // tilesNear's answer, reused: loop over it before asking again
+  function tilesNear(x, y, r) { // the indexes of the detail tiles near (x, north)
+    NEAR.length = 0
     for (let i = Math.floor((x - r) / 1024); i <= Math.floor((x + r) / 1024); i++) for (let j = Math.floor((y - r) / 1024); j <= Math.floor((y + r) / 1024); j++) {
-      const k = `${i}_${j}`
+      const k = ckey(i, j)
       let b = built.get(k)
       if (!b) { const t = infos.get(k); if (!t) continue; b = index(t); built.set(k, b) }
-      fn(b)
+      NEAR.push(b)
     }
+    return NEAR
   }
+  const each = (x, y, r, fn) => { for (const b of tilesNear(x, y, r).slice()) fn(b) } // (a copy: fn may ask again)
   // the nearest road segment point within r metres: drivable ones, or walkable ones (walk), or any road with bus-only
   // ones (bus); deck: bridge decks only
   function nearestRoad(x, y, r, deck = false, walk = false, bus = false) {
     let best = null, bd = r
     const mark = ++stamp
-    each(x, y, r, (b) => {
+    for (const b of tilesNear(x, y, r)) {
       for (let cx = Math.floor((x - r) / CELL); cx <= Math.floor((x + r) / CELL); cx++) for (let cy = Math.floor((y - r) / CELL); cy <= Math.floor((y + r) / CELL); cy++) {
-        for (const id of b.rg.get(ckey(cx, cy)) || []) {
+        for (const id of b.rg.get(ckey(cx, cy)) || NONE) {
           if (b.segSeen[id] === mark) continue
           b.segSeen[id] = mark
           const s = b.segs[id]
@@ -190,7 +193,7 @@ export default function drive(city) {
           if (d < bd) { bd = d; best = { s, u, px, py, d: Math.max(0, d), dist: Math.hypot(x - px, y - py), z: s.z0 == null ? null : s.z0 + (s.z1 - s.z0) * u, dir: Math.atan2(dy, dx), w: s.p.w } }
         }
       }
-    })
+    }
     return best
   }
   // the nearest road (bus-only ones too) running along (dx, dy) within r of (x, y), never against a one-way:
@@ -214,7 +217,7 @@ export default function drive(city) {
     const mark = ++stamp
     each(x, y, r, (b) => {
       for (let cx = Math.floor((x - r) / CELL); cx <= Math.floor((x + r) / CELL); cx++) for (let cy = Math.floor((y - r) / CELL); cy <= Math.floor((y + r) / CELL); cy++) {
-        for (const id of b.rg.get(ckey(cx, cy)) || []) { if (b.segSeen[id] !== mark) { b.segSeen[id] = mark; fn(b.segs[id]) } }
+        for (const id of b.rg.get(ckey(cx, cy)) || NONE) { if (b.segSeen[id] !== mark) { b.segSeen[id] = mark; fn(b.segs[id]) } }
       }
     })
   }
@@ -222,10 +225,10 @@ export default function drive(city) {
   function collide(x, y, rad) {
     let px = 0, py = 0, hit = false
     const mark = ++stamp
-    each(x, y, rad, (b) => {
-      if (!b.fp) return
+    for (const b of tilesNear(x, y, rad)) {
+      if (!b.fp) continue
       for (let cx = Math.floor((x - rad) / CELL); cx <= Math.floor((x + rad) / CELL); cx++) for (let cy = Math.floor((y - rad) / CELL); cy <= Math.floor((y + rad) / CELL); cy++) {
-        for (const r of b.fg.get(ckey(cx, cy)) || []) {
+        for (const r of b.fg.get(ckey(cx, cy)) || NONE) {
           if (b.fpSeen[r] === mark) continue
           b.fpSeen[r] = mark
           if (x + rad < b.bb[r * 4] || x - rad > b.bb[r * 4 + 2] || y + rad < b.bb[r * 4 + 1] || y - rad > b.bb[r * 4 + 3]) continue
@@ -244,7 +247,7 @@ export default function drive(city) {
           px += nx * k; py += ny * k; hit = true
         }
       }
-    })
+    }
     return hit ? { x: px, y: py } : null
   }
   const insideBuilding = (x, y) => !!collide(x, y, 0.01)
@@ -253,10 +256,10 @@ export default function drive(city) {
     let best = 1
     const mark = ++stamp, dx = x1 - x0, dy = y1 - y0
     const lx = Math.min(x0, x1), hx = Math.max(x0, x1), ly = Math.min(y0, y1), hy = Math.max(y0, y1)
-    each((lx + hx) / 2, (ly + hy) / 2, Math.max(hx - lx, hy - ly) / 2 + 1, (b) => {
-      if (!b.fp) return
+    for (const b of tilesNear((lx + hx) / 2, (ly + hy) / 2, Math.max(hx - lx, hy - ly) / 2 + 1)) {
+      if (!b.fp) continue
       for (let cx = Math.floor(lx / CELL); cx <= Math.floor(hx / CELL); cx++) for (let cy = Math.floor(ly / CELL); cy <= Math.floor(hy / CELL); cy++) {
-        for (const r of b.fg.get(ckey(cx, cy)) || []) {
+        for (const r of b.fg.get(ckey(cx, cy)) || NONE) {
           if (b.fpSeen[r] === mark) continue
           b.fpSeen[r] = mark
           if (hx < b.bb[r * 4] || lx > b.bb[r * 4 + 2] || hy < b.bb[r * 4 + 1] || ly > b.bb[r * 4 + 3]) continue
@@ -269,24 +272,14 @@ export default function drive(city) {
           }
         }
       }
-    })
+    }
     return best
   }
   function isWater(x, y) {
-    const t = infos.get(`${Math.floor(x / 1024)}_${Math.floor(y / 1024)}`)
+    const t = infos.get(ckey(Math.floor(x / 1024), Math.floor(y / 1024)))
     if (!t?.water) return false
     const n = t.water.n, i = Math.floor(((x - t.ox) / 1024) * n), j = Math.floor(((y - t.oy) / 1024) * n)
     return i >= 0 && j >= 0 && i < n && j < n && t.water.mask[j * n + i] === 1
-  }
-  // circle (x, y, r) against a box (centre, unit forward f, half length hl, half width hw): the push out, or null
-  function circleBox(x, y, r, cx, cy, fx, fy, hl, hw) {
-    const dx = x - cx, dy = y - cy, lf = dx * fx + dy * fy, lr = dx * fy - dy * fx // right = (fy, -fx)
-    let ef = lf - clamp(lf, -hl, hl), er = lr - clamp(lr, -hw, hw), d = Math.hypot(ef, er), k
-    if (d < 1e-6) { // centre inside: out through the nearest side
-      const pf = hl - Math.abs(lf), pr = hw - Math.abs(lr)
-      if (pf < pr) { ef = Math.sign(lf) || 1; er = 0; k = r + pf } else { ef = 0; er = Math.sign(lr) || 1; k = r + pr }
-    } else if (d < r) { k = (r - d) / d } else return null
-    return { x: (ef * fx + er * fy) * k, y: (ef * fy - er * fx) * k }
   }
   // two boxes { x, y, fx, fy, hl, hw } (separating axes): the way to push a out of b { nx, ny, depth }, or null
   function boxBox(a, b) {
@@ -334,7 +327,7 @@ export default function drive(city) {
     }
     const places = d.p.map(([x, y, nm, k, addr]) => ({ x: x + ox, y: y + oy, name: nm, kind: d.k[k], addr }))
     const bollards = new Map()
-    for (let i = 0; i + 1 < (d.b || []).length; i += 2) {
+    for (let i = 0; i + 1 < (d.b || NONE).length; i += 2) {
       const x = ox + d.b[i] / 10, y = oy + d.b[i + 1] / 10, key = ckey(Math.floor(x / CELL), Math.floor(y / CELL))
       let a = bollards.get(key); if (!a) bollards.set(key, (a = [])); a.push(x, y)
     }
@@ -346,7 +339,7 @@ export default function drive(city) {
     for (const c of cellsNear(x, y, r)) {
       const seen = new Set()
       for (let gx = Math.floor((x - r) / 48); gx <= Math.floor((x + r) / 48); gx++) for (let gy = Math.floor((y - r) / 48); gy <= Math.floor((y + r) / 48); gy++) {
-        for (const id of c.grid.get(ckey(gx, gy)) || []) {
+        for (const id of c.grid.get(ckey(gx, gy)) || NONE) {
           if (seen.has(id)) continue
           seen.add(id)
           const x0 = c.segs[id * 4], y0 = c.segs[id * 4 + 1], dx = c.segs[id * 4 + 2] - x0, dy = c.segs[id * 4 + 3] - y0
@@ -387,7 +380,7 @@ export default function drive(city) {
     uniforms: { col: { value: new THREE.Color() }, t: { value: 0 } },
     vertexShader: 'varying float vY; void main() { vY = uv.y; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
     fragmentShader: 'uniform vec3 col; uniform float t; varying float vY; void main() { float a = pow(1.0 - vY, 1.5) * (0.75 + 0.2 * sin(t * 3.0 - vY * 14.0)); gl_FragColor = vec4(col * a, a); }',
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, forceSinglePass: true,
   })
   const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.6, 70, 20, 1, true).translate(0, 35, 0), beamMat)
   const ringMat = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })
@@ -439,12 +432,12 @@ export default function drive(city) {
   }
 
   // ================================================================ sound (Web Audio, synthesised)
-  let ac = null, engine = null, muted = false
+  let ac = null, master = null, engine = null, muted = false // master: our gain on the shared context (core/play.js)
   try { muted = localStorage.getItem('delivery.muted') === '1' } catch {}
   function audio() {
-    if (ac) return ac
-    try { ac = new AudioContext() } catch { return null }
-    const out = ac.createGain(); out.gain.value = muted ? 0 : 1; out.connect(ac.destination); ac.out = out
+    if (master) return audioContext()
+    if (!(ac = audioContext())) return null
+    const out = master = ac.createGain(); out.gain.value = muted ? 0 : 1; out.connect(ac.destination)
     // engine: two detuned saws through a low-pass, very quiet; pitch and level follow the speed
     const g = ac.createGain(); g.gain.value = 0
     const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 260; lp.Q.value = 0.7
@@ -454,12 +447,7 @@ export default function drive(city) {
     engine = { g, o1, o2, lp }
     return ac
   }
-  function tone(freq, t0, dur, vol, type = 'sine') {
-    const o = ac.createOscillator(), g = ac.createGain()
-    o.type = type; o.frequency.value = freq
-    g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(vol, t0 + 0.012); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur)
-    o.connect(g); g.connect(ac.out); o.start(t0); o.stop(t0 + dur + 0.05)
-  }
+  const tone = (freq, t0, dur, vol, type) => toneInto(master, freq, t0, dur, vol, type)
   const bell = (f, t, v = 0.12) => { tone(f, t, 1.4, v); tone(f * 2.01, t, 0.7, v * 0.35); tone(f * 3.98, t, 0.35, v * 0.12) }
   const sfx = {
     pickup() { if (!audio()) return; const t = ac.currentTime + 0.02; bell(659.3, t); bell(987.8, t + 0.12) },
@@ -483,7 +471,7 @@ export default function drive(city) {
     if (horn || !audio()) return
     const t = ac.currentTime, out = ac.createGain(), sh = ac.createWaveShaper(), pk = ac.createBiquadFilter(), lp = ac.createBiquadFilter()
     sh.curve = clip; pk.type = 'peaking'; pk.frequency.value = 1900; pk.Q.value = 2.2; pk.gain.value = 8; lp.type = 'lowpass'; lp.frequency.value = 4000
-    sh.connect(pk); pk.connect(lp); lp.connect(out); out.connect(ac.out)
+    sh.connect(pk); pk.connect(lp); lp.connect(out); out.connect(master)
     out.gain.setValueAtTime(0, t); out.gain.linearRampToValueAtTime(0.06, t + 0.012)
     const oscs = [418, 526].map((f) => {
       const o = ac.createOscillator(), g = ac.createGain()
@@ -500,9 +488,7 @@ export default function drive(city) {
     h.out.gain.setTargetAtTime(0, t, 0.02)
     for (const o of h.oscs) o.stop(t + 0.15)
   }
-  // haptics where the phone has them (Android; iOS Safari has no navigator.vibrate)
-  const buzz = (p) => { try { navigator.vibrate?.(p) } catch {} }
-  function setMuted(m) { muted = m; try { localStorage.setItem('delivery.muted', m ? '1' : '0') } catch {}; if (ac) ac.out.gain.value = m ? 0 : 1; ui.mute.textContent = m ? 'Sound off' : 'Sound on' }
+  function setMuted(m) { muted = m; try { localStorage.setItem('delivery.muted', m ? '1' : '0') } catch {}; if (master) master.gain.value = m ? 0 : 1; ui.mute.textContent = m ? 'Sound off' : 'Sound on' }
 
   // ================================================================ HUD
   const touchy = matchMedia('(pointer: coarse)').matches
@@ -652,12 +638,7 @@ export default function drive(city) {
       d: q(job, '[data-d]'), t: q(job, '[data-t]'), b: q(pop, '[data-b]'), qq: q(pop, '[data-q]'), pt: q(pickEl, '[data-pt]'), cancel: q(pickEl, '[data-cancel]'), brk: q(touch, '.brk'), tact: q(touch, '[data-act]'), css }
   }
   const touchState = { left: false, right: false, gas: false, brake: false }
-  for (const b of ui.touch.querySelectorAll('[data-k]')) {
-    const k = b.dataset.k, set = (on) => (e) => { e.preventDefault(); if (on && !touchState[k]) buzz(6); touchState[k] = on; b.classList.toggle('on', on); if (on) audio() }
-    b.addEventListener('pointerdown', (e) => { try { b.setPointerCapture(e.pointerId) } catch {} set(true)(e) })
-    for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) b.addEventListener(ev, set(false))
-    b.addEventListener('contextmenu', (e) => e.preventDefault())
-  }
+  touchButtons(ui.touch, touchState, audio)
   ui.tact.addEventListener('click', () => (game ? game.action() : errand ? hurry() : toggleFoot()))
   ui.exit.onclick = () => exit()
   ui.cancel.onclick = () => cancelPick()
@@ -719,7 +700,7 @@ export default function drive(city) {
   const chase = { pos: new THREE.Vector3(), look: new THREE.Vector3(), yaw: 0 }
   let state = 'off', anim = null, offFrame = null, t0 = 0, mapPose = null, fromPose = null, saved = null
   let deliver = false, onFoot = false, hasVan = true, assist = true, run = null, shift = newShift(), hudAt = 0, jobRetry = 0, readAt = 0, street = null, shake = 0, skyAt = 0, fogFar = 850
-  let pickKind = null, down = null, hike = null, errand = null, grip = 1, propsAt = null, kerbsAt = null, vista = 0 // vista: 0 .. 1 the photo's long view
+  let pickKind = null, hike = null, errand = null, grip = 1, propsAt = null, kerbsAt = null, vista = 0 // vista: 0 .. 1 the photo's long view
   const scratch = { people: [], poles: [], props: new Float32Array(700 * 5), seen: new Map() }
   try { assist = localStorage.getItem('delivery.assist') !== '0' } catch {}
   assistLabel()
@@ -758,6 +739,13 @@ export default function drive(city) {
   menu()
 
   // ---------------------------------------------------------------- pick where to start
+  const spotPicker = mapPicker(city, 'dlv-picking', (x, z) => {
+    const g = { x, y: -z }, kind = pickKind
+    const spot = kind === 'foot' ? footSpawn(g.x, g.y) : carSpawn(g.x, g.y)
+    if (!spot) { city.ui.toast(kind === 'foot' ? 'Nowhere to walk there: try a street' : 'No street there: try closer to a road'); return }
+    cancelPick()
+    start(kind, spot, g)
+  })
   function startPick(kind) {
     if (state === 'pick') cancelPick()
     if (state !== 'off') return
@@ -765,45 +753,13 @@ export default function drive(city) {
     audio()
     ui.pt.textContent = `${touchy ? 'Tap' : 'Click'} where to start ${kind === 'foot' ? 'walking' : kind === 'car' ? 'driving' : 'your shift'}`
     ui.pickEl.hidden = false
-    document.body.classList.add('dlv-picking')
-    city.canvas.addEventListener('pointerdown', onPickDown)
-    city.canvas.addEventListener('pointerup', onPickUp)
+    spotPicker.on()
   }
   function cancelPick() {
     if (state !== 'pick') return
-    state = 'off'; down = null
+    state = 'off'
     ui.pickEl.hidden = true
-    document.body.classList.remove('dlv-picking')
-    city.canvas.removeEventListener('pointerdown', onPickDown)
-    city.canvas.removeEventListener('pointerup', onPickUp)
-  }
-  const pointers = new Set()
-  function onPickDown(e) { pointers.add(e.pointerId); down = pointers.size === 1 ? { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId } : null }
-  function onPickUp(e) { // a click or tap, not the end of a drag or a pinch
-    pointers.delete(e.pointerId)
-    const d = down; down = null
-    if (!d || d.id !== e.pointerId || Math.hypot(e.clientX - d.x, e.clientY - d.y) > 8 || performance.now() - d.t > 600) return
-    const g = groundAt(e.clientX, e.clientY)
-    if (!g) return
-    const kind = pickKind
-    const spot = kind === 'foot' ? footSpawn(g.x, g.y) : carSpawn(g.x, g.y)
-    if (!spot) { city.ui.toast(kind === 'foot' ? 'Nowhere to walk there: try a street' : 'No street there: try closer to a road'); return }
-    cancelPick()
-    start(kind, spot, g)
-  }
-  // the ground under a screen point: march down the map camera's ray until it is below the terrain
-  const ray = new THREE.Raycaster()
-  function groundAt(cx, cy) {
-    const r = city.canvas.getBoundingClientRect()
-    ray.setFromCamera(new THREE.Vector2(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1), city.camera)
-    const o = ray.ray.origin, d = ray.ray.direction
-    if (d.y > -0.05) return null
-    const below = (t) => o.y + d.y * t < city.world.heightAt(o.x + d.x * t, o.z + d.z * t)
-    let a = (o.y - 2200) / -d.y, b = a
-    for (let k = 0; k < 1000 && !below(b); k++) { a = b; b += 12 }
-    if (!below(b)) return null
-    for (let k = 0; k < 14; k++) { const m = (a + b) / 2; if (below(m)) b = m; else a = m }
-    return { x: o.x + d.x * b, y: -(o.z + d.z * b) }
+    spotPicker.off()
   }
   function nearestPiece(x, y, ok, pen, maxD) { // over detail tiles near (x, y), else the overview tiles
     let best = null, bd = maxD
@@ -864,8 +820,7 @@ export default function drive(city) {
     resetTrailer()
     if (hasVan) car.h = surface(car.x, car.y, city.world.heightAt(car.x, -car.y) + 0.2).y
     // where the map camera is: the dive starts there, and Esc returns there exactly
-    const C = city.camera, T = city.controls.target
-    mapPose = { look: T.clone(), dir: C.position.clone().sub(T).normalize(), H: (C.top - C.bottom) / C.zoom, fov: 2 }
+    mapPose = mapCameraPose(city)
     chase.yaw = body().yaw
     chasePose(0, true)
     shift = newShift(); run = null; jobRetry = 0; street = null; propsAt = kerbsAt = null
@@ -918,8 +873,8 @@ export default function drive(city) {
   // what a bus shift (route.js) gets to work with
   function busCtx() {
     return { THREE, city, car, bus: vehicle, secs, roadAlong, nearestStreet, touchy, popup, sfx, buzz, setGoal, hideMarkers, icon: icons.stop, el: ui.el,
-      loaded: (x, y) => infos.has(`${Math.floor(x / 1024)}_${Math.floor(y / 1024)}`),
-      toast: (t, ms) => city.ui.toast(t, ms), audio, tone: (...a) => tone(...a), bell: (...a) => bell(...a),
+      loaded: (x, y) => infos.has(ckey(Math.floor(x / 1024), Math.floor(y / 1024))),
+      toast: (t, ms) => city.ui.toast(t, ms), audio, out: () => master, tone: (...a) => tone(...a), bell: (...a) => bell(...a),
       doors: (k) => setDoors(vehicle, k),
       place: (x, y, yaw, h) => { Object.assign(car, { x, y, yaw, h }); resetTrailer() },
       summary: () => summary(),
@@ -933,7 +888,7 @@ export default function drive(city) {
     if (game && !force && (game.S.carried || game.S.km > 0.3)) return summary()
     game?.dispose()
     ui.sheet.hidden = true; ui.photo.classList.remove('on')
-    fromPose = { look: chase.look.clone(), dir: chase.pos.clone().sub(chase.look).normalize(), H: 2 * chase.pos.distanceTo(chase.look) * Math.tan((pcam.fov * Math.PI) / 360), fov: pcam.fov }
+    fromPose = poseOf(chase.pos, chase.look, pcam.fov)
     state = 'out'; t0 = performance.now()
     for (const e of ui.all) e.hidden = true
     document.body.classList.remove('dlv-shot')
@@ -989,7 +944,7 @@ export default function drive(city) {
       <div class="big">$${S.money.toFixed(2)}</div><div class="stars">${'★'.repeat(stars)}${'☆'.repeat(5 - stars)}</div>
       <dl>${row('Parcels delivered', S.n)}${row('Tips', `$${S.tips.toFixed(2)}`)}${row('Shops visited', S.shops.size)}${row('Driven', `${S.km.toFixed(1)} km in ${Math.max(1, Math.round(mins))} min`)}
       ${row('Bumps', S.bumps + S.kerbs ? `${S.bumps} knock${S.bumps === 1 ? '' : 's'}, ${S.kerbs} kerb${S.kerbs === 1 ? '' : 's'}` : 'none')}${row('People startled', S.people || 'nobody')}
-      ${S.best ? row('Best tip', `$${S.best.tip.toFixed(2)} from ${escape(S.best.who.split(' ')[0])}`) : ''}${all ? row('All time', `${all.n + S.n} parcels, $${(all.money + S.money).toFixed(2)}`) : ''}</dl>
+      ${S.best ? row('Best tip', `$${S.best.tip.toFixed(2)} from ${esc(S.best.who.split(' ')[0])}`) : ''}${all ? row('All time', `${all.n + S.n} parcels, $${(all.money + S.money).toFixed(2)}`) : ''}</dl>
       <div class="line">${line}</div><div class="row"><button data-k>Keep driving</button><button class="main" data-end>End shift</button></div>`
     ui.sheet.hidden = false
     keys.clear()
@@ -1072,60 +1027,19 @@ export default function drive(city) {
   // 0.5 m on foot; far just past the fog, where everything has faded into the sky anyway
   const nearPlane = () => (onFoot ? 0.5 : 1.0)
   // the dive: from a nearly orthographic long lens over the map down to the chase camera (e: 0 map .. 1 chase)
-  const nd = new THREE.Vector3()
+  const chaseTo = poseOf(chase.pos, chase.look, 58)
   function pose(e) {
-    const b = { look: chase.look, dir: nd.copy(chase.pos).sub(chase.look).normalize(), H: 2 * chase.pos.distanceTo(chase.look) * Math.tan((chaseFov() * Math.PI) / 360), fov: chaseFov() }
-    const [S, E, k] = state === 'out' ? [mapPose, fromPose, 1 - e] : [mapPose, b, e]
-    const ek = EASE(k)
-    const look = v3.copy(S.look).lerp(E.look, ek)
-    const dir = v4.copy(S.dir).lerp(E.dir, ek).normalize()
-    const H = Math.exp(Math.log(S.H) + (Math.log(E.H) - Math.log(S.H)) * ek)
-    const fov = S.fov + (E.fov - S.fov) * smooth(0.3, 1, ek)
-    const dist = H / 2 / Math.tan((fov * Math.PI) / 360)
-    pcam.fov = fov
-    atmosphere(smooth(0.55, 1, ek))
-    pcam.near = Math.max(nearPlane(), dist * 0.04); pcam.far = dist + 4000 + (fogFar + 60 - 4000) * smooth(0.6, 1, ek)
-    pcam.updateProjectionMatrix()
-    pcam.position.copy(look).addScaledVector(dir, dist)
-    pcam.up.set(0, 1, 0); pcam.lookAt(look)
-    opts.focus.copy(look)
-    const half = (H / 2) * Math.max(1, pcam.aspect)
-    opts.radius = clamp(half * 1.5, 900, 8000)
-    opts.shadowRadius = clamp(half * 1.9, 300, 6000)
+    if (state === 'out') dive(pcam, opts, mapPose, fromPose, 1 - e, nearPlane(), atmosphere)
+    else dive(pcam, opts, mapPose, poseOf(chase.pos, chase.look, chaseFov(), chaseTo), e, nearPlane(), atmosphere)
   }
 
   // ---------------------------------------------------------------- sky and fog from the time of day and weather
-  const skyTex = (() => { const c = document.createElement('canvas'); c.width = 2; c.height = 128; const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.cv = c; return t })()
-  const fog = new THREE.Fog(0xcfe0ea, 120, 850)
-  const ca = new THREE.Color(), cb = new THREE.Color(), cc = new THREE.Color()
-  let skyKey = ''
-  const clockFmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Vancouver', hourCycle: 'h23', hour: 'numeric', minute: 'numeric' })
-  function hourNow() { // the weather plugin's hour (it may be set by hand), else the time in Vancouver
-    if (city.weather?.hour != null) return city.weather.hour
-    const p = Object.fromEntries(clockFmt.formatToParts(new Date()).map((x) => [x.type, x.value]))
-    return +p.hour + p.minute / 60
-  }
-  function atmosphere(k) { // k: 0 map look (no fog) .. 1 street look
-    // the weather plugin publishes the street-level look (sky and fog for the weather and time of day); without it, a fair day
-    const w = city.weather || {}, A = w.atmosphere || { horizon: 0xcfe2ec, zenith: 0x84b7dc, fogNear: 140, fogFar: 850 }
-    ca.setHex(A.horizon); cb.setHex(A.zenith)
-    fogFar = A.fogFar + 13000 * vista
-    // blend in from the map look: far fog first, the haze settles as the camera reaches the street
-    const D = pcam.position.distanceTo(opts.focus)
-    fog.color.copy(ca)
-    fog.near = A.fogNear + 3500 * vista + (D * 4 + 2000) * (1 - k); fog.far = fogFar + (D * 8 + 4000) * (1 - k)
-    city.scene.fog = fog // from the start of the dive (far away at first), so materials switch to fog only once
-    const key = `${ca.getHexString()}${cb.getHexString()}${k.toFixed(2)}`
-    if (key !== skyKey) {
-      skyKey = key
-      const g = skyTex.cv.getContext('2d'), bg = (saved.bg?.isColor ? saved.bg : cc.set(0x0e1620)).getStyle()
-      const gr = g.createLinearGradient(0, 0, 0, 128)
-      gr.addColorStop(0, cb.getStyle()); gr.addColorStop(0.55, ca.getStyle()); gr.addColorStop(1, ca.getStyle())
-      g.globalAlpha = 1; g.fillStyle = bg; g.fillRect(0, 0, 2, 128)
-      g.globalAlpha = k; g.fillStyle = gr; g.fillRect(0, 0, 2, 128)
-      skyTex.needsUpdate = true
-    }
-    city.scene.background = skyTex
+  const sky = streetSky()
+  function hourNow() { return city.weather?.hour ?? vancouver(Date.now()).sec / 3600 } // the weather plugin's hour (it may be set by hand)
+  function atmosphere(k) { // k: 0 map look (no fog) .. 1 street look; returns how far the view reaches
+    const w = city.weather || {}
+    sky.apply(city, pcam.position.distanceTo(opts.focus), k, saved.bg, vista)
+    fogFar = sky.far
     const lights = city.light.night > 0.35 || ['storm', 'fog', 'rain'].includes(w.kind)
     const V = vehicle.userData
     V.lights[0].emissiveIntensity = lights ? 1.6 : 0.5
@@ -1133,6 +1047,7 @@ export default function drive(city) {
     V.night.value = walker.userData.night.value = city.light.night
     if (V.glass) V.glass.emissiveIntensity = smooth(0.25, 0.6, city.light.night) * 0.42 // a bus lit up inside
     pool.visible = !!lights && k > 0.9 && hasVan
+    return fogFar
   }
 
   // ---------------------------------------------------------------- other cars, people and poles (city.traffic, from the life plugin)
@@ -1610,15 +1525,15 @@ export default function drive(city) {
   // an address near (x, y): a building r0..r1 metres away, the named street in front of it, a house number
   function address(x, y, r0, r1) {
     const found = []
-    each(x, y, r1, (b) => {
-      if (!b.fp) return
+    for (const b of tilesNear(x, y, r1)) {
+      if (!b.fp) continue
       for (let r = 0; r < b.fp.start.length - 1; r++) {
         const w = b.bb[r * 4 + 2] - b.bb[r * 4], h = b.bb[r * 4 + 3] - b.bb[r * 4 + 1], cx = b.bb[r * 4] + w / 2, cy = b.bb[r * 4 + 1] + h / 2
         if (w * h < 45 || w * h > 4000) continue
         const d = Math.hypot(cx - x, cy - y)
         if (d >= r0 && d <= r1) found.push({ x: cx, y: cy, area: w * h })
       }
-    })
+    }
     for (let k = 0; k < 16 && found.length; k++) {
       const f = found.splice(Math.floor(Math.random() * found.length), 1)[0], s = stopFor(f.x, f.y)
       if (!s) continue
@@ -1765,7 +1680,7 @@ export default function drive(city) {
     ui.flash.hidden = false; ui.flash.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => ui.flash.classList.remove('on')))
     setTimeout(() => { ui.flash.hidden = true }, 1000)
     document.body.classList.add('dlv-shot')
-    ui.photo.innerHTML = `<div class="t">${escape(hike.name)}</div><div class="s">${escape(cap(hike.goal))} · ${Math.round(F.h)} m${hike.climb > 20 ? ` · climbed ${Math.round(hike.climb)} m` : ''}${F.secs ? ` · ${mmss(F.secs)}${F.best ? ' · a new best!' : ''}` : ''}</div>
+    ui.photo.innerHTML = `<div class="t">${esc(hike.name)}</div><div class="s">${esc(cap(hike.goal))} · ${Math.round(F.h)} m${hike.climb > 20 ? ` · climbed ${Math.round(hike.climb)} m` : ''}${F.secs ? ` · ${mmss(F.secs)}${F.best ? ' · a new best!' : ''}` : ''}</div>
       <div class="row"><button data-k>Keep exploring</button><button data-x>Back to map</button></div>`
     ui.photo.hidden = false; requestAnimationFrame(() => ui.photo.classList.add('on'))
     ui.photo.querySelector('[data-k]').onclick = () => { ui.photo.classList.remove('on'); ui.photo.hidden = true; document.body.classList.remove('dlv-shot'); hike.photo = null; vista = 0; atmosphere(1) }
@@ -1888,7 +1803,7 @@ export default function drive(city) {
     ui.stam.hidden = !hike; ui.aboard.hidden = !deliver
     if (!deliver && !hike) {
       const sp = Math.abs(P.speed) * 3.6, gear = onFoot ? '' : ` · ${car.gear < 0 ? 'R' : `D${car.gear}`}`
-      ui.read.innerHTML = `<b>${Math.round(sp)}</b> km/h${gear}${name ? ` · ${escape(name)}` : ''}`
+      ui.read.innerHTML = `<b>${Math.round(sp)}</b> km/h${gear}${name ? ` · ${esc(name)}` : ''}`
       return
     }
     ui.job.hidden = false
@@ -1934,11 +1849,9 @@ export default function drive(city) {
     if (t) ui.arrow.style.transform = `rotate(${wrap(Math.atan2(t.x - P.x, t.y - P.y) - cy)}rad)`
     ui.north.style.transform = `rotate(${wrap(-cy)}rad)`
   }
-  const escape = (s) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`)
 
   // ---------------------------------------------------------------- keys
-  const typing = (e) => /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName) || e.target?.isContentEditable
-  const CONTROL = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'ShiftLeft', 'ShiftRight'])
+  const CONTROL = new Set([...MOVE_KEYS, 'ShiftLeft', 'ShiftRight'])
   function onKey(e) {
     if (typing(e) || e.metaKey || e.ctrlKey || e.altKey) return
     if (state === 'off') { if (e.code === 'KeyD' && !e.repeat && !e.shiftKey) startPick('deliver'); return }
@@ -1976,7 +1889,8 @@ export default function drive(city) {
       if (city.models?.van) { delete city.models.van; delete city.models.person }
       for (const e of ui.all) e.remove()
       ui.css.remove()
-      ac?.close()
+      if (engine) { engine.o1.stop(); engine.o2.stop() }
+      master?.disconnect()
     },
   }
 }

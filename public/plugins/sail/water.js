@@ -7,6 +7,7 @@
 // lighter tint over the shallows (by the distance to the shore: tile water masks, see shore()), darker ruffled gust
 // patches (gusts(): the sail plugin's speed bursts) and foam round the hull. mix 0 is exactly the map's sea, for the
 // dive. heightAt() gives the same waves to the CPU (the boat rides them, the wake follows them).
+import { NOISE_GLSL } from '../../core/util.js'
 const NW = 5 // waves
 const REL = [[1, 0, 0.55], [0.71, 0.42, 0.32], [0.53, -0.5, 0.22], [0.37, 0.95, 0.12], [0.26, -1.1, 0.08]] // wavelength, angle off the wind, amplitude (shares)
 const OUT = 18, FAR = 1000 // outer cells a side, growing out to FAR metres
@@ -17,9 +18,7 @@ const GUSTS = 4
 const TIERS = { high: { n: 192, glints: true }, low: { n: 128, glints: true } }
 
 const GLSL = `
-  float wHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-  float wNoise(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(wHash(i), wHash(i + vec2(1, 0)), f.x), mix(wHash(i + vec2(0, 1)), wHash(i + vec2(1, 1)), f.x), f.y); }
+  ${NOISE_GLSL}
   uniform vec4 uW[${NW}], uW2[${NW}]; // dir x, dir z, k, amplitude | omega, Q, phase, fade distance
   uniform vec3 uOrigin; uniform float uT, uCore, uMix;
   uniform sampler2D uShore; uniform vec3 uShoreBox; // x0, z0, size
@@ -76,7 +75,7 @@ export function makeWater(THREE, city) {
         uniform vec3 uHor, uZen, uSunDir, uSunCol; uniform float uGlint, uCap, uRipple; uniform vec2 uWind;
         uniform vec4 uGust[${GUSTS}], uBoat;
         vec3 srgbW(vec3 c) { return pow(c, vec3(2.2)); }
-        float fbmW(vec2 p) { return wNoise(p) * 0.5 + wNoise(p * 2.03) * 0.25 + wNoise(p * 4.1) * 0.125 + wNoise(p * 8.3) * 0.0625; }
+        float fbmW(vec2 p) { return noise(p) * 0.5 + noise(p * 2.03) * 0.25 + noise(p * 4.1) * 0.125 + noise(p * 8.3) * 0.0625; }
         float gustAt(vec2 p, float n) { float g = 0.0;
           for (int i = 0; i < ${GUSTS}; i++) { vec4 q = uGust[i]; if (q.z > 0.0) g = max(g, q.w * (1.0 - smoothstep(0.5, 1.0, distance(p, q.xy) / q.z + 0.35 * (n - 0.5)))); }
           return g; }`)
@@ -84,7 +83,7 @@ export function makeWater(THREE, city) {
         vec2 P = vW.xz;
         if (distance(P, uOrigin.xz) > ${FAR - 5}.0) discard; // the map's sea is left out only to ${FAR - 10} m
         float px = max(length(fwidth(P)), 1e-3); // metres per pixel
-        float n1 = wNoise(P * 0.09), n2 = wNoise(P * 0.7 + uT * vec2(0.3, -0.2));
+        float n1 = noise(P * 0.09), n2 = noise(P * 0.7 + uT * vec2(0.3, -0.2));
         // the map's sea (materials.js, class 19), for the dive
         vec3 mapSea; { vec2 r = vec2(P.x * 0.25 + P.y * 0.08, P.y * 0.5); float dd = abs(fract(r.x) - 0.5) + abs(fract(r.y) - 0.5);
           vec3 c0 = srgbW(vec3(40.0, 98.0, 150.0) / 255.0); float near = 1.0 - smoothstep(0.15, 0.6, px);
@@ -93,7 +92,7 @@ export function makeWater(THREE, city) {
       .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
         // world normal: the facets up close (where the grid has waves), the waves' own slope where it is flat; ripples on top
         vec3 Nf = normalize((vec4(normal, 0.0) * viewMatrix).xyz); if (Nf.y < 0.0) Nf = -Nf;
-        vec2 grad = vec2(0.0), Pw = P + (vec2(n1, wNoise(P * 0.05 + 7.0)) - 0.5) * 9.0; // warped: no lattice of crossing waves
+        vec2 grad = vec2(0.0), Pw = P + (vec2(n1, noise(P * 0.05 + 7.0)) - 0.5) * 9.0; // warped: no lattice of crossing waves
         for (int i = 0; i < ${NW}; i++) {
           vec4 w = uW[i], w2 = uW2[i];
           float lod = 1.0 - smoothstep(0.06, 0.2, px * w.z / 6.2832);
@@ -104,8 +103,8 @@ export function makeWater(THREE, city) {
         grad *= (0.2 + 0.8 * smoothstep(1.0, 40.0, sd)) * 0.7 * graze;
         vec3 Nw = normalize(mix(normalize(vec3(-grad.x, 1.0, -grad.y)), Nf, vFade / max(uMix, 1e-3) * vGeo));
         { // short ripples across the wind, more in a gust; gone before they shimmer
-          vec2 a = uWind, b = vec2(-a.y, a.x), q = P + (vec2(n1, wNoise(P * 0.13 + 3.0)) - 0.5) * 7.0;
-          float rk = (uRipple + 0.9 * gust) * (1.0 - smoothstep(0.08, 0.5, px)) * graze * (0.6 + 0.8 * wNoise(P * 0.03 - uT * 0.05));
+          vec2 a = uWind, b = vec2(-a.y, a.x), q = P + (vec2(n1, noise(P * 0.13 + 3.0)) - 0.5) * 7.0;
+          float rk = (uRipple + 0.9 * gust) * (1.0 - smoothstep(0.08, 0.5, px)) * graze * (0.6 + 0.8 * noise(P * 0.03 - uT * 0.05));
           vec2 rg = a * cos(dot(q, a) * 2.1 - uT * 4.6) * 0.5 + (a * 0.6 + b * 0.8) * cos(dot(q, a * 0.6 + b * 0.8) * 3.3 - uT * 5.7) * 0.35
             + (a * 0.7 - b * 0.7) * cos(dot(q, a * 0.7 - b * 0.7) * 4.7 - uT * 6.8) * 0.25;
           Nw = normalize(Nw - vec3(rg.x, 0.0, rg.y) * rk);
@@ -122,7 +121,7 @@ export function makeWater(THREE, city) {
           // foam: along the shore (a fringe and the run-up), on the crests, streaks in a gale, round the hull
           float foam = (1.0 - smoothstep(0.6, 2.2 + 2.5 * n2, sd)) + smoothstep(0.8, 0.97, sin(sd * 0.85 - uT * 1.3 + n1 * 6.0)) * (1.0 - smoothstep(1.5, 9.0, sd)) * 0.7;
           foam += smoothstep(0.32, 0.62, vCrest / max(vFade * vGeo, 0.1) * 0.9 + 0.5 * (n2 - 0.5)) * uCap * vFade * smoothstep(0.05, 0.3, vGeo);
-          foam += smoothstep(0.72, 0.9, wNoise(vec2(dot(P, uWind) * 0.04, dot(P, vec2(-uWind.y, uWind.x)) * 0.5) + n1)) * smoothstep(0.5, 1.0, uCap) * 0.5 * (1.0 - smoothstep(0.3, 1.5, px));
+          foam += smoothstep(0.72, 0.9, noise(vec2(dot(P, uWind) * 0.04, dot(P, vec2(-uWind.y, uWind.x)) * 0.5) + n1)) * smoothstep(0.5, 1.0, uCap) * 0.5 * (1.0 - smoothstep(0.3, 1.5, px));
           { vec2 o = P - uBoat.xy, f = vec2(sin(uBoat.z), cos(uBoat.z)); vec2 l = vec2(dot(o, vec2(-f.y, f.x)), dot(o, f));
             float e = length(l / vec2(1.6, 3.7)); foam += (1.0 - smoothstep(0.9, 1.05 + 0.3 * n2, e)) * smoothstep(1.5, 4.5, uBoat.w) * smoothstep(-3.0, 2.0, l.y) * 0.7; }
           foam = clamp(foam, 0.0, 1.0) * (1.0 - smoothstep(0.4, 2.0, px) * 0.6);

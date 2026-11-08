@@ -6,7 +6,7 @@ import { groundMaterial, roadMaterial, buildingMaterial, treeAtlas, treeMaterial
 import { Trees3D } from './core/trees3d.js'
 import { createQuality } from './core/quality.js'
 
-// World: metres east (x) and north of an origin downtown (tools/world.py); three.js x = east, y = up, z = south.
+// World: metres east (x) and north of an origin downtown (tools/common.py); three.js x = east, y = up, z = south.
 // Heights are real elevations. The camera is orthographic, looking north, 30° down; the view lives in the URL
 // as #x,y,s (drawing pixels at 6 px per metre, CSS px per drawing px).
 const $ = (s) => document.querySelector(s)

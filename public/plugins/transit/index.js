@@ -7,9 +7,10 @@
 // accuracy or currency of the Data used in this product or service." Guideway bridge/tunnel tags and stations:
 // (c) OpenStreetMap contributors, ODbL. Built into data/ by tools/transit_data.py (format documented there).
 
+import { vancouver, getJSON } from '../../core/util.js'
+
 const DATA = new URL('./data/', import.meta.url)
 const BUS_ZOOM = 0.07 // below this a bus is about a pixel wide: not drawn, its data not fetched
-const TZ = 'America/Vancouver'
 
 // ---------- data ----------
 export function decode(buf) {
@@ -63,34 +64,25 @@ export function patternOf(man, ymd) {
 // calls fn(trip index, seconds into the trip) for every trip running at `sec` on service date pattern `pat`
 // (and yesterday's after-midnight trips, pattern `patY`)
 export function eachActive(ch, sec, pat, patY, fn) {
-  for (const [tt, bit] of [[sec, 1 << pat], [sec + 86400, 1 << patY]]) {
-    let lo = 0, hi = ch.n
-    while (lo < hi) { const m = (lo + hi) >> 1; if (ch.starts[m] < tt - ch.maxDur) lo = m + 1; else hi = m }
-    for (let i = lo; i < ch.n && ch.starts[i] <= tt; i++) {
-      if (!(ch.mask[i] & bit)) continue
-      const rel = tt - ch.starts[i]
-      if (rel <= ch.profs[ch.prof[i]].dur) fn(i, rel)
-    }
+  activeAt(ch, sec, 1 << pat, fn)
+  activeAt(ch, sec + 86400, 1 << patY, fn)
+}
+function activeAt(ch, tt, bit, fn) {
+  let lo = 0, hi = ch.n
+  while (lo < hi) { const m = (lo + hi) >> 1; if (ch.starts[m] < tt - ch.maxDur) lo = m + 1; else hi = m }
+  for (let i = lo; i < ch.n && ch.starts[i] <= tt; i++) {
+    if (!(ch.mask[i] & bit)) continue
+    const rel = tt - ch.starts[i]
+    if (rel <= ch.profs[ch.prof[i]].dur) fn(i, rel)
   }
 }
 
-const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', weekday: 'short' })
-export function vancouver(ms) {
-  const p = {}
-  for (const { type, value } of fmt.formatToParts(ms)) p[type] = value
-  return { ymd: p.year + p.month + p.day, sec: +p.hour * 3600 + +p.minute * 60 + +p.second + (((ms % 1000) + 1000) % 1000) / 1000, wd: p.weekday, hm: `${p.hour}:${p.minute}`, p }
-}
 function fromVancouver(y, mo, d, h, mi) { // wall-clock time in Vancouver -> epoch ms
   const want = Date.UTC(y, mo - 1, d, h, mi)
   let t = want + 8 * 3600e3
   for (let k = 0; k < 2; k++) { const { p } = vancouver(t); t += want - Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute) }
   return t
 }
-
-// GTFS-realtime hook: TransLink's realtime feeds need an API key we don't have. When there is one, fetch
-// VehiclePositions/TripUpdates and return a delay in seconds for a trip (route name + scheduled start, seconds after
-// midnight); every vehicle is drawn `delay` seconds behind its timetable. Null = timetable only.
-const realtimeDelay = null // (routeName, startSec) => seconds
 
 // ---------- looks ----------
 const C = {
@@ -158,23 +150,24 @@ function poles(L) { // two trolley poles from the rear of the roof up towards th
 
 // trains per line; a trip's train is picked by hashing its start time (TransLink publishes no fleet assignment)
 // ponytail: the fleet mix is a guess at proportions, not a timetable of real consists
+const MK1 = ['markI', 6], MK2 = ['markII', 4], MK3 = ['markIII', 4], CANADA = ['canada', 2], SEABUS = ['seabus', 1]
 function consist(kind, h) {
-  if (kind === 'expo') return h < 0.4 ? ['markI', 6] : h < 0.7 ? ['markII', 4] : ['markIII', 4]
-  if (kind === 'millennium') return h < 0.45 ? ['markII', 4] : ['markIII', 4]
-  if (kind === 'canada') return ['canada', 2]
+  if (kind === 'expo') return h < 0.4 ? MK1 : h < 0.7 ? MK2 : MK3
+  if (kind === 'millennium') return h < 0.45 ? MK2 : MK3
+  if (kind === 'canada') return CANADA
   if (kind === 'wce') return null // locomotive + coaches
-  if (kind === 'seabus') return ['seabus', 1]
+  if (kind === 'seabus') return SEABUS
   return null
 }
 
 export default async function transit(city) {
   const { THREE } = city
-  const man = await fetch(new URL('manifest.json', DATA)).then((r) => r.json())
+  const man = await getJSON(new URL('manifest.json', DATA))
 
   const { o, ax, az, bx, bz } = localFrame(city, man)
   const routes = man.routes
   const H = (x, z) => city.world.heightAt(x, z)
-  let raf = 0, last = 0, force = false, lastView = '', ui = null // loop state (see the loop below)
+  let raf = 0, last = 0, force = false, lastView = { x: Infinity, z: 0, mpp: 0 }, ui = null // loop state (see the loop below)
   let speed = 1, anchorSim = Date.now(), anchorReal = performance.now() // clock
   const show = { sky: true, wce: true, seabus: true, bus: true }
 
@@ -318,7 +311,7 @@ export default async function transit(city) {
   const showOf = (kind) => (kind === 'expo' || kind === 'millennium' || kind === 'canada' ? show.sky : kind === 'bus' || kind === 'trolley' ? show.bus : show[kind])
 
   // ---------- per frame ----------
-  const P1 = {}, P2 = {}
+  const P1 = { x: 0, y: 0, z: 0, hidden: false }, P2 = { x: 0, y: 0, z: 0, hidden: false }
   const counts = new Map()
   let drawn = 0, lastDrawn = 0
   function placeCar(kind, sh, front, L, s, side) {
@@ -340,27 +333,41 @@ export default async function transit(city) {
     e[i + 12] = (a.x + b.x) / 2 + rx * side; e[i + 13] = (a.y + b.y) / 2; e[i + 14] = (a.z + b.z) / 2 + rz * side; e[i + 15] = 1
     m.count++
   }
+  // the Vancouver clock at sim time ms: formatted once a minute (Intl is slow), counted on to the next
+  const clk = { ms: -Infinity, v: null }
+  function clock(ms) {
+    let dt = (ms - clk.ms) / 1000
+    if (!(clk.v && dt >= 0 && Math.floor((clk.v.sec + dt) / 60) === Math.floor(clk.v.sec / 60))) { clk.ms = ms; clk.v = vancouver(ms); clk.y = vancouver(ms - 864e5).ymd; dt = 0 }
+    return { ymd: clk.v.ymd, ymdY: clk.y, sec: clk.v.sec + dt, hm: clk.v.hm, wd: clk.v.wd, p: clk.v.p }
+  }
+  let c, ch, vb, me, scale // the chunk being drawn, for visit()
+  const pad = 250
   function update() {
-    const ms = simNow(), v = vancouver(ms), vy = vancouver(ms - 864e5)
-    const pat = patternOf(man, v.ymd), patY = patternOf(man, vy.ymd)
+    const v = clock(simNow())
+    const pat = patternOf(man, v.ymd), patY = patternOf(man, v.ymdY)
     for (const m of Object.values(meshes)) m.count = 0
     counts.clear()
-    const vb = city.view.bounds, mpp = city.view.metresPerPixel, zoom = city.view.zoom
-    const busOn = show.bus && zoom >= BUS_ZOOM && !document.hidden, me = city.player?.vehicle === 'bus' ? city.player : null
-    const pad = 250
-    const scale = Math.min(5, Math.max(1, mpp / 0.9)) // trains stay visible zoomed out
+    vb = city.view.bounds
+    const mpp = city.view.metresPerPixel, zoom = city.view.zoom
+    const busOn = show.bus && zoom >= BUS_ZOOM && !document.hidden
+    me = city.player?.vehicle === 'bus' ? city.player : null
+    scale = Math.min(5, Math.max(1, mpp / 0.9)) // trains stay visible zoomed out
     drawn = 0
-    for (const c of chunks) {
+    for (c of chunks) {
       if (!c.rail) {
         if (!busOn || c.w[2] < vb.x0 - pad || c.w[0] > vb.x1 + pad || c.w[3] < vb.z0 - pad || c.w[1] > vb.z1 + pad) continue
         if (!c.data) { if (!c.loading) load(c); continue }
       }
-      const ch = c.data
-      eachActive(ch, v.sec, pat, patY, (i, rel) => {
+      ch = c.data
+      eachActive(ch, v.sec, pat, patY, visit)
+    }
+    for (const m of Object.values(meshes)) m.instanceMatrix.needsUpdate = true
+    return v
+  }
+  function visit(i, rel) { // a trip running now: its vehicle on screen
         const pr = ch.profs[ch.prof[i]], p = pr.p, r = routes[p.route]
         if (!showOf(r.kind)) return
         counts.set(p.route, (counts.get(p.route) || 0) + 1)
-        if (realtimeDelay) rel = Math.max(0, rel - realtimeDelay(r.name, ch.starts[i]))
         // distance along the shape: dwell at stops, ease between stations for trains, steady for buses
         const n = pr.arr.length
         let k = 0
@@ -379,7 +386,7 @@ export default async function transit(city) {
         const h = ((ch.starts[i] * 2654435761) >>> 0) / 4294967296
         let cars, carL, kindOf
         const cs = consist(r.kind, h)
-        if (cs) { [kindOf, cars] = cs; carL = KINDS[kindOf].L } else if (r.kind === 'wce') { cars = 7; carL = 25.9 } else { kindOf = (r.kind === 'trolley' ? 'trolley' : 'bus') + (r.artic ? '18' : '12'); cars = 1; carL = KINDS[kindOf].L }
+        if (cs) { kindOf = cs[0]; cars = cs[1]; carL = KINDS[kindOf].L } else if (r.kind === 'wce') { cars = 7; carL = 25.9 } else { kindOf = (r.kind === 'trolley' ? 'trolley' : 'bus') + (r.artic ? '18' : '12'); cars = 1; carL = KINDS[kindOf].L }
         const gap = 0.6, total = cars * carL + (cars - 1) * gap
         const front = Math.min(sh.len, Math.max(total, d + total / 2))
         // lead car on screen? (cheap check before the full placement)
@@ -395,10 +402,6 @@ export default async function transit(city) {
           placeCar(kk, sh, front - j * (carL + gap), L, s, side)
         }
         drawn++
-      })
-    }
-    for (const m of Object.values(meshes)) m.instanceMatrix.needsUpdate = true
-    return v
   }
 
   // ---------- loop: update about once per pixel of movement, only while on and visible ----------
@@ -407,8 +410,7 @@ export default async function transit(city) {
     raf = 0
     if (document.hidden) return
     const mpp = city.view.metresPerPixel, c = city.view.center
-    const vk = `${c.x.toFixed(1)},${c.z.toFixed(1)},${mpp.toFixed(4)}`
-    if (vk !== lastView) { lastView = vk; force = true }
+    if (Math.abs(c.x - lastView.x) > 0.05 || Math.abs(c.z - lastView.z) > 0.05 || Math.abs(mpp - lastView.mpp) > 5e-5) { lastView.x = c.x; lastView.z = c.z; lastView.mpp = mpp; force = true }
     const interval = lastDrawn ? Math.min(250, (1000 * mpp) / (22 * speed)) : 1000
     if (force || now - last >= interval) {
       force = false; last = now
@@ -460,7 +462,7 @@ export default async function transit(city) {
       remove: () => btn.remove(),
       refresh() {
         if (el.hidden) return
-        const v = vancouver(simNow())
+        const v = clock(simNow())
         const busNote = city.view.zoom < BUS_ZOOM ? 'zoom in' : 'nearby'
         const byKind = {}
         for (const [ri, n] of counts) byKind[routes[ri].kind] = (byKind[routes[ri].kind] || 0) + n

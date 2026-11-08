@@ -8,16 +8,16 @@
 // run under their wires (drawn along the route) and dewire when swung too far from them.
 // Data: "Route and arrival data used in this product or service is provided by permission of TransLink. TransLink
 // assumes no responsibility for the accuracy or currency of the Data used in this product or service."
-import { localFrame, patternOf, vancouver } from '../transit/index.js'
+import { localFrame, patternOf } from '../transit/index.js'
+import { vancouver, clamp, wrap, esc, getJSON } from '../../core/util.js'
 import { makeWalker } from './walker.js'
+import { noise } from '../../core/play.js'
 
 const DATA = new URL('../transit/data/', import.meta.url)
 const STEP = 3, SPAN = 660, MAXS = Math.ceil(SPAN / STEP) + 2 // the lane line: a sample every 3 m over 660 m around the bus
 const AHEAD = 300 // the GPS line fades out this far ahead
 const WIRE_H = 5.6, POLE_L = 6.2, REACH = 0.73 // trolley wires over the lane; the poles swing at most this far (rad)
 const POOL = 14 // people on foot at a stop
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
-const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a))
 const fmtT = (s) => { s = ((Math.round(s / 60) % 1440) + 1440) % 1440; const h = Math.floor(s / 60), m = s % 60; return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')}${h < 12 ? 'a' : 'p'}` }
 
 // lines on the road: drawn as if 2 m nearer the eye along their own ray (the same pixels), so the ground's mesh, coarser
@@ -28,15 +28,14 @@ const NEAR = 'varying float vCam; vec4 nearer(vec4 mv) { float l = length(mv.xyz
 // ---------------------------------------------------------------- data
 let lines = null
 export function loadLines() {
-  return (lines ??= Promise.all(['manifest.json', 'lines/index.json'].map((f) => fetch(new URL(f, DATA)).then((r) => { if (!r.ok) throw new Error(r.status); return r.json() })))
+  return (lines ??= Promise.all(['manifest.json', 'lines/index.json'].map((f) => getJSON(new URL(f, DATA))))
     .then(([man, index]) => ({ man, index })).catch((e) => { lines = null; throw e }))
 }
-export const loadRoute = (ri) => fetch(new URL(`lines/${ri}.json`, DATA)).then((r) => { if (!r.ok) throw new Error(r.status); return r.json() })
-export const brand = (r) => (r.name === '99' ? 'B-Line' : /^R\d/.test(r.name) ? 'RapidBus' : r.kind === 'trolley' ? 'Trolley' : '')
-export const destOf = (head) => (head.includes('/To ') ? head.split('/To ').pop() : head.replace(/^To /, ''))
+export const loadRoute = (ri) => getJSON(new URL(`lines/${ri}.json`, DATA))
+const brand = (r) => (r.name === '99' ? 'B-Line' : /^R\d/.test(r.name) ? 'RapidBus' : r.kind === 'trolley' ? 'Trolley' : '')
+const destOf = (head) => (head.includes('/To ') ? head.split('/To ').pop() : head.replace(/^To /, ''))
 export const accentOf = (r) => (r.color?.length === 7 ? parseInt(r.color.slice(1), 16) : null)
 const num = (n) => { const m = /\d+/.exec(n); return m ? +m[0] : 9999 }
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`)
 const badge = (r) => `<b class="bus-badge${r.name === '99' ? ' bl' : /^R\d/.test(r.name) ? ' rb' : r.kind === 'trolley' ? ' tr' : ''}">${esc(r.name)}</b>`
 
 export const CSS = `
@@ -110,7 +109,7 @@ export function picker(el, data, onPick, onBack) {
 
 // ---------------------------------------------------------------- the shift
 // ctx (from drive/index.js): THREE, city, car, bus (the model), secs (the body's boxes), nearestRoad, nearestStreet,
-// loaded(x, y), popup, toast, audio(), tone, bell, sfx, buzz, setGoal, hideMarkers, icon (the stop sign), el(cls, html)
+// loaded(x, y), popup, toast, audio(), out() (the sound's gain), tone, bell, sfx, buzz, setGoal, hideMarkers, icon (the stop sign), el(cls, html)
 export function busGame(ctx, pick, d0) {
   const { THREE, city, car, bus } = ctx
   const { r, man } = pick, D = d0.dirs[pick.dir]
@@ -261,7 +260,7 @@ export function busGame(ctx, pick, d0) {
     const pos = new Float32Array(max * 3), u = new Float32Array(max * 2), g = new THREE.BufferGeometry()
     g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.BufferAttribute(u, 2))
     const m = new THREE.Mesh(g, new THREE.ShaderMaterial({
-      uniforms: { uCol: { value: new THREE.Color(colour) }, uA: { value: 1 }, uE: { value: edges ? 1 : 0 } }, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -6, side: THREE.DoubleSide,
+      uniforms: { uCol: { value: new THREE.Color(colour) }, uA: { value: 1 }, uE: { value: edges ? 1 : 0 } }, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -6, side: THREE.DoubleSide, forceSinglePass: true,
       vertexShader: `varying vec2 vUv; ${NEAR} void main() { vUv = uv; gl_Position = nearer(modelViewMatrix * vec4(position, 1.0)); }`,
       fragmentShader: 'uniform vec3 uCol; uniform float uA, uE; varying vec2 vUv; varying float vCam; void main() { float e = abs(vUv.x); gl_FragColor = vec4(uCol, vCam * uA * (vUv.y > 1.5 ? 0.95 : mix(0.9, 0.16 + 0.74 * smoothstep(0.72, 0.92, e), uE))); }',
     }))
@@ -428,14 +427,14 @@ export function busGame(ctx, pick, d0) {
   const w = (i, j, left) => Math.exp(-(j - i) / Math.max(3, left * 0.4)) * (/Station|Exchange|Loop/.test(stops[j].name) ? 3 : 1) + (j === N - 1 ? 0.5 : 0)
 
   // ---------------------------------------------------------------- sounds
-  let noise = null
+  let hissBuf = null
   function hiss(t, dur, vol, f = 1800) {
     const ac = ctx.audio(); if (!ac) return
-    if (!noise) { noise = ac.createBuffer(1, ac.sampleRate, ac.sampleRate); const a = noise.getChannelData(0); for (let i = 0; i < a.length; i++) a[i] = Math.random() * 2 - 1 }
+    hissBuf ??= noise(ac)
     const s = ac.createBufferSource(), b = ac.createBiquadFilter(), g = ac.createGain()
-    s.buffer = noise; b.type = 'bandpass'; b.frequency.value = f; b.Q.value = 0.8
+    s.buffer = hissBuf; b.type = 'bandpass'; b.frequency.value = f; b.Q.value = 0.8
     g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.03); g.gain.exponentialRampToValueAtTime(0.0001, t + dur)
-    s.connect(b); b.connect(g); g.connect(ac.out); s.start(t); s.stop(t + dur + 0.05)
+    s.connect(b); b.connect(g); g.connect(ctx.out()); s.start(t); s.stop(t + dur + 0.05)
   }
   const snd = {
     doors(open) { const ac = ctx.audio(); if (!ac) return; const t = ac.currentTime; hiss(t, 0.7, 0.07); ctx.tone(open ? 880 : 660, t + 0.05, 0.25, 0.04); ctx.tone(open ? 660 : 523, t + 0.3, 0.3, 0.04) },

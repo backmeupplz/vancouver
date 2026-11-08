@@ -1,15 +1,15 @@
 # Roof colours from the City of Vancouver 2022 orthophoto. For every building footprint (OSM buildings and parts, and the
 # city's 2009 LiDAR sections) inside the photo's coverage, samples the 0.5 m image (tools/ortho.sh) inside the footprint,
 # 1 m in from its edges, drops tree and shadow pixels and keeps the dominant colour (and a second one on big roofs),
-# into data/roofs.npz. tiles.py looks colours up with roof_lookup(ring) (also roof_colour(ring_lonlat)); no npz, no colours.
+# into data/roofs.npz. tiles.py looks colours up with roof_lookup(ring); no npz, no colours.
 # Run: uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/roofs.py [procs]
 #      ... tools/roofs.py preview [yaletown|coalharbour|gastown|lat,lon]  (ortho vs sampled colours, data/ortho/preview-*.png)
 #      ... tools/roofs.py check   (self-test of the colour maths and the lookup)
-import glob, json, math, os, pickle, sys, time
+import glob, json, math, os, sys, time
 from multiprocessing import Pool
 import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
-from world import xy, latlon, L1
+from common import xy, latlon, L1, save_rings, load_feat
 
 TIF = 'data/ortho/tif'
 OUT = 'data/roofs.npz'
@@ -110,9 +110,7 @@ def footprints(cover):
     rings, src = [], []
     for i in range(int(min(wx) // L1), int(max(wx) // L1) + 1):
         for j in range(int(min(wy) // L1), int(max(wy) // L1) + 1):
-            p = f'data/feat/{i}_{j}.pkl'
-            if not os.path.exists(p): continue
-            for oid, prs, t in pickle.load(open(p, 'rb')).get('buildings', []):
+            for oid, prs, t in load_feat(i, j).get('buildings', []):
                 for outer, inners in prs:
                     if len(outer) >= 4: rings.append(outer); src.append(1 if 'building' not in t else 0)
     for f in json.load(open('data/bf2009.geojson'))['features']:
@@ -184,9 +182,7 @@ def bake(procs):
     print(len(cover), 'ortho tiles,', len(fps), 'footprints inside', f'{time.time() - t0:.0f}s', flush=True)
     with Pool(procs) as pool: res = pool.map(sample_chunk, chunks(fps, cover), chunksize=1)
     rows = [r for rr in res for r in rr]
-    rc = np.array([p for r in rows for p in r[0]], np.float32)
-    ro = np.cumsum([0] + [len(r[0]) for r in rows]).astype(np.int32)
-    np.savez_compressed(OUT, rc=rc, ro=ro, src=np.array([r[1] for r in rows], np.uint8),
+    save_rings(OUT, [r[0] for r in rows], src=np.array([r[1] for r in rows], np.uint8),
                         rgb=lab_srgb(np.array([r[2] for r in rows])), rgb2=lab_srgb(np.array([r[3] for r in rows])),
                         share2=np.array([round(r[4] * 100) for r in rows], np.uint8), flags=np.array([r[5] for r in rows], np.uint8))
     print(len(rows), 'roofs ->', OUT, f'{os.path.getsize(OUT) / 1e6:.1f} MB', f'{time.time() - t0:.0f}s', flush=True)
@@ -260,7 +256,7 @@ def preview(name, half=160):
     wb = lin(np.moveaxis(img[:3], 0, -1)) * WB  # the photo white-balanced like the samples
     ortho = Image.fromarray(np.clip(np.where(wb > 0.0031308, 1.055 * np.clip(wb, 0, None) ** (1 / 2.4) - 0.055, 12.92 * wb) * 255, 0, 255).astype(np.uint8))
     flat = ortho.copy()  # sampled colours painted over the photo itself, so they compare honestly
-    db = _db()
+    db = ring_db(OUT)  # (was _db(), which did not exist: preview crashed)
     import shapely
     from shapely.geometry import box
     hits = db['tree'].query(box(cx - half * 1.2, cy - half * 1.2, cx + half * 1.2, cy + half * 1.2))

@@ -27,14 +27,14 @@ import numpy as np
 import shapely
 from shapely.geometry import LineString
 from shapely.strtree import STRtree
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import LAT_O, LON_O, KX, KY, xy
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, 'public/plugins/transit/data')
 FEED = 'https://gtfs-static.translink.ca/gtfs/google_transit.zip'
 PBF = sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.path.dirname(ROOT), 'vancouver/data/lm.osm.pbf')
-ORIGIN = (49.28606407, -123.10901045)
-K = (111320 * math.cos(math.radians(49.2845)) / 0.99744659, 110574 / 0.99744659)  # metres per degree lon, lat
-P = lambda lat, lon: ((lon - ORIGIN[1]) * K[0], (lat - ORIGIN[0]) * K[1])
+ORIGIN, K, P = (LAT_O, LON_O), (KX, KY), xy  # the map's frame (common.py): metres per degree lon, lat
 Q = 0.5  # position step, m
 CELL = 8000  # bus chunk size, m
 
@@ -322,7 +322,7 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     for f in os.listdir(OUT):
         if f.endswith('.bin'): os.remove(os.path.join(OUT, f))
-    chunks, guide_meta = [], None
+    chunks = []
     for name, ts in sorted(groups.items()):
         rail = name == 'rail'
         sids = sorted({t['shape_id'] for t in ts}); SI = {s: i for i, s in enumerate(sids)}

@@ -3,6 +3,7 @@
 // Data: adsb.lol (ODbL, https://adsb.lol), OpenSky Network as a fallback, both through the site's cached proxy
 // in nginx.conf (/adsb/…; neither API sends CORS headers). One fixed query for the whole area, polled every 8 s
 // while aircraft are on screen, every 30 s otherwise, never while the tab is hidden, with back-off on errors.
+import { wrap } from '../../core/util.js'
 
 const SOURCES = [
   { url: new URL('../../adsb/lm', import.meta.url), parse: parseAdsbLol, name: 'adsb.lol', href: 'https://adsb.lol' },
@@ -92,7 +93,7 @@ export default function planes(city) {
   // where it is over the ground: a faint cross at the foot of a drop line, in the overlay (the sun casts the real shadow)
   const shadowGeo = new THREE.BufferGeometry().setFromPoints([[0.5, 0.05], [-0.5, 0.05], [-0.5, -0.05], [0.5, -0.05], [0.12, 0.5], [-0.05, 0.5], [-0.05, -0.5], [0.12, -0.5]].map(([x, z]) => new THREE.Vector3(x, 0, z)))
   shadowGeo.setIndex([0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7])
-  const shadows = new THREE.InstancedMesh(shadowGeo, new THREE.MeshBasicMaterial({ color: 0x0b1016, transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide }), MAX)
+  const shadows = new THREE.InstancedMesh(shadowGeo, new THREE.MeshBasicMaterial({ color: 0x0b1016, transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true }), MAX)
   shadows.count = 0
   shadows.frustumCulled = false
   const lineGeo = new THREE.BufferGeometry()
@@ -128,7 +129,7 @@ export default function planes(city) {
     const e = Math.exp(-(t - p.tu) / 1.5)
     if (p.tu) { x += (p.cx - x) * e; z += (p.cz - z) * e; alt += (p.calt - alt) * e }
     const k = Math.min(1, (t - p.tu) / 2)
-    D.x = x; D.z = z; D.alt = alt; D.h = p.h0 + angle(p.trk - p.h0) * k
+    D.x = x; D.z = z; D.alt = alt; D.h = p.h0 + wrap(p.trk - p.h0) * k
     return D
   }
 
@@ -181,7 +182,7 @@ export default function planes(city) {
   const offView = city.on('view', () => { if (!viewT) viewT = setTimeout(() => { viewT = 0; if (!stop) check() }, 150) })
 
   // ---------- polling ----------
-  const credit = addCredit('Live aircraft: adsb.lol', SOURCES[0].href)
+  const credit = city.ui.credit('Live aircraft: adsb.lol', SOURCES[0].href)
   let timer = 0, fails = 0, primaryDownUntil = 0, inflight = false, disposed = false
   async function poll() {
     timer = 0
@@ -262,7 +263,6 @@ export default function planes(city) {
   }
 }
 
-const angle = (a) => Math.atan2(Math.sin(a), Math.cos(a))
 const rad = (d) => ((d || 0) * Math.PI) / 180
 const hash = (s) => { let h = 2166136261; for (const ch of s) h = Math.imul(h ^ ch.charCodeAt(0), 16777619); return h >>> 0 }
 
@@ -298,22 +298,4 @@ function parseOpenSky(j) {
   return (j.states || []).map((s) => ({ id: s[0], cs: (s[1] || '').trim(), type: '', cat: CAT[s[17]] || '', ground: !!s[8], alt: s[13] ?? s[7] ?? 0,
     gs: s[9] || 0, trk: rad(s[10]), vr: s[11] || 0, roll: 0, lat: s[6], lon: s[5], age: Math.min(30, Math.max(0, (j.time || 0) - (s[3] || j.time || 0))),
     size: SIZE[CAT[s[17]]] || 1 }))
-}
-
-// a line in the shared credits strip at the bottom of the page
-function addCredit(text, href) {
-  let el = document.getElementById('credits')
-  if (!el) {
-    el = document.createElement('div')
-    el.id = 'credits'
-    el.className = 'panel'
-    Object.assign(el.style, { left: '50%', bottom: '12px', transform: 'translateX(-50%)', padding: '4px 10px', fontSize: '11px', color: 'var(--muted)', zIndex: 15, display: 'flex', gap: '10px', whiteSpace: 'nowrap', maxWidth: 'calc(100% - 24px)', overflow: 'hidden' })
-    document.body.append(el)
-  }
-  const s = document.createElement('a')
-  s.target = '_blank'; s.rel = 'noopener'; s.style.color = 'inherit'
-  el.append(s)
-  const set = (t, h) => { s.textContent = t; if (h) s.href = h }
-  set(text, href)
-  return { set, remove() { s.remove(); if (!el.children.length) el.remove() } }
 }

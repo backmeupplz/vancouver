@@ -1,6 +1,7 @@
 // Turns a streamed map tile (tools/tiles.py) into ready-to-draw geometry buffers, off the page's thread.
 // Coordinates in the buffers are local to the tile: x east, y up, z south, metres from the tile's SW corner.
 import earcut from '../vendor/earcut.js'
+import { mulberry32 as mulberry, inPoly, sampleGrid } from './util.js'
 const GROUND_LIFT = 0 // the ground is one non-overlapping layer (tools/tiles.py), so no class needs lifting
 const KIND = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living', 'pedestrian', 'footway', 'cycleway',
   'path', 'steps', 'track', 'rail', 'lightrail', 'runway', 'taxiway']
@@ -100,12 +101,7 @@ function normals(terr, pos) {
   }
   return n
 }
-function heightAt(terr, x, y) { // tile-local metres, y north
-  const { n, h, size } = terr, c = size / (n - 1)
-  const fx = Math.min(n - 1.0001, Math.max(0, x / c)), fy = Math.min(n - 1.0001, Math.max(0, (size - y) / c))
-  const i = fx | 0, j = fy | 0, u = fx - i, v = fy - j
-  return h[j * n + i] * (1 - u) * (1 - v) + h[j * n + i + 1] * u * (1 - v) + h[(j + 1) * n + i] * (1 - u) * v + h[(j + 1) * n + i + 1] * u * v
-}
+const heightAt = (terr, x, y) => sampleGrid(terr.h, terr.n, terr.size, x, y) // tile-local metres, y north
 
 // ground: polygons per class, triangulated here and draped over the terrain (long edges split on slopes)
 function ground(t, terr, level) {
@@ -274,26 +270,6 @@ function roads(t, terr, lines, level) {
     }
     T.nv += m * 2
   }
-  // bridge decks: a fascia on both sides and an underside, so a deck reads as a slab, not a ribbon
-  const deck = (L) => {
-    const T = surf, pts = L.pts, zs = L.z, m = pts.length / 2, half = L.w / 2 + (L.band ? 2.5 : 0.6), th = L.kind <= K.tertiary ? 1.6 : 0.9
-    for (let i = 0; i < m - 1; i++) {
-      const x0 = pts[i * 2], y0 = pts[i * 2 + 1], x1 = pts[i * 2 + 2], y1 = pts[i * 2 + 3]
-      const l = Math.hypot(x1 - x0, y1 - y0) || 1, nx = -(y1 - y0) / l, ny = (x1 - x0) / l
-      for (const sd of [-1, 1]) {
-        const ax = x0 + nx * half * sd, ay = y0 + ny * half * sd, bx = x1 + nx * half * sd, by = y1 + ny * half * sd
-        const b = T.nv
-        T.P.push(ax, zs[i] + 0.35, -ay, bx, zs[i + 1] + 0.35, -by, bx, zs[i + 1] - th, -by, ax, zs[i] - th, -ay)
-        for (let k = 0; k < 4; k++) { T.A.push(0, half * sd, L.w, 101); T.B.push(0, 999, 999, l) }
-        if (sd > 0) T.I.push(b, b + 1, b + 2, b, b + 2, b + 3); else T.I.push(b, b + 2, b + 1, b, b + 3, b + 2)
-        T.nv += 4
-      }
-      const b = T.nv
-      T.P.push(x0 - nx * half, zs[i] - th, -(y0 - ny * half), x1 - nx * half, zs[i + 1] - th, -(y1 - ny * half), x1 + nx * half, zs[i + 1] - th, -(y1 + ny * half), x0 + nx * half, zs[i] - th, -(y0 + ny * half))
-      for (let k = 0; k < 4; k++) { T.A.push(0, 0, L.w, 101); T.B.push(0, 999, 999, l) }
-      T.I.push(b, b + 1, b + 2, b, b + 2, b + 3); T.nv += 4
-    }
-  }
   const len = (L) => { let s = 0; for (let i = 0; i < L.pts.length / 2 - 1; i++) s += Math.hypot(L.pts[i * 2 + 2] - L.pts[i * 2], L.pts[i * 2 + 3] - L.pts[i * 2 + 1]); return s }
   const order = [...lines].sort((p, q) => q.kind - p.kind)
   for (const L of order) {
@@ -362,14 +338,6 @@ const PALETTES = [ // style ids from tools/tiles.py (HOUSE, APT, ...)
   // 12 Vancouver Special: white or cream stucco
   { wall: [0xf2efe6, 0xece6d6, 0xe8e4dc, 0xf4f0e8, 0xe0dccc], roof: [0x4a4642, 0x5a5048, 0x3e4349, 0x6a5a4c] },
 ]
-function mulberry(a) {
-  return () => {
-    a |= 0; a = (a + 0x6d2b79f5) | 0
-    let t = Math.imul(a ^ (a >>> 15), 1 | a)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
-}
 const hex = (h) => [((h >> 16) & 255) / 255, ((h >> 8) & 255) / 255, (h & 255) / 255]
 // colours meant as seen (OSM building:colour / roof:colour, the material palettes): vertex colours are linear
 const lin = (h) => hex(h).map((c) => c ** 2.2)
@@ -610,14 +578,6 @@ function offset(pts, D) {
 }
 const area = (p) => { let s = 0; for (let i = 0; i < p.length; i++) { const a = p[i], b = p[(i + 1) % p.length]; s += a[0] * b[1] - b[0] * a[1] } return s / 2 }
 const bbox = (p) => { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const [x, y] of p) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y) } return [x0, y0, x1, y1] }
-function inPoly(x, y, pts) {
-  let c = false
-  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-    const a = pts[i], b = pts[j]
-    if ((a[1] > y) !== (b[1] > y) && x < ((b[0] - a[0]) * (y - a[1])) / (b[1] - a[1]) + a[0]) c = !c
-  }
-  return c
-}
 // small ear-clipping triangulator for building roofs (simple polygons, counter-clockwise)
 function earcut2(pts) {
   const n = pts.length, V = [...Array(n).keys()], out = []

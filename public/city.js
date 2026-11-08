@@ -190,6 +190,23 @@ function makeUI() {
       document.body.append(t)
       setTimeout(() => t.remove(), ms)
     },
+    // a line in the credits strip at the bottom of the page (a link with href): { set(text, href), remove() }
+    credit(text, href) {
+      let el = document.getElementById('credits')
+      if (!el) {
+        el = document.createElement('div')
+        el.id = 'credits'
+        el.className = 'panel'
+        Object.assign(el.style, { left: '50%', bottom: '12px', transform: 'translateX(-50%)', padding: '4px 10px', fontSize: '11px', color: 'var(--muted)', zIndex: 15, display: 'flex', gap: '10px', whiteSpace: 'nowrap', maxWidth: 'calc(100% - 24px)', overflow: 'hidden' })
+        document.body.append(el)
+      }
+      const s = document.createElement('a')
+      s.target = '_blank'; s.rel = 'noopener'; s.style.color = 'inherit'
+      el.append(s)
+      const set = (t, h) => { s.textContent = t; if (h) s.href = h }
+      set(text, href)
+      return { set, remove() { s.remove(); if (!el.children.length) el.remove() } }
+    },
   }
 }
 

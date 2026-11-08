@@ -7,7 +7,8 @@
 // userData: lights [head, tail], glass (material), night ({ value }), wheels [{ steer, spin, front }], doors
 // [{ leaves, open }], rear (the articulated rear section, turned about the joint at userData.joint), poles
 // [group] (a trolleybus), sil [instanced silhouettes], seats (how many), setSign(number, destination, colour).
-import { kit, shaded } from '../life/kit.js'
+import { kit, under as arched, kitMaterial } from '../../core/kit.js'
+import { lamps } from './van.js'
 
 const WHITE = 0xf3f4f1, NAVY = 0x1d3a86, YELLOW = 0xf5c400, DARK = 0x262a2f, GLASS = 0x3b4f63, FRAME = 0x14171a
 const TYRE = 0x222428, HUB = 0xc9ccd0, ROOF = 0xe4e6e3, STEEL = 0x9aa0a8, DOORWAY = 0x2a2f35
@@ -15,17 +16,11 @@ const W = 1.275 // half width
 const AXLE = 0.5, ROOF_Y = 3.08
 
 // along the bottom, over the wheel arches ([centre x, radius]), forward +x while building
-function under(x0, x1, yb, arches) {
-  const out = [x0, yb]
-  for (const [cx, r] of arches) { out.push(cx - r, yb); for (let i = 0; i <= 7; i++) { const t = Math.PI - (Math.PI * i) / 7; out.push(cx + r * Math.cos(t), Math.max(yb, AXLE + r * Math.sin(t))) } out.push(cx + r, yb) }
-  out.push(x1, yb)
-  return out
-}
+const under = (x0, x1, yb, arches) => arched(x0, x1, yb, arches, AXLE, 7)
 // plain geometry with vertex colours from a kit (drops the life shader's attributes)
 function geo(k, turn = true) {
-  const g = k.geometry()
+  const g = k.geometry(true)
   if (turn) g.rotateY(Math.PI / 2) // kit +x (forward) to -z
-  g.setAttribute('color', g.attributes.aCol); g.deleteAttribute('aCol'); g.deleteAttribute('aPart'); g.deleteAttribute('aSwing')
   return g
 }
 
@@ -134,10 +129,9 @@ function section(k, g, o) {
 export function makeBus(THREE, opt = {}) {
   const artic = !!opt.artic, trolley = !!opt.trolley, accent = opt.accent ?? YELLOW
   const bus = new THREE.Group(), night = { value: 0 }
-  const vc = () => shaded(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), night)
+  const vc = () => kitMaterial(THREE, night)
   const glass = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true, emissive: 0xffd9a0, emissiveIntensity: 0 })
-  const headL = shaded(new THREE.MeshLambertMaterial({ color: 0xfff4c8, emissive: 0xfff0b0, emissiveIntensity: 0.6, flatShading: true }), night)
-  const tailL = shaded(new THREE.MeshLambertMaterial({ color: 0xe03a2e, emissive: 0x801010, emissiveIntensity: 0.5, flatShading: true }), night)
+  const [headL, tailL] = lamps(THREE, night)
   const sign = signTexture(THREE)
   const signMat = new THREE.MeshBasicMaterial({ map: sign, toneMapped: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })
   const decal = new THREE.MeshLambertMaterial({ map: wordmark(THREE), transparent: true, alphaTest: 0.3, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })

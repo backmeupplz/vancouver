@@ -13,7 +13,7 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
 2. `uv run --with osmium,shapely,numpy python3 tools/osm_split.py` sorts the OSM extract into 4 km buckets.
 3. `uv run --with numpy,scipy,pillow python3 tools/sea.py` floods the sea between the coastlines.
 4. `uv run --with numpy,scipy,rasterio python3 tools/heights.py` writes a coarse height grid of the whole map.
-5. `uv run --with numpy,scipy,pillow,shapely,mapbox-earcut,rasterio python3 tools/tiles.py [procs]` bakes the
+5. `uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/tiles.py [procs]` bakes the
    map tiles into `public/tiles/` (about 2 minutes on 9 cores, ~115 MB): 1 km detail tiles and 4 km overview tiles
    with terrain, ground polygons, roads with their node graph, buildings, trees (LiDAR canopy peaks, species from the
    city's inventory) and points like traffic signals. Buildings are OSM footprints shaped by the LiDAR surface inside

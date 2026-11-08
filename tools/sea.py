@@ -6,7 +6,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(__file__))
-from world import extent, xy
+from common import extent
 
 C = 4.0
 X0, Y0, X1, Y1 = extent()

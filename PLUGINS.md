@@ -27,7 +27,10 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
   and `city.on('frame', (dt, t) => …)` fires each frame.
 - **Stay fast.** The target is 60 fps on a mid laptop and a phone. Use one `InstancedMesh` (or one merged
   geometry) per kind of thing, not thousands of meshes. Heavy simulation goes in a Web Worker. Pause work when
-  `city.view.zoom` says your things are smaller than a pixel, and when `document.hidden`.
+  `city.view.zoom` says your things are smaller than a pixel, and when `document.hidden`. Nothing per frame should
+  allocate (no closures, arrays or `new Vector3` in a frame handler: reuse scratch objects), and a transparent
+  `side: THREE.DoubleSide` material is drawn in two passes, recompiled in between every frame, unless you give it
+  `forceSinglePass: true` (the same picture when it is flat or additive).
 - **Don't fight the style.** Flat-shaded Lambert materials, the ink outline pass and the shared sun do the look.
   Objects in `city.scene` get outlines and shadows; `city.overlay` is drawn last without them (particles,
   labels, glows).
@@ -65,6 +68,7 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.ui.addButton({ label, title, icon, onClick, panel })` | a toolbar button at the top right (a dock at the bottom on phones); with `panel: true`, `.panel` is a popover element you fill (a bottom sheet on phones); `.set({ icon, label })` relabels it |
 | `city.ui.sheet(el, close)`, `.closeAll()`, `.onCloseAll(fn)`, `.compact` | your own panel behaving like the toolbar's (close button, drag down to close on phones; only one open at a time); `compact` is true in the phone layout (`html.compact` in CSS) |
 | `city.ui.toast(text)` | a short message |
+| `city.ui.credit(text, href)` | a line in the credits strip at the bottom of the page (a link with `href`); `.set(text, href)`, `.remove()` |
 | `city.traffic` | the simulated cars, from the life plugin (see below); `undefined` without it |
 | `city.quality.tier` | graphics quality (`core/quality.js`): `name` `'high'` or `'low'` and its knobs, e.g. `life` and `weather` (the share of agents / particles to draw) and `detail`; `city.on('quality', tier)` fires when it changes (the viewer's About → Graphics, or Auto dropping to low on a slow GPU). Scale your counts by it |
 
@@ -129,6 +133,22 @@ restores it). Its ink lines are smoothed by FXAA below 1.5x pixel ratio (`view.s
 in `main.js` picks it, for quality tiers). Nothing changes for the map view when no plugin has a
 camera. The drive plugin is the example: it dives from the map into a chase camera behind a van (or a walker) and back.
 
+`core/play.js` has what such a game needs, shared by the drive and sail plugins: `mapPicker` (a click or tap on the
+map to the ground under it), `mapCameraPose`, `poseOf` and `dive` (the dive from the map into your chase camera and
+back), `streetSky` (the weather's sky gradient and fog at street level), `touchButtons`, `typing`, `buzz` and
+`MOVE_KEYS`, and one shared `AudioContext` (`audioContext()`, with `tone()` and `noise()`): hang your own gain off it.
+
+## Shared code
+
+Plugins may import from `core/` (relative paths, e.g. `'../../core/util.js'`):
+
+- `core/util.js` (no three.js, no DOM): `clamp`, `smooth`, `wrap`, `EASE`, `mulberry32` (seeded random),
+  `vancouver(ms)` (the wall clock in Vancouver), `getJSON`, `esc` (for `innerHTML`), `inPoly`, `circleBox`,
+  `sampleGrid` and `NOISE_GLSL` (hash and value noise for shaders).
+- `core/kit.js`: the low-poly model kit (see the player, below); `k.geometry(true)` with `kitMaterial(THREE)` for
+  plain vertex-coloured models.
+- `core/play.js`: for a plugin with its own camera (above).
+
 ## Shared between plugins
 
 - **Weather** (`plugins/weather`): `city.weather = { kind, intensity, isNight, hour, live, wind, atmosphere }`, re-emitted
@@ -151,7 +171,7 @@ camera. The drive plugin is the example: it dives from the map into a chase came
   need it), else `null`; `'player'` is emitted on enter, leave and car ⇄ foot. `city.models.van(colour)`,
   `city.models.person(colour)`, `city.models.bus()` (a 12 m city bus, its middle at the origin) and `city.models.boat(colour)` return the same low-poly models (forward −z, origin on the
   ground or the waterline; `update(dt, speed)` runs the walk cycle or bobs the boat), so other players look alike.
-  They are built with `plugins/life/kit.js`, a small kit for flat-shaded low-poly models (bevelled profiles, boxes,
+  They are built with `core/kit.js`, a small kit for flat-shaded low-poly models (bevelled profiles, boxes,
   rods, wheels merged into one geometry with vertex colours) and their shared look (`shaded(material)`: a little
   darker towards the ground, a cool rim light); the life plugin's street-level cars, people and signals use it too.
   The drive plugin publishes its van and walker with `setObstacle('player-van' | 'player-walker', …)` and collides

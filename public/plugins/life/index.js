@@ -8,7 +8,8 @@
 // they brake for, and bumps (a car hit stops a moment, a person knocked stumbles or falls over and gets up again).
 
 import { carModels, peopleModels, signalModels, DETAIL, ARM_Y, LENSES, POLE_LENSES, PED_LENSES } from './models.js'
-import { SHADE } from './kit.js'
+import { kit, SHADE } from '../../core/kit.js'
+import { vancouver } from '../../core/util.js'
 
 const CAR_ZOOM = 0.08, PEOPLE_ZOOM = 0.25
 const NEAR = [150, 70, 240], SIG_CAP = 200 // metres (cars, people, signals): under a perspective camera, the detailed models (models.js) within these, times the quality tier's `near`
@@ -33,24 +34,10 @@ export default function life(city) {
   // parts: cars 0 body, 1 fixed colour, 2 headlight, 3 taillight, 4/5 police beacons, 6 taxi sign, 7/8 left/right blinkers;
   // people 0 shirt, 1 trousers, 2 skin, 3 hair, 4 fixed, 5 bike frame (the shirt a shade darker), 6 umbrella (models.js).
   // swing: ±1 legs, ±2 arms (left/right)
-  function model(boxes) {
-    const P = [], C = [], A = [], S = [], col = new THREE.Color()
-    for (const [x0, x1, y0, y1, hw, c, part = c == null ? 0 : 1, taper = 1, swing = 0, zc = 0] of boxes) {
-      col.setHex(c ?? 0xffffff)
-      const xm = (x0 + x1) / 2, tx = ((x1 - x0) / 2) * taper, tz = hw * taper
-      const v = [[x0, y0, zc - hw], [x1, y0, zc - hw], [x1, y0, zc + hw], [x0, y0, zc + hw], [xm - tx, y1, zc - tz], [xm + tx, y1, zc - tz], [xm + tx, y1, zc + tz], [xm - tx, y1, zc + tz]]
-      for (const f of [[0, 1, 2, 3], [7, 6, 5, 4], [0, 4, 5, 1], [1, 5, 6, 2], [2, 6, 7, 3], [3, 7, 4, 0]]) {
-        // counter-clockwise seen from outside (else the near faces are culled and a car shows its insides)
-        for (const i of [f[0], f[1], f[2], f[0], f[2], f[3]]) { P.push(...v[i]); C.push(col.r, col.g, col.b); A.push(part); S.push(swing) }
-      }
-    }
-    const g = new THREE.BufferGeometry()
-    g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3))
-    g.setAttribute('aCol', new THREE.Float32BufferAttribute(C, 3))
-    g.setAttribute('aPart', new THREE.Float32BufferAttribute(A, 1))
-    g.setAttribute('aSwing', new THREE.Float32BufferAttribute(S, 1))
-    g.computeVertexNormals()
-    return g
+  function model(boxes, plain = false) { // (plain: vertex colours, for a plain material; core/kit.js)
+    const k = kit(THREE)
+    for (const [x0, x1, y0, y1, hw, c, part = c == null ? 0 : 1, taper = 1, swing = 0, zc = 0] of boxes) k.c(c, part, swing).box(x0, x1, y0, y1, zc - hw, zc + hw, taper)
+    return k.geometry(plain)
   }
   const TYRE = 0x1d1f22, GLASS = 0x2c3c4e, HEAD = 0xfff2d0, TAIL = 0xb3121a
   const AMBER = 0xd88a1c
@@ -229,11 +216,10 @@ export default function life(city) {
   const armGeo = new THREE.BoxGeometry(1, 0.16, 0.16).translate(0.5, 0, 0)
   const headGeo = new THREE.BoxGeometry(0.42, 1.15, 0.42)
   const lampGeo = new THREE.BoxGeometry(0.14, 0.28, 0.3)
-  const benchGeo = model([[-0.24, 0.2, 0.42, 0.5, 0.8, 0x9a6a3a], [-0.26, -0.2, 0.5, 0.95, 0.8, 0x9a6a3a], [-0.2, 0.15, 0, 0.42, 0.04, 0x3a3d42, 1, 1, 0, -0.65], [-0.2, 0.15, 0, 0.42, 0.04, 0x3a3d42, 1, 1, 0, 0.65]])
+  const benchGeo = model([[-0.24, 0.2, 0.42, 0.5, 0.8, 0x9a6a3a], [-0.26, -0.2, 0.5, 0.95, 0.8, 0x9a6a3a], [-0.2, 0.15, 0, 0.42, 0.04, 0x3a3d42, 1, 1, 0, -0.65], [-0.2, 0.15, 0, 0.42, 0.04, 0x3a3d42, 1, 1, 0, 0.65]], true)
   const greyMat = new THREE.MeshLambertMaterial({ color: 0x6b7178 }), housingMat = new THREE.MeshLambertMaterial({ color: 0xd9a51e })
   const lampMat = new THREE.MeshBasicMaterial({ color: 0xffffff })
   const benchMat = new THREE.MeshLambertMaterial({ vertexColors: true })
-  benchGeo.setAttribute('color', benchGeo.attributes.aCol)
   const glowTex = (() => {
     const c = document.createElement('canvas'); c.width = c.height = 64
     const x = c.getContext('2d'), g = x.createRadialGradient(32, 32, 0, 32, 32, 32)
@@ -556,7 +542,7 @@ export default function life(city) {
   }
 
   // ---------------------------------------------------------------- on / off, settings, time of day
-  const vanHour = () => { const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Vancouver', hourCycle: 'h23', hour: 'numeric', minute: 'numeric' }).formatToParts(new Date()).map((x) => [x.type, x.value])); return +p.hour + p.minute / 60 }
+  const vanHour = () => vancouver(Date.now()).sec / 3600
   let active = false, peopleOn = false, stopAnim = null, lastOpts = ''
   function sendOpts() {
     const k = city.quality?.tier.life ?? 1 // graphics quality: fewer cars and people on a weaker GPU

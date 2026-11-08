@@ -1,11 +1,11 @@
 # Step 1 of the map bake: one pass over the Lower Mainland OSM extract, sorting what the map draws into
-# buckets per 4096 m tile (data/feat/<i>_<j>.pkl). Coordinates are world metres (see world.py).
+# buckets per 4096 m tile (data/feat/<i>_<j>.pkl). Coordinates are world metres (see common.py).
 # Run: uv run --with osmium,shapely,numpy python3 tools/osm_split.py
 import os, pickle, sys, time
 from collections import defaultdict
 import osmium
 sys.path.insert(0, os.path.dirname(__file__))
-from world import xy, L1, extent
+from common import xy, L1, extent, SHOP_AMENITY
 
 SRC = 'data/lm.osm.pbf'
 KEEP_BUILDING = ('building', 'building:part', 'height', 'min_height', 'building:levels', 'building:min_level', 'roof:shape', 'roof:height',
@@ -13,8 +13,6 @@ KEEP_BUILDING = ('building', 'building:part', 'height', 'min_height', 'building:
                  'name', 'amenity', 'shop', 'tourism', 'layer', 'heritage', 'historic', 'start_date', 'building:architecture', 'office')
 # shops and the like as points: a building with one inside (or at its door) gets a storefront ground floor
 SHOPFRONT = ('shop', 'office', 'craft')
-SHOP_AMENITY = {'restaurant', 'cafe', 'fast_food', 'bar', 'pub', 'bank', 'pharmacy', 'ice_cream', 'clinic', 'dentist', 'doctors', 'post_office',
-                'library', 'cinema', 'theatre', 'nightclub', 'food_court', 'bureau_de_change', 'veterinary', 'marketplace', 'community_centre'}
 GROUND_KEYS = ('landuse', 'natural', 'leisure', 'amenity', 'aeroway', 'man_made', 'waterway', 'water', 'place', 'surface', 'golf', 'sport', 'highway', 'area:highway', 'railway', 'tourism', 'parking', 'bridge')
 LINE_KEYS = ('highway', 'railway', 'aeroway', 'waterway', 'natural', 'man_made', 'barrier', 'route', 'power')
 KEEP_LINE = ('turn:lanes', 'turn:lanes:forward', 'turn:lanes:backward', 'highway', 'railway', 'aeroway', 'waterway', 'natural', 'man_made', 'barrier', 'name', 'ref', 'lanes', 'lanes:forward', 'lanes:backward', 'oneway',

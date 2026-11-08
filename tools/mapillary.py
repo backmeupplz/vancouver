@@ -13,8 +13,8 @@ import json, math, os, sys, time, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
-from world import xy, latlon
-from roofs import srgb_lab, lab_srgb, lin, lin_lab
+from common import xy, save_rings, retry
+from roofs import srgb_lab, lab_srgb
 
 DIR = 'data/mapillary'
 OUT = f'{DIR}/walls.npz'
@@ -39,13 +39,7 @@ def api(path, cache):
     if os.path.exists(cache): return json.load(open(cache))
     tok = os.environ.get('MLY')
     if not tok: sys.exit('no $MLY: run through openclaw-vaultwarden-exec (see the top of this file)')
-    for attempt in range(5):
-        try:
-            d = json.load(urllib.request.urlopen(urllib.request.Request(API + path, headers={'Authorization': 'OAuth ' + tok}), timeout=60))
-            break
-        except Exception as e:
-            if attempt == 4: raise
-            time.sleep(3 * (attempt + 1))
+    d = retry(lambda: json.load(urllib.request.urlopen(urllib.request.Request(API + path, headers={'Authorization': 'OAuth ' + tok}), timeout=60)), 5, 3)
     os.makedirs(os.path.dirname(cache), exist_ok=True)
     json.dump(d, open(cache, 'w'))
     time.sleep(0.2)  # polite
@@ -74,12 +68,8 @@ def thumb(p):
     f = f'{DIR}/thumbs/{p["id"]}.jpg'
     if not os.path.exists(f):
         os.makedirs(os.path.dirname(f), exist_ok=True)
-        for attempt in range(3):
-            try:
-                data = urllib.request.urlopen(p['thumb_1024_url'], timeout=60).read(); break
-            except Exception:
-                if attempt == 2: return None
-                time.sleep(2)
+        try: data = retry(lambda: urllib.request.urlopen(p['thumb_1024_url'], timeout=60).read(), 3, 2)
+        except Exception: return None
         open(f, 'wb').write(data)
     return f
 
@@ -184,8 +174,6 @@ def per_photo(job):
 
 
 def bake(areas, procs=8):
-    import pickle, shapely
-    sys.path.insert(0, os.path.dirname(__file__))
     from facades import footprints
     t0 = time.time()
     fps = footprints()
@@ -216,10 +204,8 @@ def bake(areas, procs=8):
         if good.sum() < 2: continue
         c = np.median(labs[good], 0); c[0] = np.clip(c[0], *L_RANGE)
         rows.append((k, lab_srgb(c), [pid for (pid, _), g in zip(v, good) if g][:3], int(good.sum())))
-    rc = np.array([p for k, *_ in rows for p in rings[k]], np.float32)
-    ro = np.cumsum([0] + [len(rings[k]) for k, *_ in rows]).astype(np.int32)
     ids = np.array([(i + ['0', '0', '0'])[:3] for _, _, i, _ in rows], dtype='U20').reshape(-1, 3)
-    np.savez_compressed(OUT, rc=rc, ro=ro, rgb=np.array([c for _, c, _, _ in rows], np.uint8).reshape(-1, 3), images=ids,
+    save_rings(OUT, [rings[k] for k, *_ in rows], rgb=np.array([c for _, c, _, _ in rows], np.uint8).reshape(-1, 3), images=ids,
                         n=np.array([n for *_, n in rows], np.uint16))
     print(len(rows), 'wall colours ->', OUT, f'{time.time() - t0:.0f}s', flush=True)
 

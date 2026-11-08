@@ -9,6 +9,7 @@
 // ("Heron 44") until you choose a username, which is unique (look-alike letters count as the same) and can change
 // once a minute. Chosen names are unique, so they show without a tag; placeholders can repeat, so they keep a
 // short #tag from the UUID. Protocol: see server/src/world.rs. No third-party data; positions are what players send.
+import { wrap } from '../../core/util.js'
 
 const PALETTE = ['#f2a07e', '#7fc4e8', '#9ad77a', '#f5d06f', '#c59af0', '#f08fb0', '#6fd6c8', '#ff8c5a']
 const ANIMALS = ['Otter', 'Heron', 'Orca', 'Raven', 'Seal', 'Salmon', 'Eagle', 'Beaver', 'Cedar', 'Crab', 'Puffin', 'Fern', 'Moose', 'Loon', 'Marmot', 'Hummingbird']
@@ -30,7 +31,6 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem('live.' + k); return v == null ? d : JSON.parse(v) } catch { return d } },
   set(k, v) { try { if (v === undefined) localStorage.removeItem('live.' + k); else localStorage.setItem('live.' + k, JSON.stringify(v)) } catch {} },
 }
-const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a))
 const pick = (a) => a[Math.floor(Math.random() * a.length)]
 const fmt = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 const tagOf = (id) => `#${String(id || '').slice(0, 4)}`
@@ -40,7 +40,6 @@ export default function multiplayer(city) {
   const qs = new URLSearchParams(location.search)
   const dev = qs.get('live')
   const URL_WS = dev && /^wss?:\/\//.test(dev) ? dev : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/live/ws`
-  const compact = () => document.documentElement.classList.contains('compact')
 
   // ================================================================ who I am (the server says; the colour is kept here)
   const me = { slot: 0, id: null, name: '', chosen: false, colour: store.get('colour', '') || pick(PALETTE) }
@@ -290,12 +289,12 @@ export default function multiplayer(city) {
   }
 
   // ---------------------------------------------------------------- choosing a username, checked as you type
-  let checkT = 0, checked = null, saving = false // checked: { name, why } of the current input
+  let checkT = 0, saving = false
   function setCheck(text, kind) { checkEl.textContent = text; checkEl.className = `live-check ${kind || ''}` }
   function onNameInput() {
     clearTimeout(checkT)
     const v = nameIn.value.trim().replace(/\s+/g, ' ')
-    checked = null; save.disabled = true
+    save.disabled = true
     if (!v) return setCheck(me.chosen ? '' : '3 to 20 letters or digits; spaces and - _ . ’ are fine too.')
     if (me.chosen && v === me.name) return setCheck('That’s your name', 'ok')
     if ([...v].length < 3) return setCheck(WHY.short, 'bad')
@@ -308,7 +307,6 @@ export default function multiplayer(city) {
   function onCheck(m) {
     const v = nameIn.value.trim().replace(/\s+/g, ' ')
     if (m.name !== v) return // an answer for an older value
-    checked = m
     const ok = m.why === 'ok' || (m.why === 'yours' && v !== me.name)
     save.disabled = !ok
     setCheck(ok ? `✓ ${WHY.ok}` : WHY[m.why] || 'Not allowed', ok ? 'ok' : m.why === 'yours' ? 'ok' : 'bad')

@@ -15,7 +15,7 @@ export const TIERS = {
 }
 
 // a first guess from the GPU's name (WEBGL_debug_renderer_info; Firefox and Safari may only say "Apple GPU" etc.)
-export function guessTier(gl) {
+function guessTier(gl) {
   let name = ''
   try { name = gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info')?.UNMASKED_RENDERER_WEBGL ?? gl.RENDERER) || '' } catch {}
   const weak = /swiftshader|llvmpipe|software|microsoft basic|intel|mali-[gt][0-9]{1,2}\b|mali-4|adreno \(tm\) [1-5]\d\d|adreno [1-5]\d\d|powervr|videocore/i

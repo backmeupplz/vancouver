@@ -3,16 +3,12 @@
 // parcels on the roof rack) in one mesh, plus its lamps (userData.lights: the head- and taillight materials) and
 // four wheels (userData.wheels) that spin and steer, and the company's name on the sides.
 // Local frame: forward -z, up +y, origin on the ground between the axles. 4.3 m long, 1.8 m wide.
-import { kit, shaded } from '../life/kit.js'
+import { kit, shaded, under as arched, kitMaterial } from '../../core/kit.js'
+import { clamp } from '../../core/util.js'
 
 const CREAM = 0xf6ead2, DARK = 0x2f3338, GLASS = 0x3d5568, TRIM = 0x8a8f96, KRAFT = 0xc9955c, KRAFT2 = 0xb8834e, TAPE = 0xeedfc0
 const ARCHES = [[-1.35, 0.45], [1.35, 0.45]]
-const under = (x0, x1, yb) => { // along the bottom, over the wheel arches (forward +x while building)
-  const out = [x0, yb]
-  for (const [cx, r] of ARCHES) { out.push(cx - r, yb); for (let i = 0; i <= 6; i++) { const t = Math.PI - (Math.PI * i) / 6; out.push(cx + r * Math.cos(t), Math.max(yb, 0.36 + r * Math.sin(t))) } out.push(cx + r, yb) }
-  out.push(x1, yb)
-  return out
-}
+const under = (x0, x1, yb) => arched(x0, x1, yb, ARCHES, 0.36) // along the bottom, over the wheel arches (forward +x while building)
 const nar = (y) => 0.025 * (y - 0.32) + Math.max(0, y - 1.2) * 0.05 // tumblehome
 let livery = null // the name on the sides, drawn once (a canvas texture)
 function liveryTexture(THREE) {
@@ -28,9 +24,14 @@ function liveryTexture(THREE) {
   return livery
 }
 
+// head- and taillight materials (their own, so the drive plugin can turn them up at night)
+export const lamps = (THREE, night) => [
+  shaded(new THREE.MeshLambertMaterial({ color: 0xfff4c8, emissive: 0xfff0b0, emissiveIntensity: 0.6, flatShading: true }), night),
+  shaded(new THREE.MeshLambertMaterial({ color: 0xe03a2e, emissive: 0x801010, emissiveIntensity: 0.5, flatShading: true }), night),
+]
 export function makeVan(THREE, colour = 0xf2a07e) { // colour: the body (a hex number or CSS colour)
   const van = new THREE.Group(), night = { value: 0 }
-  const vc = () => shaded(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), night)
+  const vc = () => kitMaterial(THREE, night)
   const bodyHex = new THREE.Color(colour).getHex()
   const k = kit(THREE)
   // the body: windscreen and the round of the roof from one profile; glass where it slopes above the belt
@@ -60,14 +61,13 @@ export function makeVan(THREE, colour = 0xf2a07e) { // colour: the body (a hex n
     k.c(c).box(x0, x1, y0, y1, z0, z1).c(TAPE).box(x0 - 0.01, x1 + 0.01, y0, y1 + 0.01, cz - 0.05, cz + 0.05)
     k.move(a, -cx, 0, -cz).rot(a, 'y', r).move(a, cx, 0, cz)
   }
-  const add = (g, m) => { g.rotateY(Math.PI / 2); g.deleteAttribute('aPart'); g.deleteAttribute('aSwing'); g.setAttribute('color', g.attributes.aCol); g.deleteAttribute('aCol'); const o = new THREE.Mesh(g, m); van.add(o); return o }
-  add(k.geometry(), vc())
+  const add = (g, m) => { g.rotateY(Math.PI / 2); const o = new THREE.Mesh(g, m); van.add(o); return o }
+  add(k.geometry(true), vc())
   // lamps: headlights and tail lights, their own materials so the drive plugin can turn them up at night
-  const headL = shaded(new THREE.MeshLambertMaterial({ color: 0xfff4c8, emissive: 0xfff0b0, emissiveIntensity: 0.6, flatShading: true }), night)
-  const tailL = shaded(new THREE.MeshLambertMaterial({ color: 0xe03a2e, emissive: 0x801010, emissiveIntensity: 0.5, flatShading: true }), night)
+  const [headL, tailL] = lamps(THREE, night)
   const hl = kit(THREE), tl = kit(THREE)
   for (const s of [-1, 1]) { hl.c(0xffffff).box(2.08, 2.18, 0.86, 1.0, s * 0.42, s * 0.8, 1, 0.92); tl.c(0xffffff).box(-2.19, -2.13, 0.9, 1.3, s * 0.72, s * 0.87) }
-  add(hl.geometry(), headL); add(tl.geometry(), tailL)
+  add(hl.geometry(true), headL); add(tl.geometry(true), tailL)
   van.userData.lights = [headL, tailL]
   // the name on both sides of the cargo box
   const decal = new THREE.MeshLambertMaterial({ map: liveryTexture(THREE), transparent: true, alphaTest: 0.3, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })
@@ -81,7 +81,7 @@ export function makeVan(THREE, colour = 0xf2a07e) { // colour: the body (a hex n
   for (const [x, z] of [[-0.82, -1.35], [0.82, -1.35], [-0.82, 1.35], [0.82, 1.35]]) {
     const w = kit(THREE), o = Math.sign(x)
     w.c(0x2b2e33).wheel(0, 0, 0, 0.36, 0.24, 12, 'x').c(0xd8d8d2).wheel(o * 0.125, 0, 0, 0.21, 0.02, 8, 'x').c(0x6b7078).wheel(o * 0.14, 0, 0, 0.07, 0.02, 6, 'x')
-    const g = w.geometry(); g.deleteAttribute('aPart'); g.deleteAttribute('aSwing'); g.setAttribute('color', g.attributes.aCol); g.deleteAttribute('aCol')
+    const g = w.geometry(true)
     const steer = new THREE.Group(); steer.position.set(x, 0.36, z)
     const spin = new THREE.Group()
     spin.add(new THREE.Mesh(g, vc()))
@@ -120,7 +120,6 @@ export const BUS = {
 }
 export const ARTIC = { ...BUS, push: 2.3, wb: 5.8, hl: 5.6, length: 18.3, pivot: 2.6, circles: [[4.4, 2.2, 0, -2.2, -4.4], 1.35],
   joint: 5.85, trail: 4.4, rear: [3.7, 3.45, [2.2, 0, -2.2]] } // the joint behind the middle, the rear axle behind it; the rear box: its middle behind the joint, half length, circles
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
 const G = 9.8
 export function newVan(V = VAN) {
   return { V, speed: 0, lat: 0, yaw: 0, steer: 0, kick: 0, yawRate: 0, gear: 1, rpm: V.idle, thr: 0, brk: 0, shiftT: 0, revT: 0, ax: 0,

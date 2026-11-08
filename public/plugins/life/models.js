@@ -2,22 +2,10 @@
 // camera (the drive plugin's chase view): cars with bevelled bodies, wheel arches, windows and wheels, people with
 // heads, hands and an umbrella in the rain, and Vancouver-style traffic signals. Low-poly on purpose (a few hundred
 // triangles a car), all flat-shaded through the same instanced shaders as the boxes (see index.js for the parts).
-import { kit } from './kit.js'
+import { kit, under } from '../../core/kit.js'
 
 const GLASS = 0x2b3a4a, DARK = 0x1c1e21, TYRE = 0x1d1f22, HUB = 0xb4b9bf, TRIM = 0x2c2f33, PLATE = 0xeeeee6
 const HEAD = 0xfff2d0, TAIL = 0xb3121a, AMBER = 0xd88a1c
-
-// left to right along a body's bottom at yb, up and over each wheel arch ([centre x, radius]) around the axle at cy
-function under(x0, x1, yb, arches, cy, seg = 6) {
-  const out = [x0, yb]
-  for (const [cx, r] of arches) {
-    out.push(cx - r, yb)
-    for (let i = 0; i <= seg; i++) { const t = Math.PI - (Math.PI * i) / seg; out.push(cx + r * Math.cos(t), Math.max(yb, cy + r * Math.sin(t))) }
-    out.push(cx + r, yb)
-  }
-  out.push(x1, yb)
-  return out
-}
 
 // a car body: one bevelled side profile (forward +x) whose sloping faces above the belt line are glass, the faces
 // under it and inside the arches dark; side windows as thin panels on the leaning sides; wheels with hubs; lamps
@@ -125,7 +113,6 @@ export function carModels(THREE) {
 }
 // which detailed model a car of a kind (sedan, suv, van, truck, taxi, police) with this seed is drawn as
 export const DETAIL = (kind, seed) => (kind === 0 ? (seed < 0.62 ? 0 : 1) : kind === 1 ? (seed < 0.72 ? 2 : 3) : kind + 2)
-export const DETAIL_N = 8
 
 // People, 1.75 m before the shader's scale, facing +x: hips at 0.86 and shoulders at 1.38 (the pivots the shader
 // swings the legs and arms about: swing ±1 legs, ±2 arms). Parts: 0 shirt, 1 trousers, 2 skin, 3 hair, 4 fixed,
@@ -203,8 +190,7 @@ export function signalModels(THREE) {
   const head = kit(THREE)
   head.c(SIG_POLE).box(-0.03, 0.03, -0.05, 0.08, -0.03, 0.03)
   signalHead(head, 0, -0.05, 0, true)
-  const g = (k) => { const geo = k.geometry(); geo.setAttribute('color', geo.attributes.aCol); return geo }
-  return { pole: g(pole), arm: g(arm), head: g(head) }
+  return { pole: pole.geometry(true), arm: arm.geometry(true), head: head.geometry(true) }
 }
 // lit lenses: red, amber, green from the top, 0.14 in front of a head's centre line; [x, y, z] in its frame
 export const LENSES = [0.18, 0.52, 0.86].map((c) => [0, -0.05 - c, -0.14])

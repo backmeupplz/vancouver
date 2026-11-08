@@ -13,9 +13,11 @@ const COURSES = [ // marks in order (lat, lon); a loop ends back at the first
 ]
 const MARK_R = 28 // metres: rounding a mark
 const KEY = 'sail.goals'
+import { kit, kitMaterial } from '../../core/kit.js'
+
 export const fmtTime = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`
 
-export function makeGoals(THREE, city, { kit, shaded, chime, popup }) {
+export function makeGoals(THREE, city, { chime, popup }) {
   let saved = { found: [], best: {} }
   try { Object.assign(saved, JSON.parse(localStorage.getItem(KEY)) || {}) } catch {}
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(saved)) } catch {} }
@@ -32,9 +34,9 @@ export function makeGoals(THREE, city, { kit, shaded, chime, popup }) {
     k.c(0xfbf6ea).box(-0.57, 0.57, 0.35, 0.6, -0.57, 0.57)
     k.c(0x3a3f45).rod([0, 0.9, 0], [0, 2.9, 0], 0.05, 0.05)
     k.c(0xf6d23c).box(0, 0.9, 2.2, 2.85, -0.03, 0.03)
-    const g = k.geometry(); g.setAttribute('color', g.attributes.aCol); return g
+    return k.geometry(true)
   })()
-  const buoyMat = shaded(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), undefined, false)
+  const buoyMat = kitMaterial(THREE, undefined, false)
   const buoys = Array.from({ length: 6 }, () => { const m = new THREE.Mesh(buoyGeo, buoyMat); m.visible = false; group.add(m); return m })
   // the beacon: a tall soft column of light over the next target, and a ring on the water
   const beaconMat = new THREE.ShaderMaterial({
@@ -43,7 +45,7 @@ export function makeGoals(THREE, city, { kit, shaded, chime, popup }) {
     fragmentShader: `uniform vec3 uCol; uniform float uT; varying vec2 vUv;
       void main() { float a = (1.0 - vUv.y) * (0.55 + 0.45 * sin(vUv.y * 18.0 - uT * 3.0) * 0.3) * (0.5 + 0.5 * sin(vUv.x * 6.2832 * 2.0) * 0.2);
         gl_FragColor = vec4(uCol, a * 0.55); }`,
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, forceSinglePass: true,
   })
   const beacon = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.2, 90, 16, 1, true).translate(0, 45, 0), beaconMat)
   beacon.visible = false; beacon.frustumCulled = false; fx.add(beacon)
@@ -55,13 +57,13 @@ export function makeGoals(THREE, city, { kit, shaded, chime, popup }) {
     k.c(0x1c2026).prism([-0.6, 0.45, 0.25, 2.2, 0.55, 2.15, 0.5, 0.45], -0.07, 0.07) // the fin
     k.c(0xf4f2ee).box(-1.6, -1.0, 0.1, 0.32, -0.5, 0.5, 0.7) // the saddle patch
     k.rot(0, 'y', Math.PI / 2)
-    const g = k.geometry(); g.setAttribute('color', g.attributes.aCol)
+    const g = k.geometry(true)
     const ks = kit(THREE)
     ks.c(0x5a5650).prism([-0.25, -0.1, 0.25, -0.1, 0.3, 0.25, 0.1, 0.42, -0.2, 0.38, -0.3, 0.2], -0.22, 0.22, { bevel: 0.06 })
     ks.c(0x1e1c1a).box(0.12, 0.16, 0.25, 0.31, -0.12, 0.12)
     ks.rot(0, 'y', Math.PI / 2)
-    const gs = ks.geometry(); gs.setAttribute('color', gs.attributes.aCol)
-    const mat = shaded(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), undefined, false)
+    const gs = ks.geometry(true)
+    const mat = kitMaterial(THREE, undefined, false)
     const orcas = [new THREE.Mesh(g, mat), new THREE.Mesh(g, mat)], seal = new THREE.Mesh(gs, mat)
     for (const m of [...orcas, seal]) { m.visible = false; group.add(m) }
     return { orcas, seal, kind: null, t: 0, x: 0, z: 0, h: 0, next: 40 + Math.random() * 40, seen: { orca: false, seal: false } }

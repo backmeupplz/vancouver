@@ -7,21 +7,19 @@
 #  steep    deck stretches steeper than 12% (paths 25%, stairs any)
 #  buried   deck stretches the ground rises through (more than 1 m above the deck top)
 #  tunnel   tunnels (tunnel=*, covered=yes, layer < 0 under something) drawn on the surface
-# Run: uv run --with numpy,scipy,pillow,shapely,mapbox-earcut,rasterio python3 tools/audit_elev.py <tiles dir> [procs] [i_j ...]
+# Run: uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/audit_elev.py <tiles dir> [procs] [i_j ...]
 # Writes <tiles dir>/audit.json (every finding, worst first) and prints counts and the worst of each kind with a view
 # hash for the site (#X,Y,zoom; main.js setView: X = E*6 + 23551.5, Y = 9727.5 - (N*0.5 + h*0.866)*6).
-import gzip, json, math, os, pickle, struct, sys
+import gzip, json, os, struct, sys
 from multiprocessing import Pool
 import numpy as np
 import shapely
 from shapely.geometry import LineString, Polygon
 from shapely.strtree import STRtree
 sys.path.insert(0, os.path.dirname(__file__))
-from world import latlon, L0, L1
-from tiles import KINDS, line_kind, hnum, hr_lookup, densify, all_tiles
+from common import latlon, L0, KINDS, line_kind, hnum, hr_lookup, densify, all_tiles, tile_args, load_feat
 
 DIR = sys.argv[1] if len(sys.argv) > 1 else 'public/tiles'
-DRIVE_K = {KINDS.index(k) for k in ('motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living')}
 TUNNEL = ('yes', 'building_passage', 'culvert')
 
 
@@ -110,8 +108,7 @@ def audit(ij):
     own = [(k, T) for k, T in tiles.items() if 4 * i <= k[0] < 4 * i + 4 and 4 * j <= k[1] < 4 * j + 4]
     if not own: return []
     G = Ground(tiles)
-    fp = f'data/feat/{i}_{j}.pkl'
-    feat = pickle.load(open(fp, 'rb')) if os.path.exists(fp) else {}
+    feat = load_feat(i, j)
     ways = [w for w in feat.get('lines', []) if line_kind(w[3])]
     # stations, parkades and covered bridges are built around their tracks and ramps: a deck inside them is real
     held = [Polygon(o) for _, prs, t in feat.get('buildings', []) for o, _ in prs if len(o) >= 4 and (
@@ -285,7 +282,7 @@ def audit(ij):
 
 if __name__ == '__main__':
     procs = int(sys.argv[2]) if len(sys.argv) > 2 else 8
-    want = [tuple(map(int, a.split('_'))) for a in sys.argv[3:]] or all_tiles()
+    want = tile_args(sys.argv[3:]) or all_tiles()
     with Pool(procs) as p:
         found = [f for r in p.imap_unordered(audit, want) for f in r]
     uniq = {}

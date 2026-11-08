@@ -1,4 +1,5 @@
-// A small kit for building flat-shaded low-poly models in code: boxes, extruded side profiles with bevelled edges,
+// A small kit for building flat-shaded low-poly models in code (the life plugin's cars and people, the drive
+// plugin's van, bus, walker and street furniture, the sail plugin's boat and buoys): boxes, extruded side profiles with bevelled edges,
 // cylinders, all merged into one non-indexed geometry with a colour, a part and a swing per vertex (see life's
 // car and people shaders; the drive plugin's van uses the colour as vertex colours). Each shape is added in the
 // current state (k.c(colour, part, swing)) and can be moved, turned or scaled afterwards (k.at() marks the start).
@@ -80,17 +81,31 @@ export function kit(THREE) {
       k.cyl(r0, r1, L, seg, 1)
       return k.xf(s, new THREE.Matrix4().compose(new THREE.Vector3(...a), new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.normalize()), new THREE.Vector3(1, 1, 1)))
     },
-    geometry() {
+    // plain: the colours as vertex colours (`color`, for a vertexColors material like kitMaterial), without the
+    // life shader's aCol, aPart and aSwing
+    geometry(plain = false) {
       const g = new THREE.BufferGeometry()
       g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3))
-      g.setAttribute('aCol', new THREE.Float32BufferAttribute(C, 3))
-      g.setAttribute('aPart', new THREE.Float32BufferAttribute(A, 1))
-      g.setAttribute('aSwing', new THREE.Float32BufferAttribute(S, 1))
+      g.setAttribute(plain ? 'color' : 'aCol', new THREE.Float32BufferAttribute(C, 3))
+      if (!plain) { g.setAttribute('aPart', new THREE.Float32BufferAttribute(A, 1)); g.setAttribute('aSwing', new THREE.Float32BufferAttribute(S, 1)) }
       g.computeVertexNormals()
       return g
     },
   }
   return k
+}
+
+// a side profile's bottom edge for prism(), left to right at yb, up and over each wheel arch ([centre x, radius])
+// around the axle at height cy
+export function under(x0, x1, yb, arches, cy, seg = 6) {
+  const out = [x0, yb]
+  for (const [cx, r] of arches) {
+    out.push(cx - r, yb)
+    for (let i = 0; i <= seg; i++) { const t = Math.PI - (Math.PI * i) / seg; out.push(cx + r * Math.cos(t), Math.max(yb, cy + r * Math.sin(t))) }
+    out.push(cx + r, yb)
+  }
+  out.push(x1, yb)
+  return out
 }
 
 // The shared look of the low-poly models: a little darker towards the ground (vH: the model's own height; they
@@ -113,3 +128,5 @@ export function shaded(m, night = { value: 0 }, ao = true) {
   m.customProgramCacheKey = () => (ao ? 'shaded' : 'shaded-flat')
   return m
 }
+// the material for a kit's plain geometry (geometry(true)): its vertex colours, flat-shaded, with SHADE
+export const kitMaterial = (THREE, night, ao) => shaded(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), night, ao)

@@ -4,7 +4,7 @@
 // plugin's models (its kit): cobra-head lamps on davit arms (lit at night), signs with their borders, one
 // instanced mesh per kind. update(list, n, night): list is [x, north, ground, kind, angle] * n (kinds below;
 // angle: the road's direction).
-import { kit, shaded } from '../life/kit.js'
+import { kit, kitMaterial } from '../../core/kit.js'
 
 export const LAMP = 1, STOP = 2, YIELD = 3, BUS = 4, BOLLARD = 5, BENCH = 6 // benches: the life plugin draws them
 const MAX = 700
@@ -13,7 +13,7 @@ const POLE = 0x7d838a, WHITE = 0xf3f0e8
 // each kind in its own frame: on the ground at the origin, a lamp's arm reaching over the road towards -z, a sign
 // facing +z (along the road)
 function models(THREE) {
-  const g = (build) => { const k = kit(THREE); build(k); const geo = k.geometry(); geo.setAttribute('color', geo.attributes.aCol); return geo }
+  const g = (build) => { const k = kit(THREE); build(k); return k.geometry(true) }
   const post = (k, h) => k.c(POLE).cyl(0.045, 0.04, h, 6, 1)
   const plate = (k, r, seg, y, z, turn) => { const s = k.at(); k.cyl(r, r, 0.025, seg, 3); k.rot(s, 'x', Math.PI / 2).rot(s, 'z', turn).move(s, 0, y, z) }
   return {
@@ -34,7 +34,7 @@ function models(THREE) {
 
 export function makeProps(THREE) {
   const group = new THREE.Group()
-  const mat = shaded(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }))
+  const mat = kitMaterial(THREE)
   const lampM = new THREE.MeshLambertMaterial({ color: 0xfff1c8, emissive: 0xffe2a0, emissiveIntensity: 0.3 })
   const geos = models(THREE)
   const meshes = {}
