@@ -11,12 +11,15 @@
 // person the player bumped into stumbling, or over (they get up again after a moment).
 
 const STEP = 1 / 30 // fixed simulation step, seconds
+const BUILD_MS = 10, BUILD_MIN = 4 // a new network is built in what is left of this many milliseconds a tick, at least that many
 const IDM = { a: 1.4, b: 2.2, T: 1.3, s0: 2.2 }
 // lane changes: about how many seconds of sideways motion (over at least `run` metres), MOBIL politeness,
 // threshold and keep-right bias (m/s²), how far before the stop line drivers get into the lane for their turn,
 // safe braking for a free and a needed change; MARGIN: how close to an obstacle's outline a path is blocked
 const LC = { T: 3, run: 20, p: 0.3, th: 0.3, bias: 0.2, zone: 120, bsafe: 3, bmust: 4.5 }
 const MARGIN = 1.5
+const SEEN = 250 // metres: no car appears or vanishes this close to the player (an obstacle)
+const AXLE = 0.6 // the rear axle trails the front bumper by this share of the car's length
 // by road kind: motorway, trunk, primary, secondary, tertiary, residential, service, living
 const V0 = [24, 19, 14, 13.5, 12.5, 10, 5, 4.2] // free speed, m/s
 const DENS = [22, 20, 40, 34, 24, 4, 0.8, 0.8] // cars per lane-km at the evening rush
@@ -37,6 +40,8 @@ let dirty = true, walkDirty = true, lastBuild = -1e9
 let net = null, walk = null
 let cars = [], peds = [], bikes = [], statics = []
 let obstacles = new Map(), blocked = [], nextId = 1, lcTotal = 0
+let job = null, budget = Infinity // the network being built (rebuild()), and when this tick's share of it ends
+const due = () => performance.now() > budget
 let stuck = 0, simT = 0, acc = 0, stamp = 0, carTarget = 0, pedTarget = 0, bikeTarget = 0, nextPid = 1
 const tmp = {}, tmp2 = {}
 
@@ -76,7 +81,8 @@ function poly(X, Y, H) {
   for (let i = 1; i < n; i++) cum[i] = cum[i - 1] + Math.hypot(X[i] - X[i - 1], Y[i] - Y[i - 1])
   return { x: X, y: Y, h: H, cum, len: cum[n - 1] }
 }
-// point, height and unit tangent at distance s along a polyline
+// point, height and unit tangent at distance s along a polyline (before its start: on along the first stretch, at
+// its height; the slope of a stretch a few centimetres long, carried metres back, lifted cars into the air)
 function at(p, s, o) {
   const c = p.cum, n = c.length
   let lo = 0, hi = n - 1
@@ -85,7 +91,7 @@ function at(p, s, o) {
   hi = lo + 1
   const d = c[hi] - c[lo], f = d > 1e-6 ? Math.min(1, (s - c[lo]) / d) : 0
   const dx = p.x[hi] - p.x[lo], dy = p.y[hi] - p.y[lo], l = Math.hypot(dx, dy) || 1
-  o.x = p.x[lo] + dx * f; o.y = p.y[lo] + dy * f; o.h = p.h[lo] + (p.h[hi] - p.h[lo]) * f; o.tx = dx / l; o.ty = dy / l
+  o.x = p.x[lo] + dx * f; o.y = p.y[lo] + dy * f; o.h = p.h[lo] + (p.h[hi] - p.h[lo]) * Math.max(0, f); o.tx = dx / l; o.ty = dy / l
   return o
 }
 function cut(p, s0, s1) { // the part between s0 and len - s1
@@ -149,10 +155,11 @@ function offsetLine(c, off, rev, lift) {
 
 // pieces of the loaded tiles within r of the area centre: detail tiles where loaded, overview tiles elsewhere,
 // each piece once (tiles assign a piece by its middle point, so a piece lives in exactly one tile per level)
-function gather(cx, cy, r, keep) {
+function* gather(cx, cy, r, keep) {
   const out = [], seen = new Set(), r2 = r * r
   const list = [...tiles.values()].sort((a, b) => a.level - b.level)
   for (const t of list) {
+    if (due()) yield
     if (Math.max(Math.abs(t.ox + t.size / 2 - cx), Math.abs(t.oy + t.size / 2 - cy)) > r + t.size / 2) continue
     for (const p of t.pieces) {
       if (!keep(p)) continue
@@ -186,8 +193,8 @@ function grid(cell) {
 }
 
 // ---------------------------------------------------------------- the road network
-function buildCars() {
-  const pieces = gather(area.x, area.y, area.r, (p) => p.drive && p.kind <= 7 && p.pts.length >= 4)
+function* buildCars() {
+  const pieces = yield* gather(area.x, area.y, area.r, (p) => p.drive && p.kind <= 7 && p.pts.length >= 4)
   const nodes = new Map()
   const node = (id, x, y) => {
     let n = nodes.get(id)
@@ -195,6 +202,7 @@ function buildCars() {
     return n
   }
   for (const p of pieces) {
+    if (due()) yield
     const c = centre(p), m = c.x.length - 1
     p.na = node(p.a, c.x[0], c.y[0]); p.nb = node(p.b, c.x[m], c.y[m])
     for (const n of [p.na, p.nb]) { n.deg++; n.best = Math.min(n.best, p.kind); n.half = Math.max(n.half, p.w / 2) }
@@ -204,6 +212,7 @@ function buildCars() {
   const cutAt = (n) => n.deg >= 3 ? Math.max(8.4, n.half + 1.2) : n.deg === 2 ? 2.5 : 0
   const lanes = []
   for (const p of pieces) {
+    if (due()) yield
     // lanes each way: OSM turn lanes (turns.f a→b, turns.b b→a, left to right) say how many, else half the total
     const c = centre(p), tl = [p.turns?.f?.length ? p.turns.f : null, p.turns?.b?.length ? p.turns.b : null]
     const lanes0 = Math.max(1, p.lanes || 1), half = Math.max(1, lanes0 >> 1)
@@ -236,6 +245,7 @@ function buildCars() {
   const jgrid = grid(30)
   for (const n of nodes.values()) if (n.deg >= 3) jgrid.add(n.x, n.y, n)
   for (const q of poisOf([2, 6], area.x, area.y, area.r)) {
+    if (due()) yield
     let best = null, bd = 15
     jgrid.near(q.x, q.y, (n) => { const d = Math.hypot(n.x - q.x, n.y - q.y); if (d < bd) { bd = d; best = n } })
     if (!best) continue
@@ -251,6 +261,7 @@ function buildCars() {
   }
   // connectors through every node
   for (const nd of nodes.values()) {
+    if (due()) yield
     if (nd.deg === 1) continue // a dead end or the edge of the area: cars leave the simulation here
     for (const L of nd.ins) {
       const hin = endHeading(L), opts = []
@@ -304,6 +315,7 @@ function buildCars() {
   }
   for (const { conns: C, best, big } of boxes.values()) {
     for (let i = 0; i < C.length; i++) for (let j = i + 1; j < C.length; j++) {
+      if (due()) yield
       const a = C[i], b = C[j]
       if (a.from === b.from || a.to === b.from || b.to === a.from) continue
       if (!(a.to === b.to || (big && crossAt(a, b) >= 0))) continue
@@ -313,9 +325,15 @@ function buildCars() {
       if (pb > pa || a.from.stop || a.from.giveWay) a.yields.push(b)
     }
   }
-  const ctls = signals(nodes, pieces)
+  const ctls = yield* signals(nodes, pieces)
   const entries = lanes.filter((L) => L.from.deg === 1 && L.len > 12)
-  return { nodes, lanes, entries, ctls, cws, cum: cumWeights(lanes, (L) => L.len * DENS[L.cls]), ecum: cumWeights(entries, (L) => DENS[L.cls] ** 2) }
+  const sgrid = grid(20) // lanes and junction paths by 20 m cell, for what is in the way (blockSegs())
+  for (const g of [...lanes, ...[...nodes.values()].flatMap((n) => n.conns)]) {
+    if (due()) yield
+    let last = null
+    for (let i = 0; i < g.x.length; i++) { const k = Math.floor(g.x[i] / 20) * 65536 + Math.floor(g.y[i] / 20); if (k !== last) sgrid.add(g.x[i], g.y[i], g); last = k }
+  }
+  return { nodes, lanes, entries, ctls, cws, sgrid, cum: cumWeights(lanes, (L) => L.len * DENS[L.cls]), ecum: cumWeights(entries, (L) => DENS[L.cls] ** 2) }
 }
 const prio = (c, best) => (c.type === 'S' ? 2 : c.type === 'R' ? 1 : 0) + (c.from.cls === best ? 3 : 0) - (c.ends ? 4 : 0)
 
@@ -368,7 +386,7 @@ function sample(list, cum) {
 // Junctions with a traffic_signals node within 25 m get a controller; nearby signalled junctions (both halves of
 // a divided road) share one. Two phases by approach axis (green, amber, all red), offsets along the main axis
 // so the avenues get a green wave, and people walk alongside the green.
-function signals(nodes, pieces) {
+function* signals(nodes, pieces) {
   const jg = grid(30)
   for (const n of nodes.values()) if (n.deg >= 2) jg.add(n.x, n.y, n)
   for (const q of poisOf([0], area.x, area.y, area.r)) {
@@ -383,6 +401,7 @@ function signals(nodes, pieces) {
   for (const n of parent.keys()) { const r = find(n); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(n) }
   const ctls = []
   for (const list of groups.values()) {
+    if (due()) yield
     let ref = null, best = 9, cx = 0, cy = 0
     for (const n of list) { cx += n.x / list.length; cy += n.y / list.length; for (const L of n.ins) if (L.cls < best) { best = L.cls; ref = endHeading(L) } }
     if (ref === null) continue
@@ -403,6 +422,7 @@ function signals(nodes, pieces) {
   // for the oncoming lights to change, rather than blocking everyone behind at the stop line
   // (hold: it stops short of the first oncoming path it crosses; IDM keeps s0 to a stop)
   for (const ctl of ctls) for (const n of ctl.nodes) for (const c of n.conns) {
+    if (due()) yield
     if (c.type !== 'L' || c.from.internal) continue
     let first = c.len * 0.6
     for (const o of c.conflicts) if (opposing(c, o)) { const s = o.to === c.to ? c.len : crossAt(c, o); if (s >= 0) first = Math.min(first, s) }
@@ -502,7 +522,7 @@ function spawnCar(entry) {
   if (!net) return
   if (entry) {
     const L = sample(net.entries, net.ecum)
-    if (!L || (L.cars.length && L.cars[0].s - L.cars[0].L < 30)) return // room to come in and brake
+    if (!L || (L.cars.length && L.cars[0].s - L.cars[0].L < 30) || seen(L.x[0], L.y[0])) return // room to come in and brake
     const car = newCar(L.cls)
     place(car, L, car.L + 0.5)
     car.v = L.v0 * 0.7
@@ -512,7 +532,7 @@ function spawnCar(entry) {
     const L = sample(net.lanes, net.cum)
     if (!L || L.len < 10 || L.block) continue
     const car = newCar(L.cls), s = car.L + Math.random() * (L.len - car.L)
-    if (L.cars.some((o) => Math.abs(o.s - s) < car.L + 6)) continue
+    if (L.cars.some((o) => Math.abs(o.s - s) < car.L + 6) || seen(at(L, s, tmp).x, tmp.y)) continue
     place(car, L, s)
     return
   }
@@ -639,13 +659,6 @@ function blockSegs() {
   for (const g of blocked) g.block = null
   blocked = []
   if (!net || !obstacles.size) return
-  if (!net.sgrid) { // lanes and junction paths by 20 m cell, built the first time something is in the way
-    net.sgrid = grid(20)
-    for (const g of [...net.lanes, ...[...net.nodes.values()].flatMap((n) => n.conns)]) {
-      let last = null
-      for (let i = 0; i < g.x.length; i++) { const k = Math.floor(g.x[i] / 20) * 65536 + Math.floor(g.y[i] / 20); if (k !== last) net.sgrid.add(g.x[i], g.y[i], g); last = k }
-    }
-  }
   for (const o of obstacles.values()) {
     const seen = new Set()
     net.sgrid.near(o.x, o.y, (g) => {
@@ -684,6 +697,11 @@ function blockAhead(g, s) { // [gap, speed] to the nearest obstacle on g not who
     if (b.s0 + d - s < gap) { gap = b.s0 + d - s; v = b.v }
   }
   return [gap, v]
+}
+// is (x, y) where the player would see a car appear or vanish? (no obstacles, no player: nowhere)
+function seen(x, y) {
+  for (const o of obstacles.values()) if ((o.x - x) ** 2 + (o.y - y) ** 2 < SEEN * SEEN) return true
+  return false
 }
 function inObstacle(x, y, h, m) {
   for (const o of obstacles.values()) {
@@ -771,7 +789,7 @@ function gap(car) {
   for (let i = 0; i < R.length; i++) {
     const nx = R[i]
     if (d > look) break
-    if (!nx) return [1e9, 0, false]
+    if (!nx) { const e = prev.x.length - 1; return seen(prev.x[e], prev.y[e]) ? [d - 0.6, 0, true] : [1e9, 0, false] } // the end of the road: off it out of sight, else park there
     if (nx.conn && !prev.conn) {
       // an obstacle in the junction or just past it: don't enter
       if (nx.block || (nx.to.block && blockAhead(nx.to, 0)[0] < car.L + 2)) return [d - 0.6, 0, true]
@@ -810,7 +828,7 @@ function stepCars(dt) {
     if (car.s > car.stopAt) { car.s = car.stopAt; car.v = 0 }
     car.wait = car.v < 0.3 ? car.wait + dt : 0
     car.stopT = car.v < 0.3 && car.seg.len - car.s < 3 ? car.stopT + dt : car.v > 2 ? 0 : car.stopT
-    if (car.wait > 50) { dropCar(i); stuck++; continue } // hopelessly stuck: clear it
+    if (car.wait > 50 && !seen(car.rx, car.ry)) { dropCar(i); stuck++; continue } // hopelessly stuck: clear it (out of sight)
     if (car.lc) { // sideways into the new lane as it drives on
       const lc = car.lc
       lc.t += (car.v * dt) / lc.run
@@ -836,7 +854,7 @@ function stepCars(dt) {
     const want = carTarget
     if (cars.length < want * 0.85) for (let k = 0; k < 40 && cars.length < want; k++) spawnCar(false)
     else if (cars.length < want) for (let k = 0; k < 3; k++) spawnCar(true)
-    else if (cars.length > want * 1.25) dropCar((Math.random() * cars.length) | 0)
+    else if (cars.length > want * 1.25) { const i = (Math.random() * cars.length) | 0; if (!seen(cars[i].rx, cars[i].ry)) dropCar(i) }
   }
 }
 
@@ -850,9 +868,9 @@ function sidewalk(p) {
 }
 const FOOT = new Set([8, 9, 11, 12, 13])
 const okSide = (w, s) => (s > 0 ? w.okL : w.okR) // may people walk on this side of w (+1 left of a→b)?
-function buildWalk() {
+function* buildWalk() {
   const r = area.vr + 250
-  let pieces = gather(area.vx, area.vy, r, (p) => p.pts.length >= 4 && (FOOT.has(p.kind) || p.kind === 10 || sidewalk(p) > 0))
+  let pieces = yield* gather(area.vx, area.vy, r, (p) => p.pts.length >= 4 && (FOOT.has(p.kind) || p.kind === 10 || sidewalk(p) > 0))
   // which sides of a street people walk: not the side facing the other half of a divided road (the median), nor
   // where the sidewalk is mapped as a footway of its own alongside (people walk that instead)
   const fg = grid(32)
@@ -863,10 +881,11 @@ function buildWalk() {
       for (let k = 0; k < n; k++) fg.add(c.x[i] + (dx * k) / n, c.y[i] + (dy * k) / n, [dx / l, dy / l, c.x[i] + (dx * k) / n, c.y[i] + (dy * k) / n, kind, p])
     }
   }
-  const streets = gather(area.vx, area.vy, r, (p) => p.drive && p.kind <= 7 && p.pts.length >= 4)
-  for (const p of pieces) if (p.kind === 9 || p.kind === 8) lineOf(p, 1)
-  for (const p of streets) if (p.oneway) lineOf(p, 0)
+  const streets = yield* gather(area.vx, area.vy, r, (p) => p.drive && p.kind <= 7 && p.pts.length >= 4)
+  for (const p of pieces) { if (due()) yield; if (p.kind === 9 || p.kind === 8) lineOf(p, 1) }
+  for (const p of streets) { if (due()) yield; if (p.oneway) lineOf(p, 0) }
   for (const p of pieces) {
+    if (due()) yield
     if (p._sides || !sidewalk(p)) continue
     const c = centre(p), hw = p.w / 2, hit = [0, 0]
     let tried = 0
@@ -895,6 +914,7 @@ function buildWalk() {
   // out to the kerb, and where a path crosses one that stretch is walked only while crossing
   const rg = grid(32)
   for (const p of streets) {
+    if (due()) yield
     const c = centre(p)
     for (let i = 0; i < c.x.length - 1; i++) {
       const dx = c.x[i + 1] - c.x[i], dy = c.y[i + 1] - c.y[i], l = Math.hypot(dx, dy) || 1, n = Math.ceil(l / 3)
@@ -902,6 +922,7 @@ function buildWalk() {
     }
   }
   for (const p of pieces) {
+    if (due()) yield
     const off = sidewalk(p), bike = p.kind === 10, c = off || bike ? centre(p) : kerbed(p, rg)
     const lift = off ? 0.12 + (c.deck ? 0.3 : 0) : 0.18 + (18 - p.kind) * 0.004 - 0.03 + (c.deck ? 0.35 : 0)
     const m = c.x.length >> 1, mx = c.x[m], my = c.y[m]
@@ -920,6 +941,7 @@ function buildWalk() {
   }
   // corners: between neighbouring sidewalk legs (counter-clockwise); footways join the corner they point into
   for (const n of nodes.values()) {
+    if (due()) yield
     const cn = net?.nodes.get(n.id)
     n.car = cn && cn.deg >= 2 ? cn : null
     n.dX = cn && cn.deg >= 3 ? 5.6 : 0
@@ -956,6 +978,7 @@ function buildWalk() {
   for (const q of poisOf([0, 1, 7, 8], area.vx, area.vy, r)) { const n = nodes.get(q.id); if (n) n.crossOK = true }
   for (const n of nodes.values()) if (!n.car) n.crossOK = false
   const foot = wps.filter((w) => !w.bike), cycl = wps.filter((w) => w.bike)
+  if (due()) yield
   // benches and bus stops, facing the nearest path or street
   const near = grid(25)
   for (const w of wps) for (let i = 0; i < w.c.x.length; i++) near.add(w.c.x[i], w.c.y[i], w)
@@ -1308,22 +1331,28 @@ function stepBikes(dt) {
 }
 
 // ---------------------------------------------------------------- the loop
-function rebuild() {
-  lastBuild = simT
+// The networks are built a few milliseconds a tick (the simulation goes on meanwhile on the old ones: built in one
+// go, a second or more downtown, every car and person stood still that long and then jumped), then swapped in
+function* rebuild() {
   const t0 = performance.now()
   if (dirty) {
-    const old = net
-    net = buildCars()
     dirty = false
-    // keep the cars whose lanes still exist
+    const old = net
+    net = yield* buildCars()
+    // keep the cars whose lanes still exist, where they are (a car in a junction on the same path through it)
     const byKey = new Map(net.lanes.map((L) => [L.key, L]))
+    const same = (g) => {
+      if (!g?.conn) return g && byKey.get(g.key)
+      const F = byKey.get(g.from.key), T = byKey.get(g.to.key)
+      return (F && T && F.outs.find((c) => c.to === T)) || null
+    }
     const keep = []
     for (const car of cars) {
-      const L = byKey.get((car.seg.conn ? car.seg.to : car.seg).key)
-      if (!L) continue
-      const s = car.seg.conn ? Math.min(L.len, car.L) : Math.min(car.s, L.len)
+      let seg = same(car.seg), s = Math.min(car.s, seg?.len ?? 0)
+      if (!seg && car.seg.conn && (seg = byKey.get(car.seg.to.key))) s = Math.min(seg.len, car.L) // that junction changed: just past it
+      if (!seg) continue
       const F = car.lc && !car.seg.conn && byKey.get(car.lc.from.key) // mid lane change: carry on
-      Object.assign(car, { seg: L, s, route: [], prev: null, committed: null, lc: F ? { ...car.lc, from: F } : null })
+      Object.assign(car, { seg, s, route: [], prev: same(car.prev), committed: null, lc: F ? { ...car.lc, from: F } : null })
       if (F && car.lc.ghost) F.ghosts.push(car)
       keep.push(car)
     }
@@ -1340,8 +1369,8 @@ function rebuild() {
     blockSegs()
   }
   if (walkDirty && opts.people) {
-    walk = buildWalk()
     walkDirty = false
+    walk = yield* buildWalk()
     // keep the people whose paths still exist, walking on from where they were
     const byKey = new Map([...walk.foot, ...walk.cycl].map((w) => [w.p.key, w]))
     const move = (p) => {
@@ -1358,6 +1387,7 @@ function rebuild() {
     peds = peds.filter(move); bikes = bikes.filter(move)
     makeStatics()
   }
+  if (due()) yield
   targets()
   postMessage({ type: 'net', ...signalHeads(), ms: performance.now() - t0 })
 }
@@ -1407,7 +1437,6 @@ function signalHeads() {
 
 function tick({ dt, buf }) {
   const t0 = performance.now()
-  if (area && (dirty || (walkDirty && opts.people)) && (!net || simT - lastBuild > 1.5)) rebuild()
   acc += Math.min(dt, 0.25)
   let n = 0
   while (acc >= STEP && n++ < 8) {
@@ -1416,6 +1445,12 @@ function tick({ dt, buf }) {
     if (opts.people && walk) { stepPeople(STEP); stepBikes(STEP) }
   }
   if (acc > STEP) acc = 0 // fell behind: drop time rather than spiral
+  if (!job && area && (dirty || (walkDirty && opts.people)) && (!net || simT - lastBuild > 1.5)) { lastBuild = simT; job = rebuild() }
+  if (job) { // (the first network in one go: there is nothing to show meanwhile)
+    budget = net ? Math.max(t0 + BUILD_MS, performance.now() + BUILD_MIN) : Infinity
+    if (job.next().done) job = null
+    budget = Infinity
+  }
   if (opts.people && walk && Math.floor(simT / 60) !== Math.floor((simT - n * STEP) / 60)) makeStatics() // benches change hands
   const msg = output(buf)
   msg.ms = performance.now() - t0
@@ -1439,17 +1474,19 @@ function output(buf) {
     const k = fill[car.kind]++, i = k * 8
     a[base + k * 2] = car.id; a[base + k * 2 + 1] = car.v
     const s = car.s + car.v * rem
-    // changing lanes: shifted right by lat (towards where it came from) and turned into the move a little
-    let lat = 0, yaw = 0
-    if (car.lc) {
-      const t = Math.min(1, car.lc.t + (car.v * rem) / car.lc.run)
-      lat = car.lc.d * (1 - ease(t)); yaw = Math.max(-0.6, Math.min(0.6, Math.atan((car.lc.d * 6 * t * (1 - t)) / car.lc.run)))
-    }
+    // the front bumper on its way (changing lanes: shifted right by lat, towards where it came from), and the rear
+    // axle trailing it on a tow bar (a tractrix): the body turns as a car does, through junctions, across lanes and
+    // over short pieces of road (placed on the way behind, it jumped where that ran back over two or three of them)
+    const lat = car.lc ? car.lc.d * (1 - ease(Math.min(1, car.lc.t + (car.v * rem) / car.lc.run))) : 0
     posOn(car, s, tmp); const fx = tmp.x + tmp.ty * lat, fy = tmp.y - tmp.tx * lat, fh = tmp.h
-    posOn(car, s - car.L, tmp); tmp.x += tmp.ty * lat; tmp.y -= tmp.tx * lat
-    const dx = fx - tmp.x, dy = fy - tmp.y, l = Math.hypot(dx, dy) || 1
-    a[i] = (fx + tmp.x) / 2; a[i + 1] = (fh + tmp.h) / 2; a[i + 2] = -(fy + tmp.y) / 2
-    a[i + 3] = Math.atan2(dy, dx) + yaw; a[i + 4] = Math.atan2(fh - tmp.h, l); a[i + 5] = car.color
+    const W = car.L * AXLE
+    let dx = fx - car.rx, dy = fy - car.ry, l = Math.hypot(dx, dy)
+    if (!(l > W * 0.5 && l < W * 1.5)) { posOn(car, s - W, tmp); dx = fx - tmp.x - tmp.ty * lat; dy = fy - tmp.y + tmp.tx * lat; l = Math.hypot(dx, dy) || 1 } // new here
+    dx /= l; dy /= l
+    car.rx = fx - dx * W; car.ry = fy - dy * W
+    posOn(car, s - car.L, tmp)
+    a[i] = fx - (dx * car.L) / 2; a[i + 1] = (fh + tmp.h) / 2; a[i + 2] = -(fy - (dy * car.L) / 2)
+    a[i + 3] = Math.atan2(dy, dx); a[i + 4] = Math.atan2(fh - tmp.h, car.L); a[i + 5] = car.color
     // brake lights, plus 2 × blinker (1 left, 2 right): changing lanes, or turning at the junction ahead
     let blink = car.lc ? (car.lc.d > 0 ? 1 : 2) : 0
     const c = car.seg.conn ? car.seg : car.route[0]

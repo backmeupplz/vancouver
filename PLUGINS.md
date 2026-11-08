@@ -205,14 +205,15 @@ the life plugin there is none. Positions are three.js world coordinates; `headin
 being `(sin(heading), 0, cos(heading))`.
 
 - `city.traffic.nearby(x, z, r)`: the cars within `r` metres, `[{ id, x, y, z, heading, length, width, speed }]`
-  (metres, m/s), from the latest frame. Cheap enough to call every frame; empty while traffic is hidden (zoomed
+  (metres, m/s), where they were last drawn. Cheap enough to call every frame; empty while traffic is hidden (zoomed
   out, switched off, tab hidden).
 - `city.traffic.setObstacle(id, { x, z, heading, length, width, speed, y })`: something the player drives or
   walks. Cars treat it as a car they must never drive into: they follow it in the lane it is in (every lane or
   junction path that passes within 1.5 m of its outline), pass it by changing lanes and don't enter a junction it
   blocks; people step around it. `y` (optional, its height) limits it to lanes at that level, so a van on a
   bridge deck leaves the street below alone. Call it as often as you like (it reaches the simulation at most 10
-  times a second); `setObstacle(id, null)` removes it.
+  times a second); `setObstacle(id, null)` removes it. Within 250 m of an obstacle no car appears or vanishes: cars
+  come and go out of sight (one reaching a dead end in sight waits there).
 - `city.traffic.bump(id)`: the player hit car `id`; it stops for a few seconds, then drives on.
 - `city.traffic.people(x, z, r, out = [])`: the people on foot within `r` metres (walking, waiting, on benches; not the
   cyclists), `[{ id, x, y, z, heading }]` (they face `(sin heading, 0, cos heading)`). Empty while people are hidden

@@ -2,8 +2,8 @@
 // The street graph, signals, crossings, stop signs, benches and bus stops come from the map tiles
 // (OpenStreetMap, © OpenStreetMap contributors, ODbL). The simulation runs in worker.js; this file streams the
 // nearby tiles to it, ticks it once per drawn frame and draws what it sends back: one instanced mesh per kind of
-// car, one for people and one for cyclists (positioned in the vertex shader straight from the worker's floats),
-// plus the signal poles and heads at signalled junctions. Nothing runs when zoomed out, switched off or hidden.
+// car, one for people and one for cyclists (positioned in the vertex shader straight from the worker's floats; the
+// cars moved on to each frame's time), plus the signal poles and heads at signalled junctions. Nothing runs when zoomed out, switched off or hidden.
 // It publishes city.traffic (see PLUGINS.md): where the cars, people and signal poles are, obstacles (a player's van)
 // they brake for, and bumps (a car hit stops a moment, a person knocked stumbles or falls over and gets up again).
 
@@ -444,32 +444,28 @@ export default function life(city) {
   if (location.search.includes('lifedebug')) window.lifeDebug = (x, y, r = 30) => new Promise((ok) => { debugCb = ok; worker.postMessage({ type: 'debug', x, y, r }) })
   let debugCb = null
   let busy = false, accDt = 0, spare = null, simT = 0, simAt = 0, stats = { cars: 0, people: 0 }
+  let elapsed = 0, sentT = 0 // the frames' dt summed (the ticks' time), and the clock when the tick in flight was sent
   worker.onmessage = ({ data: m }) => {
     if (m.type === 'frame') {
       busy = false; spare = m.buf
       if (!active) return
-      let off = 0
       // under a perspective camera the boxes within the near radii are hidden (in their shader, by uCam / uNear)
       // and those things are copied to the detailed models instead
       const C = city.view.camera, near = !!C.isPerspectiveCamera
       uni.uCam.value.copy(C.position); nearCars.value = near ? NEAR_CARS ** 2 : 0; nearPeople.value = near ? NEAR_PEOPLE ** 2 : 0
-      for (const o of allNear) o.n = 0
-      for (let k = 0; k < KINDS; k++) {
-        const n = Math.min(m.counts[k], carMeshes[k].cap)
-        put(carMeshes[k], m.buf, off, n); pools[k].geometry.instanceCount = n
-        if (near) pickNear(m.buf, off, n, NEAR_CARS, pickCar[k])
-        off += m.counts[k]
-      }
+      // the cars: positions and (id, speed), drawn every frame from here (carsAt()); the time of the tick it answers
+      if (snap.raw.length < m.cars * 8) { snap.raw = new Float32Array(m.cars * 12); snap.pos = new Float32Array(m.cars * 12); snap.aux = new Float32Array(m.cars * 3) }
+      snap.raw.set(m.buf.subarray(0, m.cars * 8)); snap.aux.set(m.buf.subarray(m.base, m.base + m.cars * 2))
+      snap.n = m.cars; snap.counts = m.counts; snap.t = sentT
+      carsAt(elapsed) // (now: city.traffic.nearby pairs these ids with positions)
+      let off = m.cars
+      for (const o of peopleNear) o.n = 0
       const np = Math.min(m.nPeople, people.cap)
       put(people, m.buf, off, np)
       if (near) pickNear(m.buf, off, np, NEAR_PEOPLE, pickPerson)
       off += m.nPeople
-      for (const o of allNear) show(o, o.n)
+      for (const o of peopleNear) show(o, o.n)
       put(bikes, m.buf, off, Math.min(m.nBikes, bikes.cap))
-      // the cars for city.traffic.nearby: positions and (id, speed), kept until the next frame
-      if (snap.pos.length < m.cars * 8) { snap.pos = new Float32Array(m.cars * 12); snap.aux = new Float32Array(m.cars * 3) }
-      snap.pos.set(m.buf.subarray(0, m.cars * 8)); snap.aux.set(m.buf.subarray(m.base, m.base + m.cars * 2))
-      snap.n = m.cars; snap.counts = m.counts
       // the people for city.traffic.people, while a game asks for them: x, y, z, yaw and id
       snap.np = 0
       if (performance.now() - snap.asked < 2000) {
@@ -492,6 +488,30 @@ export default function life(city) {
       city.requestRender()
     }
   }
+  // the cars at clock time t (the dt the ticks were sent with, summed): the latest snapshot moved on along each
+  // car's heading at its speed for the time since the frame that asked for it. The worker answers a frame or so
+  // later, sometimes two (a long tick, a busy main thread); drawn as they came, the cars lagged the camera by a
+  // frame and stood still for one now and then, then jumped two (a stutter beside a moving van). Over a frame or two
+  // a car's curve and braking are millimetres; never more than half a second on.
+  function carsAt(t) {
+    const n = snap.n, R = snap.raw, P = snap.pos, A = snap.aux, e = Math.min(0.5, Math.max(0, t - snap.t))
+    P.set(R.subarray(0, n * 8))
+    if (e > 0) for (let i = 0, s = 0; i < n; i++, s += 8) {
+      const d = A[i * 2 + 1] * e
+      if (!d) continue
+      const h = d * Math.cos(R[s + 4])
+      P[s] += Math.cos(R[s + 3]) * h; P[s + 1] += Math.sin(R[s + 4]) * d; P[s + 2] -= Math.sin(R[s + 3]) * h
+    }
+    const near = nearCars.value > 0
+    for (const o of carsNear) o.n = 0
+    for (let k = 0, off = 0; k < KINDS; k++) {
+      const c = snap.counts[k] || 0, m = Math.min(c, carMeshes[k].cap)
+      put(carMeshes[k], P, off, m); pools[k].geometry.instanceCount = m
+      if (near) pickNear(P, off, m, NEAR_CARS, pickCar[k])
+      off += c
+    }
+    for (const o of carsNear) show(o, o.n)
+  }
   function put(o, buf, off, n) { o.ib.array.set(buf.subarray(off * 8, (off + n) * 8)); show(o, n) }
   function show(o, n) { o.ib.clearUpdateRanges(); o.ib.addUpdateRange(0, n * 8); o.ib.needsUpdate = true; o.m.geometry.instanceCount = n }
   // the n things in buf at off within r of the camera (the same test as the boxes' shader) into the detailed model
@@ -507,7 +527,7 @@ export default function life(city) {
   }
 
   // ---------------------------------------------------------------- city.traffic, for games
-  const snap = { pos: new Float32Array(0), aux: new Float32Array(0), n: 0, counts: [], ppos: new Float32Array(0), np: 0, asked: 0 }
+  const snap = { raw: new Float32Array(0), pos: new Float32Array(0), aux: new Float32Array(0), n: 0, counts: [], t: 0, ppos: new Float32Array(0), np: 0, asked: 0 }
   const pools2 = { people: [], poles: [] } // reused result objects, so a game can ask every frame without garbage
   const rec = (k, i) => pools2[k][i] || (pools2[k][i] = { id: 0, x: 0, y: 0, z: 0, heading: 0, r: 0 })
   const obstacles = new Map()
@@ -656,9 +676,10 @@ export default function life(city) {
     names.words?.night(city.light.night)
     for (const p of pools) p.visible = city.light.night > 0.08
     if (sig.glow) { glowMat.size = Math.max(3, 2.6 * 6 * city.view.zoom) * city.renderer.getPixelRatio(); glowMat.opacity = glowNear.opacity = 0.45 + 0.55 * city.light.night }
-    accDt += dt
+    accDt += dt; elapsed += dt
+    if (snap.n) carsAt(elapsed)
     if (!busy) {
-      busy = true
+      busy = true; sentT = elapsed
       worker.postMessage({ type: 'tick', dt: accDt, buf: spare }, spare ? [spare.buffer] : [])
       spare = null; accDt = 0
     }
