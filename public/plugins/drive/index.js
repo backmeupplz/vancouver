@@ -533,13 +533,17 @@ export default function drive(city) {
       .compact .dlv-co { left: var(--sl); top: var(--st); padding: 5px 11px; min-height: 44px; box-sizing: border-box; }
       .compact .dlv-co .name { font-size: 10.5px } .compact .dlv-co .stats { gap: 10px; margin-top: 1px }
       .compact .dlv-co .credit { display: none }
-      .compact .dlv-read { left: var(--sl); top: var(--st); height: 44px; display: flex; align-items: center; gap: 4px; box-sizing: border-box; padding: 0 12px; font-size: 13px; max-width: calc(100% - var(--sl) - var(--sr) - 146px); }
+      .compact .dlv-read { left: var(--sl); top: var(--st); height: 44px; display: flex; align-items: center; gap: 4px; box-sizing: border-box; padding: 0 12px; font-size: 13px; max-width: calc(100% - var(--sl) - var(--sr) - 94px); }
+      .compact .dlv-read .st { min-width: 0; overflow: hidden; text-overflow: ellipsis }
+      .compact .dlv-co { max-width: calc(100% - var(--sl) - var(--sr) - 94px); }
       .compact .dlv-btns { right: var(--sr); top: var(--st); }
       .compact .dlv-btns .opt, .dlv-btns .short, .compact .dlv-btns .long { display: none }
       .compact .dlv-btns .short { display: inline }
       .compact .dlv-btns [data-exit] { width: 78px; height: 44px; padding: 0; border-radius: 12px; }
-      .compact .dlv-btns [data-assist] { height: 44px; padding: 0 10px; border-radius: 12px; }
-      .compact.dlv-assist .dlv-read { max-width: calc(100% - var(--sl) - var(--sr) - 230px); }
+      .compact .dlv-btns [data-assist] { width: 78px; height: 44px; padding: 0; border-radius: 12px; }
+      /* the top-left card gets the row but for the buttons: in portrait Lane goes under Map (the cards below make room) */
+      @media (orientation: portrait) { .compact .dlv-btns { flex-direction: column } .compact.dlv-assist .dlv-job { right: calc(var(--sr) + 86px) } }
+      @media (orientation: landscape) { .compact.dlv-assist .dlv-read, .compact.dlv-assist .dlv-co { max-width: calc(100% - var(--sl) - var(--sr) - 176px); } }
       .compact .dlv-job { top: calc(var(--st) + 52px); left: var(--sl); right: var(--sr); transform: none; width: auto; max-width: 460px; padding: 8px 12px 8px 8px; gap: 10px; }
       .compact .dlv-job > div:last-child { min-width: 0; flex: 1 }
       .compact .dlv-job .where, .compact .dlv-job .sub, .compact .dlv-job .what { max-width: none }
@@ -1790,7 +1794,7 @@ export default function drive(city) {
     ui.stam.hidden = !hike; ui.aboard.hidden = !deliver
     if (!deliver && !hike) {
       const sp = Math.abs(P.speed) * 3.6, gear = onFoot ? '' : ` · ${car.gear < 0 ? 'R' : `D${car.gear}`}`
-      ui.read.innerHTML = `<b>${Math.round(sp)}</b> km/h${gear}${name ? ` · ${esc(name)}` : ''}`
+      ui.read.innerHTML = `<b>${Math.round(sp)}</b> km/h${gear}${name ? ` <span class="st">· ${esc(name)}</span>` : ''}`
       return
     }
     ui.job.hidden = false

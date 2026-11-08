@@ -225,6 +225,7 @@ export default function sail(city) {
     .sl-touch .l { left: 16px } .sl-touch .r { left: 100px } .sl-touch .trim { right: 16px; height: 100px; border-radius: 22px } .sl-touch .ease { right: 100px }
     body.sail-on.sl-touchy .sl-touch { display: block }
     body.sail-on.sl-touchy .sl-help { bottom: 150px; white-space: normal; width: max-content; max-width: calc(100% - 40px); }
+    html:not(.compact) body.sail-on.sl-touchy .sl-learn { bottom: 224px; } /* tablets: over the steering buttons and the music */
     body.sail-on #bar, body.sail-on #hint, body.sail-on #about, body.sail-on #tools, body.sail-on .tool-panel, body.sail-on #credits { display: none !important }
     @media (max-width: 640px) { .sl-btns .opt { display: none } .sl-pick { font-size: 13px; white-space: nowrap; top: 64px } }
     .compact .sl-read { left: var(--sl); top: var(--st); padding: 4px 10px 4px 4px; gap: 7px; }
@@ -237,6 +238,8 @@ export default function sail(city) {
     .compact .sl-goals { left: var(--sl); right: var(--sr); width: auto; top: calc(var(--st) + 140px); }
     .compact .sl-learn { left: var(--sl); right: var(--sr); width: auto; top: calc(var(--st) + 140px); bottom: auto; gap: 10px; padding: 10px 12px; }
     .compact .sl-learn svg { width: 112px; height: 112px } .compact .sl-learn ul { font-size: 12px; padding-left: 14px }
+    /* landscape phones: between the readout and the buttons, clear of the steering and the sail buttons below */
+    @media (orientation: landscape) { .compact .sl-goals, .compact .sl-learn { top: var(--st); left: calc(var(--sl) + 240px); right: calc(var(--sr) + 90px); bottom: auto; max-height: calc(100% - var(--st) - 72px); overflow-y: auto; box-sizing: border-box; } }
     .compact .sl-pick { top: calc(var(--st) + 52px); left: var(--sl); right: var(--sr); transform: none; justify-content: space-between; white-space: normal; }
     .compact .sl-pick button { min-height: 44px; padding: 0 14px; flex: none; }
     .compact .sl-touch { --pb: max(16px, calc(env(safe-area-inset-bottom) + 4px)); height: auto; top: 0; }
