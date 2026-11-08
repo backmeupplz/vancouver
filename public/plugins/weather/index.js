@@ -497,7 +497,11 @@ export default function weather(city) {
       u.uOff.value.set(x0 * W / 2, y0 * H / 2)
       const fall = fx.snow ? 1.2 : 9, s = Math.min(fx.snow ? 1.5 : 0.7, 1 / fall)
       const tgt = city.controls.target, a = v3.copy(tgt).project(cam), ax = a.x, ay = a.y
-      const b = v3.copy(tgt).add(ndc.set(fx.wind[0] * s, -1, fx.wind[1] * s)).project(cam)
+      // wind slants the fall only across the screen: drift towards or away from this tilted camera projects up the
+      // screen, so slow snow in a northerly breeze looked like it was rising
+      const e = cam.matrixWorld.elements, rl = Math.hypot(e[0], e[2]) || 1, rx = e[0] / rl, rz = e[2] / rl // the screen's right, on the ground
+      const across = (fx.wind[0] * rx + fx.wind[1] * rz) * s
+      const b = v3.copy(tgt).add(ndc.set(rx * across, -1, rz * across)).project(cam)
       u.uDir.value.set((b.x - ax) * W, (b.y - ay) * H).normalize()
     }
     if (flashT >= 0) { // lightning: a bright flicker, then a second, weaker one
