@@ -86,7 +86,7 @@ for o in fp:
             put('nodes', (p[0], p[1], p[0], p[1]), (o.id, p, {k: v for k, v in t})); n['nodes'] += 1
         elif any(k in t for k in SHOPFRONT) or t.get('amenity') in SHOP_AMENITY:
             p = xy(o.location.lat, o.location.lon)
-            put('nodes', (p[0], p[1], p[0], p[1]), (o.id, p, keep(t, ('shop', 'office', 'craft', 'amenity')))); n['shops'] += 1
+            put('nodes', (p[0], p[1], p[0], p[1]), (o.id, p, keep(t, ('shop', 'office', 'craft', 'amenity', 'name')))); n['shops'] += 1
 print({k: v for k, v in n.items()}, round(time.time() - t0), 's', flush=True)
 
 os.makedirs('data/feat', exist_ok=True)

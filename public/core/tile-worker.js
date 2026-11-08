@@ -85,6 +85,7 @@ function build(t, level) {
   out.buildings = b.walls; out.balconies = b.balconies; out.ao = b.ao
   if (level === 0) {
     out.water = water(t); out.carriage = carriage; out.boats = boats(t, terr); out.lights = lights(t, terr, lines, ps, b)
+    out.signs = signs(t, b.fronts)
     out.parked = parked(t, terr, lines, ps, b.footprints)
     out.footprints = withCars(b.footprints, out.parked.lot, t)
   }
@@ -631,6 +632,7 @@ function buildings(t, terr, level, lines, carriage) {
   const s = t.sections.BLDG
   const W = { pos: [], nor: [], col: [], win: [] }, Bal = { pos: [], nor: [], col: [], win: [] }
   const fp = [], fpStart = [0] // footprints: world x, north pairs; ring i is fp[fpStart[i]..fpStart[i+1])
+  const fronts = [] // storefront walls that face a street: ax, ay, px, py, ground height (for the shop signs)
   const spill = [] // tile-local x, north: where a lit shop window throws light on the sidewalk
   const AO = { P: [], T: [], I: [] } // the shade on the ground round the walls' feet (skirt)
   if (!s) return {}
@@ -701,6 +703,7 @@ function buildings(t, terr, level, lines, carriage) {
     // them where the tile can't tell: the overview); the rest keep the building's pattern
     const rowWalls = detail && y1 - y0 < 25 && (style === 1 || style === 5 || style === 8 || style === 10) // brick, siding, punched: not glass towers
     const shopEdges = front && carriage ? pts.map((a, i) => streetSide(a, pts[(i + 1) % np], carriage)) : null
+    if (shopEdges && mn < 2.5 && h >= 4) for (let i = 0; i < np; i++) if (shopEdges[i]) fronts.push(pts[i][0], pts[i][1], pts[(i + 1) % np][0], pts[(i + 1) % np][1], base)
     let u = 0
     for (let i = 0; i < np; i++) {
       const a = pts[i], p = pts[(i + 1) % np], len = Math.hypot(p[0] - a[0], p[1] - a[1]) || 1
@@ -752,7 +755,7 @@ function buildings(t, terr, level, lines, carriage) {
       }
     }
   }
-  return { walls: pack(W), balconies: Bal.pos.length ? pack(Bal) : null,
+  return { fronts, walls: pack(W), balconies: Bal.pos.length ? pack(Bal) : null,
     footprints: fpStart.length > 1 ? { pts: new Float32Array(fp), start: new Uint32Array(fpStart) } : null, spill,
     ao: AO.P.length ? { position: new Float32Array(AO.P), t: new Float32Array(AO.T), index: AO.P.length / 3 > 65535 ? new Uint32Array(AO.I) : new Uint16Array(AO.I) } : null }
 }
@@ -1190,6 +1193,40 @@ function pois(t) {
   let o = s.off + 4
   for (let i = 0; i < n; i++) { out.push({ kind: dv.getUint8(o), id: Number(dv.getBigUint64(o + 1, true)), x: dv.getInt16(o + 9, true) * t.k + t.ox, y: dv.getInt16(o + 11, true) * t.k + t.oy }); o += 13 }
   return out
+}
+
+// ---------------------------------------------------------------- shop signs
+// the SHOP section (tools/tiles.py: named businesses: kind 0 shop, 1 cafe, 2 food, 3 bar, 4 service, 5 office/craft, x, north, name),
+// each put on the nearest street-facing storefront wall within 10 m, no two within 3 m of each other
+// -> { d: 8 floats a sign (tile-local x, north, height above ground, outward x, outward north, width, kind | style << 3, name index), names } or null
+const SIGN_Z = 3.4
+function signs(t, fronts) {
+  const s = t.sections.SHOP
+  if (!s || !fronts.length) return null
+  const dv = t.dv, n = dv.getUint32(s.off, true), d = [], names = [], at = []
+  let o = s.off + 4
+  for (let i = 0; i < n; i++) {
+    const kind = dv.getUint8(o), x = dv.getInt16(o + 1, true) * t.k, y = dv.getInt16(o + 3, true) * t.k, ln = dv.getUint8(o + 5)
+    const name = new TextDecoder().decode(new Uint8Array(t.buf, o + 6, ln)); o += 6 + ln
+    let best = 100, e = -1, f = 0
+    for (let j = 0; j < fronts.length; j += 5) {
+      const ax = fronts[j], ay = fronts[j + 1], dx = fronts[j + 2] - ax, dy = fronts[j + 3] - ay, l2 = dx * dx + dy * dy
+      if (l2 < 9) continue
+      const u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)), q = (x - ax - dx * u) ** 2 + (y - ay - dy * u) ** 2
+      if (q < best) { best = q; e = j; f = u }
+    }
+    if (e < 0) continue
+    const ax = fronts[e], ay = fronts[e + 1], dx = fronts[e + 2] - ax, dy = fronts[e + 3] - ay, len = Math.hypot(dx, dy)
+    const w = Math.min(len - 0.6, 2.2 + name.length * 0.28, 6.5), half = w / 2 / len
+    f = Math.max(half, Math.min(1 - half, f)) // the board stays on the wall
+    const px = ax + dx * f, py = ay + dy * f
+    if (at.some((q) => (q[0] - px) ** 2 + (q[1] - py) ** 2 < 9)) continue
+    at.push([px, py])
+    let h = 0; for (let c = 0; c < name.length; c++) h = (h * 31 + name.charCodeAt(c)) >>> 0
+    d.push(px, py, fronts[e + 4] + SIGN_Z, dy / len, -dx / len, w, kind | ((kind === 1 ? 3 : h % 3) << 3), names.length)
+    names.push(name)
+  }
+  return d.length ? { d: new Float32Array(d), names } : null
 }
 
 // ---------------------------------------------------------------- boats at their berths (marinas)

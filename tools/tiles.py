@@ -408,6 +408,14 @@ def build(ij):
         paint = crossing_paint(t) if k == 'crossing' else 0
         if k and X0 <= x < X0 + L1 and Y0 <= y < Y0 + L1: pois.append((6 + paint if paint else POI[k], nid, x, y))
 
+    # ---- named businesses for the storefront signs: (kind, x, y, name); kind 0 shop, 1 cafe, 2 food, 3 bar, 4 service, 5 office/craft
+    shopn = []
+    for nid, (x, y), t in feat.get('nodes', []):
+        nm = (t.get('name') or '').strip().encode()[:40].decode(errors='ignore').encode()
+        am = t.get('amenity')
+        k = 1 if am == 'cafe' or t.get('shop') in ('coffee', 'bakery', 'tea') else 2 if am in ('restaurant', 'fast_food', 'ice_cream', 'food_court') else 3 if am in ('bar', 'pub', 'nightclub') else 0 if t.get('shop') else 4 if am in SHOP_AMENITY else 5 if 'office' in t or 'craft' in t else None
+        if nm and k is not None and X0 <= x < X0 + L1 and Y0 <= y < Y0 + L1: shopn.append((k, x, y, nm))
+
     # ---- write the 16 detail tiles and the medium tile
     n = 0
     ground8 = road_ground(dtm, road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0, own=False), X0, Y0, lines)  # 8 m, fitted to the streets
@@ -417,7 +425,7 @@ def build(ij):
             out = Out(tx, ty, L0)
             ti_, tj_ = i * 4 + a, j * 4 + b
             terr = ground8[(3 - b) * 128:(4 - b) * 128 + 1, a * 128:a * 128 + 129]  # 8 m: embankments, cuts and seawalls under the roads
-            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, boats=boats, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes):
+            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, shops=shopn, boats=boats, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes):
                 continue
             os.makedirs(f'{OUT}/0', exist_ok=True)
             open(f'{OUT}/0/{ti_}_{tj_}.bin', 'wb').write(out.bytes()); n += 1
@@ -1892,7 +1900,7 @@ def pack_ring(out, ring):
     return b
 
 
-def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None):
+def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None, shops=()):
     tb = box(tx, ty, tx + size, ty + size)
     n = terr.shape[0]
     out.section('TERR', struct.pack('<H', n) + np.clip(np.round(terr * 10), -32768, 32767).astype('<i2').tobytes())
@@ -2017,6 +2025,8 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     for k, nid, x, y in pois:
         if tx <= x < tx + size and ty <= y < ty + size: pb += struct.pack('<BQhh', k, nid, *out.q(x, y)); npo += 1
     out.section('POIS', struct.pack('<I', npo) + bytes(pb))
+    sb = [struct.pack('<BhhB', k, *out.q(x, y), len(nm)) + nm for k, x, y, nm in shops if tx <= x < tx + size and ty <= y < ty + size]
+    if sb: out.section('SHOP', struct.pack('<I', len(sb)) + b''.join(sb))  # the page ignores tiles without it
     return runs > 0 or nb > 0 or len(sel) > 0
 
 

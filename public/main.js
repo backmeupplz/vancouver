@@ -87,7 +87,7 @@ const tiles = new Tiles({
 })
 const trees3d = new Trees3D({ scene, tiles, treeMaterial: mats.tree }) // real trees near a perspective camera
 tiles.cached = quality.tier.cached; trees3d.share = quality.tier.trees3d; trees3d.fine = quality.tier.detail; mats.ao.visible = quality.tier.detail // (the wall-foot shade: High)
-const tileInfo = (t) => ({ level: t.level, i: t.i, j: t.j, ox: t.ox, oy: t.oy, size: t.level ? 4096 : 1024, graph: t.graph, terrain: t.terrain, footprints: t.footprints, water: t.water,
+const tileInfo = (t) => ({ level: t.level, i: t.i, j: t.j, ox: t.ox, oy: t.oy, size: t.level ? 4096 : 1024, graph: t.graph, terrain: t.terrain, footprints: t.footprints, signs: t.signs, water: t.water,
   trees: t.trees ? { pos: t.trees.geometry.attributes.iPos.array, size: t.trees.geometry.attributes.iSize.array } : null })
 status('Loading the map…', 0.05)
 const index = await tiles.init()

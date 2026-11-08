@@ -372,6 +372,7 @@ export class Tiles {
     t.terrain = res.terrain
     t.graph = res.graph
     t.footprints = res.footprints || null
+    t.signs = res.signs || null
     t.water = res.water || null
     t.carriage = res.carriage || null
     // once a geometry is on the GPU its arrays are dropped from memory (bounds are computed first, for culling)
