@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from common import GROUND, GI, xy, extent, L0, L1, KX, KY, LAT_O, LON_O, HR, KINDS, KI, DRIVE, SHOP_AMENITY, line_kind, hnum, densify, all_tiles, HR_CACHE, hr_lookup, tile_args, load_feat, tube_h, SLAB
 from roofs import roof_lookup
 from facades import facade_lookup, NONE as B_NONE, GLASS as B_GLASS, SOLID as B_SOLID
+from lidar_massing import massing_lookup
 
 OUT = os.environ.get('OUT', 'public/tiles')
 VERSION = 2
@@ -869,7 +870,11 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
                     fac=fac, year=start_year(t) or fac.get('year') or None, ring=r)
         gid = rnd.randrange(1, 1 << 30)
         parts = None
-        if chm is not None and not is_part and not mn and np.percentile(chm, 90) > 2.2:
+        ms, walls = (massing_lookup(r) if not mn else None) or ([], [])  # tools/lidar_massing.py: the 2022 LiDAR's massing and walls
+        if ms and not (tag_h and abs(tag_h - max(p['ridge'] or p['h'] for p in ms)) > max(6, 0.3 * tag_h)):
+            parts = [dict(p, pitch=0, m22=True) for p in ms]
+        info['walls'] = walls
+        if parts is None and chm is not None and not is_part and not mn and np.percentile(chm, 90) > 2.2:
             p97 = float(np.percentile(chm, 97))
             if not (tag_h and abs(tag_h - p97) > max(6, 0.3 * tag_h)):  # else rebuilt since the LiDAR flew: the tags win
                 parts = from_lidar(r, a, z, ok, fx, shape, rnd, roofm)
@@ -923,9 +928,35 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
             ps.append(porch(main, streets))
         for p in ps:  # roof colour: the mapper's, else the 2022 photo's (this part's, else the building's), else the material's
             roofc = tagc or (photo_roof(p) if p is not main else mainc) or mainc or matc
+            p['fd'] = edge_looks(p['ring'], p['mn'] or 0, p['h'], info['walls']) if info.get('walls') else None
             p.update(style=style, wall=wall, roofc=roofc, fh=fh, shop=shop, res=res, gh=gh, fx=fx, rb=roof_bits(p, t, *tops), ring=inset(p['ring'], d), h=p['h'] + rnd.random() * 0.1)
             del p['info']
     return out
+
+
+def edge_looks(ring, mn, h, walls):
+    """each wall of a part -> the look the 2022 LiDAR saw on it (tools/lidar_walls.py: (d0, d1, d2)), from the measured
+    wall that runs along it (within 12 degrees, 2.5 m, over 40% of it, at its heights), else (0, 0, 0); None if none"""
+    out, got = [], False
+    for k in range(len(ring)):
+        (ax, ay), (bx, by) = ring[k], ring[(k + 1) % len(ring)]
+        L = math.hypot(bx - ax, by - ay)
+        best = None
+        if L >= 3:
+            ux, uy = (bx - ax) / L, (by - ay) / L
+            for x0, y0, x1, y1, f, t, d in walls:
+                if t < mn + 2 or f > h - 2: continue
+                M = math.hypot(x1 - x0, y1 - y0) or 1
+                if abs(ux * (y1 - y0) / M - uy * (x1 - x0) / M) > 0.21 or ux * (x1 - x0) + uy * (y1 - y0) < 0: continue
+                off = abs(((x0 + x1) / 2 - ax) * -uy + ((y0 + y1) / 2 - ay) * ux)  # the measured wall's middle, off this wall's line
+                if off > 2.5: continue
+                s0, s1 = sorted(((x0 - ax) * ux + (y0 - ay) * uy, (x1 - ax) * ux + (y1 - ay) * uy))
+                ov = min(L, s1) - max(0, s0)
+                if ov < 0.4 * L: continue
+                if best is None or ov - off > best[0]: best = (ov - off, d)
+        out.append(best[1] if best else (0, 0, 0))
+        got |= best is not None
+    return out if got else None
 
 
 def octant(ang):
@@ -1017,6 +1048,7 @@ def apply_sections(out, X0, Y0, rnd, measure, under):
     drop, add = set(), []
     for k, segs in by_g.items():
         b = bases[k]
+        if b.get('m22'): continue  # the 2022 LiDAR's massing is finer
         ps = groups[gids[k]]
         gh = max(p['ridge'] or p['h'] for p in ps)
         cov = sum(ring_area(s[0]) for s in segs) / max(1.0, b['a'])
@@ -1844,7 +1876,7 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
         tun = [(n, L['tube']) for n, L in enumerate(sel) if L.get('tube') and L['z']]
         out.section('TUNL', struct.pack('<I', len(tun)) + b''.join(struct.pack('<I', n) + bytes(c) for n, c in tun))
     # buildings: compact header, optional fields behind flags
-    bb = bytearray(); nb = 0
+    bb = bytearray(); nb = 0; fb = bytearray()
     for b in builds:
         r = b['ring']
         c = (sum(p[0] for p in r) / len(r), sum(p[1] for p in r) / len(r))
@@ -1880,7 +1912,16 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
                 bb += struct.pack('<hhBBBB', *out.q(x, y), int(min(255, su * 10)), int(min(255, sv * 10)), int(min(255, uh * 20)), int((ang % math.pi) / math.pi * 256) & 255)
         bb += pack_ring(out, r)
         nb += 1
+        # each wall's own look (tools/lidar_walls.py), in the FACD section: per building its wall count (0: none) and 3
+        # bytes a wall, the ring counter-clockwise as the page draws it
+        fd = b.get('fd') if detail and r is b['ring'] else None
+        if fd and len(fd) == len(r):
+            if sum(r[k - 1][0] * r[k][1] - r[k][0] * r[k - 1][1] for k in range(len(r))) < 0:  # clockwise: the page turns it, so turn the walls with it
+                fd = [fd[(len(r) - 2 - i) % len(r)] for i in range(len(r))]
+            fb += bytes([min(255, len(r))]) + b''.join(bytes(d) for d in fd) if len(r) <= 255 else b'\0'
+        else: fb += b'\0'
     out.section('BLDG', struct.pack('<I', nb) + bytes(bb))
+    out.section('FACD', bytes(fb))
     tr_ = bytearray(); nt = 0
     for x, y, shape, col, h in trees:
         if not (tx <= x < tx + size and ty <= y < ty + size): continue

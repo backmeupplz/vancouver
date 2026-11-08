@@ -629,7 +629,7 @@ function readBuilding(t, o) {
 // carriage: the detail tile's 1 m carriageway mask (roadMask), for the light storefronts spill onto the street
 function buildings(t, terr, level, lines, carriage) {
   const s = t.sections.BLDG
-  const W = { pos: [], nor: [], col: [], win: [] }, Bal = { pos: [], nor: [], col: [], win: [] }
+  const W = { pos: [], nor: [], col: [], win: [], fac: [] }, Bal = { pos: [], nor: [], col: [], win: [], fac: [] }
   const fp = [], fpStart = [0] // footprints: world x, north pairs; ring i is fp[fpStart[i]..fpStart[i+1])
   const spill = [] // tile-local x, north: where a lit shop window throws light on the sidewalk
   const AO = { P: [], T: [], I: [] } // the shade on the ground round the walls' feet (skirt)
@@ -642,6 +642,14 @@ function buildings(t, terr, level, lines, carriage) {
   const detail = level === 0
   const recs = []
   for (let bi = 0; bi < n; bi++) { const b = readBuilding(t, o); o = b.o; recs.push(b) }
+  // each wall's own look, as the 2022 LiDAR saw it (tools/lidar_walls.py; FACD: per building its wall count, 0 for none,
+  // then 3 bytes a wall): window kind and grid, the ground floor's height, an awning
+  const fs = t.sections.FACD
+  if (fs && detail) for (let bi = 0, q = fs.off; bi < n && q < fs.off + fs.len; bi++) {
+    const k = dv.getUint8(q); q += 1
+    if (k && k === recs[bi].pts.length) recs[bi].looks = new Uint8Array(t.buf, q, k * 3)
+    q += k * 3
+  }
   // which walls a neighbour covers (party walls: windowless), from every footprint of the tile (detail tiles)
   const G = 16, grid = new Map(), gk = (i, j) => i * 4096 + j
   if (detail) for (const b of recs) {
@@ -652,7 +660,7 @@ function buildings(t, terr, level, lines, carriage) {
   // neighbour standing beside it (not one overlapping it: a part over a bigger outline, a duplicate)
   const covered = (self, x, y, ix, iy, y0, y1) => grid.get(gk(Math.floor(x / G), Math.floor(y / G)))?.some((b) => b !== self && b.base + b.mn < y0 + 2 && b.base + b.h >= y0 + 0.6 * (y1 - y0) && inPoly(x, y, b.pts) && !inPoly(ix, iy, b.pts))
   for (const rec of recs) {
-    const { fl, style0, base, h, mn, roofShape, roofBits, ridge, wallHex, roofHex, gH, fh, bits, fx, facing, plant, pts } = rec
+    const { fl, style0, base, h, mn, roofShape, roofBits, ridge, wallHex, roofHex, gH, fh, bits, fx, facing, plant, pts, looks } = rec
     let { gid } = rec
     const np = pts.length
     if (MASKS.length) {
@@ -709,7 +717,18 @@ function buildings(t, terr, level, lines, carriage) {
       const party = rowWalls && (len < 2 || covered(rec, mx + nx * 0.8, my - nz * 0.8, mx - nx * 0.8, my + nz * 0.8, y0, y1))
       const kind = party ? fq / 64 : shopEdges && !shopEdges[i] && styleW % 1 >= 0.5 ? styleW - 0.5 : styleW
       const w = (uu, yy) => [kind, uu, yy - base, seed + use]
+      if (looks && !party) FAC = [looks[i * 3], looks[i * 3 + 1], looks[i * 3 + 2], 0]
       quad(W, [a[0], y0, -a[1]], [p[0], y0, -p[1]], [p[0], y1, -p[1]], [a[0], y1, -a[1]], wall, [nx, 0, nz], w(u, y0), w(u + len, y0), w(u + len, y1), w(u, y1))
+      FAC = NOFAC
+      // an awning or canopy over the sidewalk where the LiDAR saw one: a sloped sheet out from the wall over the shop
+      // windows, its valance hanging at the front (close views)
+      if (looks && looks[i * 3] & 8 && mn < 0.5 && len >= 3 && !party) {
+        const ya = base + Math.min(y1 - base - 0.5, looks[i * 3] >> 4 ? 2.2 + 0.4 * (looks[i * 3] >> 4) : 3.4), D = 1.4, ex = nx * D, ez = nz * D
+        const ac = AWNING[Math.floor(rnd01(mx + i, my) * AWNING.length)], pw = ROOFW(seed)
+        const A = [a[0], ya, -a[1]], P = [p[0], ya, -p[1]], A2 = [a[0] + ex, ya - 0.5, -a[1] + ez], P2 = [p[0] + ex, ya - 0.5, -p[1] + ez]
+        quad(Bal, A, P, P2, A2, ac, [nx * 0.34, 0.94, nz * 0.34], pw)
+        quad(Bal, A2, P2, [P2[0], P2[1] - 0.3, P2[2]], [A2[0], A2[1] - 0.3, A2[2]], shade(ac, 0.85), [nx, 0, nz], pw)
+      }
       u += len
     }
     const flat = !roofShape || !ridge || ridge <= h
@@ -1056,8 +1075,12 @@ function faces(mask, e, n) {
   return !!(mask & (1 << k) || mask & (1 << ((k + 1) & 7)) || mask & (1 << ((k + 7) & 7)))
 }
 function pack(B) {
-  return { position: new Float32Array(B.pos), normal: new Int8Array(B.nor), color: new Uint8Array(B.col), aWin: new Float32Array(B.win) }
+  return { position: new Float32Array(B.pos), normal: new Int8Array(B.nor), color: new Uint8Array(B.col), aWin: new Float32Array(B.win), aFac: new Uint8Array(B.fac) }
 }
+// the wall look (tools/lidar_walls.py's 3 bytes, and a spare) the triangles being added carry: materials.js aFac
+const NOFAC = [0, 0, 0, 0]
+let FAC = NOFAC
+const AWNING = [0x8c2f2a, 0x2f5a3c, 0x23324a, 0x2a2a2c, 0x6a2236, 0x9a6a2a, 0x3a4a5a].map(lin) // canvas: red, green, navy, black, burgundy, ochre, slate
 // one triangle with a flat normal, wound so the normal points along `want`; w = aWin per vertex (or one for all)
 function tri(B, a, b, c, col, want, w, w2, w3) {
   const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]]
@@ -1065,7 +1088,7 @@ function tri(B, a, b, c, col, want, w, w2, w3) {
   const l = Math.hypot(...n) || 1; n = n.map((v) => v / l)
   let ws = [w, w2 || w, w3 || w]
   if (n[0] * want[0] + n[1] * want[1] + n[2] * want[2] < 0) { [b, c] = [c, b]; n = n.map((v) => -v); ws = [ws[0], ws[2], ws[1]] }
-  for (const p of [a, b, c]) { B.pos.push(p[0], p[1], p[2]); B.nor.push(n[0] * 127, n[1] * 127, n[2] * 127); B.col.push(col[0] * 255, col[1] * 255, col[2] * 255) }
+  for (const p of [a, b, c]) { B.pos.push(p[0], p[1], p[2]); B.nor.push(n[0] * 127, n[1] * 127, n[2] * 127); B.col.push(col[0] * 255, col[1] * 255, col[2] * 255); B.fac.push(FAC[0], FAC[1], FAC[2], FAC[3]) }
   for (const x of ws) B.win.push(...x)
 }
 function quad(B, a, b, c, d, col, want, wa, wb, wc, wd) {
