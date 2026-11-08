@@ -21,7 +21,7 @@ import glob, math, os, shutil, sys, time
 from multiprocessing import Pool
 import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
-from common import xy, latlon, L1, save_rings, load_feat, all_tiles, hnum
+from common import xy, latlon, L1, save_rings, load_feat, all_tiles, hnum, cpu_slot
 from lidar_walls import walls_of
 
 OUT = os.environ.get('MASSING', 'data/massing22.npz')  # (MASSING=<file>: a test bake beside the shared one)
@@ -475,10 +475,11 @@ def work(chunk):
     global _CL
     if _CL is None: _CL = Cloud()
     out = []
-    for k, ring, others in chunk:
-        try: r = mass((Polygon(ring).buffer(0), [Polygon(o).buffer(0) for o in others], _CL))
-        except Exception as e: print('failed', k, e, flush=True); r = None
-        if r: out.append((k, r))
+    with cpu_slot():  # shared with the map bake and the LiDAR stream (common.py)
+        for k, ring, others in chunk:
+            try: r = mass((Polygon(ring).buffer(0), [Polygon(o).buffer(0) for o in others], _CL))
+            except Exception as e: print('failed', k, e, flush=True); r = None
+            if r: out.append((k, r))
     return out
 
 
@@ -488,6 +489,7 @@ def bake(procs, only=()):
     from shapely.geometry import Polygon
     from pyproj import Transformer
     t0 = time.time()
+    os.environ['PROCS'] = str(procs)  # cpu_slot's cap, in the workers too
     las = {os.path.basename(f)[:-4]: f for f in glob.glob(f'{os.path.dirname(LAS)}/*.zip')}
     las.update({os.path.basename(f)[:-4]: f for f in glob.glob(f'{LAS}/*.las')})  # an unzipped LAS over its zip
     files = sorted(f for k, f in las.items() if not only or k in only or os.path.exists(f'{CACHE}/{k}/i.npy'))
@@ -652,7 +654,8 @@ def massing_lookup(ring):
                 d = np.load(f)
                 db['parts'] = {k: d[k] for k in ('prc', 'pro', 'pfoot', 'ptop', 'proof', 'pridge')}
                 _DB.append(db)
-    q = shapely.make_valid(Polygon(ring))
+    from roofs import valid_poly
+    q = valid_poly(tuple(map(tuple, ring)))
     for db in _DB:
         r = _lookup(db, q)
         if r: return r

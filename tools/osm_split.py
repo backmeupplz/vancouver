@@ -5,9 +5,12 @@ import os, pickle, sys, time
 from collections import defaultdict
 import osmium
 sys.path.insert(0, os.path.dirname(__file__))
-from common import xy, L1, extent, SHOP_AMENITY
+from common import xy, L1, extent, SHOP_AMENITY, HERE, digest, file_digest, code_key, stamp, write_if_changed
 
 SRC = 'data/lm.osm.pbf'
+# redone only when the extract or this code changed; a bucket is rewritten only when its contents did (data/feat.key)
+KEY = digest(file_digest(SRC), file_digest(__file__), code_key(f'{HERE}/common.py', 'xy', 'L1', 'extent', 'SHOP_AMENITY'))
+if stamp('data/feat') == KEY and os.path.isdir('data/feat'): print('data/feat is up to date'); sys.exit()
 KEEP_BUILDING = ('building', 'building:part', 'height', 'min_height', 'building:levels', 'building:min_level', 'roof:shape', 'roof:height',
                  'roof:levels', 'roof:colour', 'building:colour', 'building:material', 'roof:material', 'roof:direction', 'roof:orientation',
                  'name', 'amenity', 'shop', 'tourism', 'layer', 'heritage', 'historic', 'start_date', 'building:architecture', 'office',
@@ -90,6 +93,6 @@ for o in fp:
 print({k: v for k, v in n.items()}, round(time.time() - t0), 's', flush=True)
 
 os.makedirs('data/feat', exist_ok=True)
-for (i, j), b in buckets.items():
-    with open(f'data/feat/{i}_{j}.pkl', 'wb') as f: pickle.dump(dict(b), f, protocol=5)
-print(len(buckets), 'buckets written', round(time.time() - t0), 's')
+changed = sum(write_if_changed(f'data/feat/{i}_{j}.pkl', pickle.dumps(dict(b), protocol=5)) for (i, j), b in buckets.items())
+stamp('data/feat', KEY)
+print(len(buckets), 'buckets,', changed, 'changed', round(time.time() - t0), 's')

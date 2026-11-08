@@ -32,6 +32,8 @@ look; PLUGINS.md is the plugin contract. Read the parts you need, not the whole 
 - Data lives in `data/` (gitignored, symlink it into worktrees); bake test tiles only into your own folder (`OUT=<dir>`),
   never into the main checkout's `public/tiles` (symlink that read-only for local runs).
 - Page code must read old and new tiles; when the tile format changes, the page deploys before the rebake.
+- The bake is incremental (each 4 km tile keyed on what it reads, `OUT/manifest.json`; `FORCE=1` rebakes all): a new
+  data input of `tiles.py` build() gets narrowed to the tile in `cell_key` (until then any change to it rebakes every tile).
 - Measure perf before/after on the map (`#13645,11243,0.1295`, DPR 2) and in third person, High and Low tiers.
 - DRY: reuse `core/` modules instead of copying helpers into plugins.
 

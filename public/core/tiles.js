@@ -159,6 +159,9 @@ export class Tiles {
     const idx = await fetch(this.base + 'index.json', { cache: 'no-cache' }).then((r) => r.json())
     this.index = idx
     this.have = [new Set(idx.l0), new Set(idx.l1)]
+    // each tile's ?v=: the bake that last changed it (tools/common.py write_index), so a rebake refetches only those
+    const v = idx.built || 0
+    this.ver = [idx.l0, idx.l1].map((l, lv) => new Map(l.map((k, n) => [k, idx[`v${lv}`]?.[n] ?? v])))
     { // the hole map (holes): a texel per detail tile
       const ij = idx.l0.map((k) => k.split('_').map(Number)), i0 = Math.min(...ij.map((c) => c[0])), j0 = Math.min(...ij.map((c) => c[1]))
       const w = Math.max(...ij.map((c) => c[0])) - i0 + 1, h = Math.max(...ij.map((c) => c[1])) - j0 + 1
@@ -169,12 +172,12 @@ export class Tiles {
     }
     // a coarse height grid of the whole map (tools/heights.py), so heights are right before tiles arrive
     try {
-      const r = await fetch(`${this.base}heights.bin?v=${idx.built || 0}`)
+      const r = await fetch(`${this.base}heights.bin?v=${idx.vh || idx.built || 0}`)
       const buf = await new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer()
       const dv = new DataView(buf)
       this.coarse = { x0: dv.getFloat32(4, true), y1: dv.getFloat32(8, true), c: dv.getFloat32(12, true), w: dv.getUint32(16, true), h: dv.getUint32(20, true), z: new Int16Array(buf, 24) }
     } catch (e) { console.warn('heights', e) }
-    if (this.coarse) this.makeBase(`${this.base}base.png?v=${idx.built || 0}`)
+    if (this.coarse) this.makeBase(`${this.base}base.png?v=${idx.vb || idx.built || 0}`)
     return idx
   }
 
@@ -350,7 +353,7 @@ export class Tiles {
 
   async load(t) {
     t.state = 'loading'
-    const res = await this.request({ url: `${this.base}${t.level}/${t.i}_${t.j}.bin?v=${this.index.built || 0}`, level: t.level })
+    const res = await this.request({ url: `${this.base}${t.level}/${t.i}_${t.j}.bin?v=${this.ver[t.level].get(`${t.i}_${t.j}`) ?? (this.index.built || 0)}`, level: t.level })
     if (res.missing || res.error) { t.state = 'missing'; if (res.error) console.warn(res.error); this.onChange?.(); return }
     if (t.state !== 'loading') return // evicted while loading
     t.res = res

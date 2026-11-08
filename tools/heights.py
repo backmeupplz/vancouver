@@ -6,7 +6,14 @@ import glob, os, struct, sys, gzip
 import numpy as np
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(__file__))
-from common import extent, L1
+from common import extent, L1, HERE, digest, files_digest, file_digest, code_key, stamp, write_index
+
+OUT = os.environ.get('OUT', 'public/tiles')
+# redone only when its inputs or code changed (OUT/heights.bin.key); the index is written either way, last
+KEY = digest(files_digest(sorted(glob.glob('data/feat/*.pkl')) + sorted(glob.glob('data/hr/*.npz')) + ['data/mrdem32.npz', 'data/sea.npz']),
+             file_digest(__file__), code_key(f'{HERE}/common.py', 'extent', 'L1'))
+if stamp(f'{OUT}/heights.bin') == KEY and os.path.exists(f'{OUT}/heights.bin') and os.path.exists(f'{OUT}/base.png'):
+    print('heights.bin and base.png are up to date'); write_index(OUT); sys.exit()
 
 C = 64.0
 X0, Y0, X1, Y1 = extent()
@@ -33,7 +40,6 @@ seaC = S[: S.shape[0] // step * step, : S.shape[1] // step * step].reshape(S.sha
 seaC = np.pad(seaC, ((0, max(0, H - seaC.shape[0])), (0, max(0, W - seaC.shape[1]))))[:H, :W]
 z = np.where(seaC, 0.0, z)
 out = b'HGT1' + struct.pack('<fffII', X0, Y1, C, W, H) + np.clip(np.round(z * 10), -32768, 32767).astype('<i2').tobytes()
-OUT = os.environ.get('OUT', 'public/tiles')
 os.makedirs(OUT, exist_ok=True)
 open(f'{OUT}/heights.bin', 'wb').write(gzip.compress(out, 9))
 print(W, H, 'max', float(z.max()), 'bytes', os.path.getsize(f'{OUT}/heights.bin'))
@@ -87,3 +93,5 @@ col = col / np.maximum(1e-6, (1 - canopy - built + canopy + np.clip(built * 2.5,
 col = np.where(seaC[..., None], water, col)
 Image.fromarray(np.clip(col, 0, 255).astype(np.uint8)).save(f'{OUT}/base.png', optimize=True)
 print('base.png', os.path.getsize(f'{OUT}/base.png'))
+stamp(f'{OUT}/heights.bin', KEY)
+write_index(OUT)

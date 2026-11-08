@@ -10,6 +10,9 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock, BoundedSemaphore
 from urllib.parse import urlparse
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import cpu_slot
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 CENTRE = (49.25, -123.10)
 HOSTS = {}
@@ -97,7 +100,8 @@ def one(e, out, scratch, total):
         try:
             fetch(e, src)
             n = os.path.getsize(src)
-            subprocess.run(['nice', '-n', '19', sys.executable, f'{HERE}/lidar_massing.py', 'tile', src, res + '.tmp.npz'], check=True, cwd=os.path.dirname(HERE))
+            with cpu_slot():  # the slots the map bake shares: together they stay within PROCS and the idle cores
+                subprocess.run(['nice', '-n', '19', sys.executable, f'{HERE}/lidar_massing.py', 'tile', src, res + '.tmp.npz'], check=True, cwd=os.path.dirname(HERE))
             os.replace(res + '.tmp.npz', res)
             with lock: stat['done'] += 1; stat['bytes'] += n
             log(out, total, e['id']); break

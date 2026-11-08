@@ -4,6 +4,7 @@
 # data/sea.npz (sea.py), City of Vancouver trees + 2009 LiDAR sections, MRDEM where HRDEM has no data.
 # Run: uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/tiles.py [procs] [i_j ...]
 import csv, gzip, json, math, os, pickle, random, struct, sys, time
+from functools import lru_cache
 from multiprocessing import Pool
 import numpy as np
 import shapely
@@ -12,13 +13,12 @@ from shapely.ops import unary_union
 from PIL import Image, ImageDraw
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(__file__))
-from common import GROUND, GI, xy, extent, L0, L1, KX, KY, LAT_O, LON_O, HR, KINDS, KI, DRIVE, SHOP_AMENITY, line_kind, hnum, densify, all_tiles, HR_CACHE, hr_lookup, tile_args, load_feat, tube_h, SLAB
-from roofs import roof_lookup
+from common import digest, file_digest, files_digest, code_key, code_data, cpu_slot, write_if_changed, manifest, save_manifest, write_index, VERSION, GROUND, GI, xy, extent, L0, L1, KX, KY, LAT_O, LON_O, HR, KINDS, KI, DRIVE, SHOP_AMENITY, line_kind, hnum, densify, all_tiles, HR_CACHE, hr_lookup, tile_args, load_feat, tube_h, SLAB
+from roofs import roof_lookup, valid_poly
 from facades import facade_lookup, NONE as B_NONE, GLASS as B_GLASS, SOLID as B_SOLID
 from lidar_massing import massing_lookup, walls_near
 
 OUT = os.environ.get('OUT', 'public/tiles')
-VERSION = 2
 
 
 
@@ -83,7 +83,7 @@ class Out:
         self.b += tag.encode() + struct.pack('<I', len(payload)) + payload
 
     def bytes(self):
-        return gzip.compress(bytes(self.b), 7)
+        return gzip.compress(bytes(self.b), 7, mtime=0)  # no time stamp: the same tile is the same bytes
 
 
 # ---------------------------------------------------------------- shared inputs (loaded in the parent; children fork)
@@ -213,7 +213,10 @@ def build(ij):
     # sea on the tile's grid
     sr = ((SEA_Y1 - gy) / SEA_C).astype(int).clip(0, SEA_M.shape[0] - 1); sc = ((gx - SEA_X0) / SEA_C).astype(int).clip(0, SEA_M.shape[1] - 1)
     sea = SEA_M[np.ix_(sr, sc)]
-    if sea.all() and not feat.get('lines') and not feat.get('buildings'): return ij, 'sea', 0
+    if sea.all() and not feat.get('lines') and not feat.get('buildings'):
+        for p in [f'{OUT}/0/{i * 4 + a}_{j * 4 + b}.bin' for a in range(4) for b in range(4)] + [f'{OUT}/1/{i}_{j}.bin']:
+            if os.path.exists(p): os.remove(p)  # baked before the sea took it
+        return ij, 'sea', 0
     pix = lambda x, y: ((x - X0) / HR, (Y0 + L1 - y) / HR)
 
     # ---- water polygons (OSM lakes, rivers) to flatten the terrain and to draw
@@ -428,15 +431,17 @@ def build(ij):
             out = Out(tx, ty, L0)
             ti_, tj_ = i * 4 + a, j * 4 + b
             terr = ground8[(3 - b) * 128:(4 - b) * 128 + 1, a * 128:a * 128 + 129]  # 8 m: embankments, cuts and seawalls under the roads
+            path = f'{OUT}/0/{ti_}_{tj_}.bin'
             if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, shops=shopn, boats=boats, beach=beach, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes):
+                if os.path.exists(path): os.remove(path)  # an earlier bake's, now empty
                 continue
             os.makedirs(f'{OUT}/0', exist_ok=True)
-            open(f'{OUT}/0/{ti_}_{tj_}.bin', 'wb').write(out.bytes()); n += 1
+            write_if_changed(path, out.bytes()); n += 1
     out = Out(X0, Y0, L1)
     terr = terrain_grid(dtm, 0, 0, L1, 65)
     write_tile(out, X0, Y0, L1, terr, polys, lines, builds, trees, detail=False, water_only=sea.all(), pois=[])
     os.makedirs(f'{OUT}/1', exist_ok=True)
-    open(f'{OUT}/1/{i}_{j}.bin', 'wb').write(out.bytes())
+    write_if_changed(f'{OUT}/1/{i}_{j}.bin', out.bytes())
     return ij, 'ok', round(time.time() - t0, 1), n, len(builds), len(trees), f'trunks off streets: {moved} moved, {dropped} dropped'
 
 
@@ -614,6 +619,12 @@ def colour(v):
 
 
 def obb(r):
+    """the ring's smallest box over its edge directions: (cx, cy, angle, half length, half width, area)"""
+    return _obb(tuple(map(tuple, r)))
+
+
+@lru_cache(1 << 16)  # a footprint's box is asked for by several steps
+def _obb(r):
     best = None
     for a_ in range(len(r)):
         (x1, y1), (x2, y2) = r[a_ - 1], r[a_]
@@ -627,6 +638,23 @@ def obb(r):
     hl, hw = (u1 - u0) / 2, (v1 - v0) / 2
     if hw > hl: ang += math.pi / 2; hl, hw = hw, hl
     return cx, cy, ang, hl, hw, ar
+
+
+def pct(v, q):
+    """np.percentile(v, q) for one scalar q, to the bit (numpy's linear method: the same order statistics and the same
+    lerp, in v's own type), without its overhead: it is called some 100 000 times in a downtown tile"""
+    a = np.asarray(v).ravel()
+    n = a.size
+    vi = (n - 1) * np.true_divide(q, 100)
+    lo = int(np.floor(vi))
+    if vi >= n - 1: lo = hi = n - 1
+    else: hi = lo + 1
+    a = np.partition(a, (lo, hi) if hi != lo else lo)
+    if a.dtype.kind == 'f' and np.isnan(a).any(): return a.dtype.type(np.nan)
+    t = float(vi - lo) if vi < n - 1 else float(vi + 1)
+    prev, nxt = a[lo], a[hi]
+    d = nxt - prev
+    return nxt - d * (1 - t) if t >= 0.5 else prev + d * t
 
 
 def ring_area(r):
@@ -668,9 +696,9 @@ def bridge_mask(lines, areas, X0, Y0, N):
 
 def height_levels(v):
     """1-4 roof heights inside a footprint (1D k-means of the LiDAR surface heights), lowest first"""
-    best = np.array([float(np.percentile(v, 60))])
-    top = float(np.percentile(v, 97))
-    if len(v) < 30 or top - float(np.percentile(v, 5)) < 3: return best
+    best = np.array([float(pct(v, 60))])
+    top = float(pct(v, 97))
+    if len(v) < 30 or top - float(pct(v, 5)) < 3: return best
     prev = float(((v - np.median(v)) ** 2).sum())
     for k in (2, 3, 4):
         c = np.percentile(v, np.linspace(12, 94, k))
@@ -728,7 +756,7 @@ def fit_roof(r, z, ok, fx, shape=''):
     if not best: return None
     sse, c0, k, run, code, bits = best
     rise = abs(k) * run * (2 if code == 5 else 1)
-    spread = float(np.percentile(zz, 95) - np.percentile(zz, 10))
+    spread = float(pct(zz, 95) - pct(zz, 10))
     # a clean fit, or a busy house roof (dormers, cross gables) that is still much more pitched than flat
     if not shape and (rise < 1.0 or sse > (0.85 if spread > 2.0 and hl * hw < 120 else 0.5) * sse0): return None
     if rise > 10: return None
@@ -763,7 +791,7 @@ def roof_units(z, part, h, fx, ang, hidden):
         u, v = x * ca + y * sa, -x * sa + y * ca
         uc, vc = (u.max() + u.min()) / 2, (v.max() + v.min()) / 2
         out.append((nb, uc * ca - vc * sa, uc * sa + vc * ca, float(u.max() - u.min() + HR * 0.8), float(v.max() - v.min() + HR * 0.8),
-                    float(np.clip(np.percentile(res[rr, cc], 75), 0.8, 5.0)), ang))
+                    float(np.clip(pct(res[rr, cc], 75), 0.8, 5.0)), ang))
     out.sort(key=lambda o: -o[0])
     return [o[1:] for o in out[:16]]
 
@@ -771,7 +799,7 @@ def roof_units(z, part, h, fx, ang, hidden):
 def from_lidar(r, a, z, ok, fx, shape, rnd, roofm):
     """parts of one building from the LiDAR surface (heights above its base): [dict(ring, h, mn, roof, ridge, pitch, units)]"""
     v = z[ok]
-    p97 = float(np.percentile(v, 97))
+    p97 = float(pct(v, 97))
     # houses, sheds, halls: one pitched roof if the surface fits one (big ones only if the outline is near a rectangle)
     if p97 < 20 and (a < 700 or a < 5000 and a > 0.85 * obb(r)[5]) and shape in ('', 'gabled', 'hipped', 'skillion', 'pyramidal', 'half-hipped', 'gambrel'):
         f = fit_roof(r, z, roofm, fx, shape)
@@ -784,7 +812,7 @@ def from_lidar(r, a, z, ok, fx, shape, rnd, roofm):
     from rasterio.transform import Affine
     tr = Affine(HR, 0, fx[0], 0, -HR, fx[1])
     th = [(c[i - 1] + c[i]) / 2 for i in range(1, len(c))]
-    lvl_h = lambda sel, d: float(np.percentile(z[sel], 70)) if sel.sum() >= 3 else float(d)
+    lvl_h = lambda sel, d: float(pct(z[sel], 70)) if sel.sum() >= 3 else float(d)
     open_ = False
     if c[0] < 2.5 and len(c) > 1:  # the lowest "roof" is the ground: a courtyard or a plaza inside the outline
         if (v < th[0]).mean() < 0.3: c, th = c[1:], th[1:]
@@ -942,7 +970,7 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
         m = full = np.array(m, bool)
         if m.sum() > 12: m2 = ndimage.binary_erosion(m); m = m2 if m2.sum() > 4 else m
         ground = dtm[by0:by1, bx0:bx1][m] if m.any() else np.array([height_fallback(dtm, xs)])
-        base = float(np.percentile(ground, 10)) if len(ground) else 0.0
+        base = float(pct(ground, 10)) if len(ground) else 0.0
         fx = (X0 + bx0 * HR, Y0 + L1 - by0 * HR)
         if dsm is None or not m.any(): return None, None, fx, base, None
         free = ~under[by0:by1, bx0:bx1] if under is not None else np.ones_like(m)
@@ -970,14 +998,14 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
         ms = massing_lookup(r) if not mn else None  # tools/lidar_massing.py: the 2022 LiDAR's own massing, where it has one
         if ms and not (tag_h and abs(tag_h - max(p['ridge'] or p['h'] for p in ms)) > max(6, 0.3 * tag_h)):
             parts = [dict(p, pitch=0, m22=True) for p in ms]
-        if parts is None and chm is not None and not is_part and not mn and np.percentile(chm, 90) > 2.2:
-            p97 = float(np.percentile(chm, 97))
+        if parts is None and chm is not None and not is_part and not mn and pct(chm, 90) > 2.2:
+            p97 = float(pct(chm, 97))
             if not (tag_h and abs(tag_h - p97) > max(6, 0.3 * tag_h)):  # else rebuilt since the LiDAR flew: the tags win
                 parts = from_lidar(r, a, z, ok, fx, shape, rnd, roofm)
         if parts is None:
             h, ridge = None, None
             if tag_h: h = tag_h
-            elif chm is not None and len(chm) >= 3 and np.percentile(chm, 90) > 2.2: h = float(np.percentile(chm, 90))
+            elif chm is not None and len(chm) >= 3 and pct(chm, 90) > 2.2: h = float(pct(chm, 90))
             elif lv: h = lv * 3.1 + 1.0
             if h is None: h = 3.0 if btype in ('garage', 'shed', 'carport', 'roof') else (rnd.uniform(5, 8) if btype in ('house', 'detached') else 7.0)
             if lv and not tag_h and (chm is None or len(chm) < 3): h = lv * 3.1 + 1
@@ -1084,16 +1112,22 @@ def roof_bits(p, t, pools, solar):
     """what a flat roof carries, as the client's rooftop() reads the facade byte: 4 planted (the orthophoto's green
     flag, OSM roof:garden, a garden or a grass roof), 8 a pool (an outdoor OSM pool mostly over it), 16 solar panels"""
     if p['roof']: return 0
-    r, q, bits = roof_lookup(p['ring']), shapely.make_valid(Polygon(p['ring'])), 0
+    r, q, bits = roof_at(tuple(p['ring'])), valid_poly(tuple(map(tuple, p['ring']))), 0
     if r and r[3] & 1 or t.get('roof:garden') == 'yes' or t.get('leisure') == 'garden' or t.get('roof:material') in ('grass', 'plants', 'vegetation'): bits |= 4
     if pools is not None and any(g.intersection(q).area > 0.6 * g.area for g in pools.geometries[pools.query(q, predicate='intersects')]): bits |= 8
     if t.get('generator:source') == 'solar' or solar is not None and len(solar.query(q, predicate='intersects')): bits |= 16
     return bits
 
 
+@lru_cache(1 << 16)
+def roof_at(ring):
+    """roof_lookup, once per footprint (photo_roof and roof_bits both ask)"""
+    return roof_lookup(ring)
+
+
 def photo_roof(p):
     """the roof's colour in the city's 2022 orthophoto (tools/roofs.py, data/roofs.npz), as a tagged colour, or 0"""
-    r = roof_lookup(p['ring'])
+    r = roof_at(tuple(p['ring']))
     if not r or (p['roof'] and r[3] & 1): return 0  # green over a pitched roof is the garden's trees, not the roof
     return r[0] | 0x1000000
 
@@ -1118,16 +1152,21 @@ def height_fallback(dtm, xs):
 SEC_INDEX = None
 
 
-def apply_sections(out, X0, Y0, rnd, measure, under):
-    """swap a building's parts for the city's 2009 LiDAR roof sections when they still match it; today's LiDAR gives
-    each section its height, roof pitch and plant"""
+def sections_at(X0, Y0):
+    """the 2009 LiDAR sections whose centre is in the 4 km tile at X0, Y0: [(ring, height, roof type, cx, cy)]"""
     global SEC_INDEX
     if SEC_INDEX is None:
         SEC_INDEX = {}
         for r, hg, rt in SECTIONS:
             cx, cy = sum(p[0] for p in r) / len(r), sum(p[1] for p in r) / len(r)
             SEC_INDEX.setdefault((int(cx // L1), int(cy // L1)), []).append((r, hg, rt, cx, cy))
-    secs = SEC_INDEX.get((int(X0 // L1), int(Y0 // L1)), [])
+    return SEC_INDEX.get((int(X0 // L1), int(Y0 // L1)), [])
+
+
+def apply_sections(out, X0, Y0, rnd, measure, under):
+    """swap a building's parts for the city's 2009 LiDAR roof sections when they still match it; today's LiDAR gives
+    each section its height, roof pitch and plant"""
+    secs = sections_at(X0, Y0)
     if not secs: return
     from shapely.strtree import STRtree
     groups = {}
@@ -1163,7 +1202,7 @@ def apply_sections(out, X0, Y0, rnd, measure, under):
                     f = fit_roof(r, z, mz[4], mz[2])
                     if f: p.update(roof=f[0], h=f[1], ridge=f[2], pitch=f[3])
                 if not p['roof']:
-                    p['h'] = float(np.percentile(v, 70)) if abs(np.percentile(v, 70) - hg) < max(4, 0.25 * hg) else hg
+                    p['h'] = float(pct(v, 70)) if abs(pct(v, 70) - hg) < max(4, 0.25 * hg) else hg
                     if p['a'] >= 60: p['units'] = roof_units(z, ok, p['h'], mz[2], obb(r)[2], np.zeros_like(ok))
             elif rt == 'pitched' and hg < 16:
                 cx, cy, ang, hl, hw, ar = obb(r)
@@ -1217,12 +1256,12 @@ def crown_widths(chm, canopy, at, hs):
     reach = (0.45 * np.asarray(hs, np.float32) + 2.0).clip(3, 13) / HR
     mine = canopy & (d <= reach[own])
     area = np.bincount(own[mine], minlength=len(at)) * HR * HR
-    return [float(np.clip(2 * math.sqrt(a / math.pi), 0.35 * h + 1.5, 1.1 * h + 3)) for a, h in zip(area, hs)]
+    return [float(min(max(2 * math.sqrt(a / math.pi), 0.35 * h + 1.5), 1.1 * h + 3)) for a, h in zip(area, hs)]  # (np.clip, minus its overhead)
 
 
 def crown_q(cw):
     """a crown width in the high nibble of a tree's colour byte (0 = not known: the page sizes it by its height)"""
-    return int(np.clip(round((cw - 2.0) / 1.4), 1, 15))
+    return min(15, max(1, round((cw - 2.0) / 1.4)))
 
 
 def canopy_trees(dsm, dtm, fp, water, X0, Y0, rnd, polys, nogo):
@@ -1442,9 +1481,9 @@ def split_long(d, key):
 # crosses), from the LiDAR surface across the deck: a low percentile across its width (cars, railings, cables and
 # trusses sit above the deck), samples far above the along-bridge profile dropped, the grade clamped, then smoothed.
 # Sidewalks and cycle decks mapped beside a road deck take that deck's height; a long bridge the LiDAR does not have
-# yet (stal̕əw̓asəm, 2024) or one under the trees spans between its abutments. Cached in data/decks<version>.pkl.
-DECK_VERSION = 6
-DECK_CACHE = f'data/decks{DECK_VERSION}.pkl'
+# yet (stal̕əw̓asəm, 2024) or one under the trees spans between its abutments. Cached in data/decks.pkl, keyed on the
+# deck code (code_key) and every data/feat and data/hr file's content: redone only when one of them changes.
+DECK_CACHE = os.environ.get('DECK_CACHE', 'data/decks.pkl')
 GRADE = 0.07  # steepest deck grade kept, rise per metre
 STAIRS = 0.7  # rise per metre of the stairs down off a footbridge end where OpenStreetMap maps none
 FOOT = {'footway', 'cycleway', 'path', 'pedestrian', 'steps', 'track'}
@@ -1576,13 +1615,15 @@ def deck_profiles():
     if DECKS is not None: return DECKS
     import glob
     files = sorted(glob.glob('data/feat/*.pkl'))
-    key = (DECK_VERSION, max((os.path.getmtime(f) for f in files), default=0))
+    key = digest(code_key(__file__, 'deck_profiles'), files_digest(files + sorted(glob.glob('data/hr/*.npz')) + ['data/sea.npz', 'data/mrdem32.npz']))
     if os.path.exists(DECK_CACHE):
         d = pickle.load(open(DECK_CACHE, 'rb'))
         if d.get('key') == key:
             DECKS = d['decks']; APPROACH.update(d['approach']); TUNNELS.update(d['tunnels']); PORTALS.update(d['portals']); ROOFS.update(d['roofs'])
             return DECKS
     t0 = time.time()
+    import common
+    common.HR_KEEP = 10 ** 6  # every LiDAR tile stays loaded for the pass (reloading them was 3/4 of its time)
     ways, tun, roofs, water = {}, {}, ROOFS, []
     from shapely.strtree import STRtree
     for f in files:
@@ -1739,7 +1780,7 @@ def deck_profiles():
             prof[w] = z[:] = to_ground(s, z, g, e); eased += 1
     if eased: go_on()  # nodes near those ends moved
     TUNNELS.update(tunnel_profiles(tun, STRtree(water) if water else None))
-    HR_CACHE.clear()
+    HR_CACHE.clear(); common.HR_KEEP = 12
     try: pickle.dump({'key': key, 'decks': DECKS, 'approach': APPROACH, 'tunnels': TUNNELS, 'portals': PORTALS, 'roofs': ROOFS}, open(DECK_CACHE, 'wb'), protocol=5)
     except OSError: pass
     print('bridge decks', len(DECKS), 'of', len(ways), 'ways,', len(roofs), 'on roofs,', len(missing), 'not in the LiDAR,', len(APPROACH), 'approaches,',
@@ -1944,15 +1985,11 @@ def deck_heights(wid, pts):
 
 # ---------------------------------------------------------------- tile writer
 def pack_ring(out, ring):
-    """ring -> count + delta-encoded int16 points (first absolute)"""
-    q = [out.q(x, y) for x, y in ring]
-    b = bytearray(struct.pack('<I', len(q)))
-    px_, py_ = 0, 0
-    for x, y in q:
-        dx, dy = x - px_, y - py_
-        b += struct.pack('<hh', max(-32768, min(32767, dx)), max(-32768, min(32767, dy)))
-        px_, py_ = x, y
-    return b
+    """ring -> count + delta-encoded int16 points (first absolute); Out.q on every point at once (round half to even,
+    as Python's round)"""
+    q = np.clip(np.round((np.asarray(ring, np.float64).reshape(-1, 2) - (out.ox, out.oy)) * out.k), -32768, 32767).astype(np.int64)
+    d = np.diff(q, axis=0, prepend=np.zeros((1, 2), np.int64))
+    return struct.pack('<I', len(q)) + np.clip(d, -32768, 32767).astype('<i2').tobytes()
 
 
 def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None, shops=(), beach=()):
@@ -1962,14 +1999,15 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     # ground: per class, the union clipped to the tile, as polygons (rings); the page triangulates and drapes them
     gb = bytearray(); runs = 0
     tol, min_area = (0.25, 4) if detail else (4.0, 600)
-    wat = [p for p in polys.get('water', []) if p.intersects(tb)]
+    near = lambda ps: [ps[k] for k in np.flatnonzero(shapely.intersects(np.array(ps, object), tb))] if ps else []  # (one GEOS call)
+    wat = near(polys.get('water', []))
     water_u = unary_union(wat) if wat else None
     land_base = tb.difference(water_u) if wat else tb  # land and water meet edge to edge, never overlap
     # per class: the union clipped to the tile and simplified, small bits dropped (the class below fills in)
     per = {}
     for k in GROUND:
         src = [land_base] if k == 'land' else polys.get(k, [])
-        cand = [p for p in src if p.intersects(tb)]
+        cand = near(src)
         if not cand: continue
         try: g = unary_union(cand).intersection(tb)
         except Exception: g = unary_union([c.buffer(0) for c in cand]).intersection(tb)
@@ -2033,7 +2071,7 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     bb = bytearray(); nb = 0; fb = bytearray()
     for b in builds:
         r = b['ring']
-        c = (sum(p[0] for p in r) / len(r), sum(p[1] for p in r) / len(r))
+        c = b.get('centre') or b.setdefault('centre', (sum(p[0] for p in r) / len(r), sum(p[1] for p in r) / len(r)))  # once, not per tile
         if not (tx <= c[0] < tx + size and ty <= c[1] < ty + size): continue
         if not detail:
             if b['a'] < 60 and b['gh'] < 12 or b['mn'] > 0 and b['a'] < 150: continue  # overview: no sheds, no penthouses
@@ -2098,16 +2136,90 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     return runs > 0 or nb > 0 or len(sel) > 0
 
 
-def safe_build(ij):
+# ---------------------------------------------------------------- incremental: a 4 km tile is baked again only when what it reads changed
+def canon(o):
+    """o with its numpy arrays as bytes: a repr that is the whole value"""
+    if isinstance(o, np.ndarray): return o.shape, o.dtype.str, o.tobytes()
+    if isinstance(o, (tuple, list)): return tuple(canon(v) for v in o)
+    return o
+
+
+def window(a, ax0, ay1, c, X0, Y0, m):
+    """the cells of a whole-map raster (west edge ax0, north edge ay1, cell c) over the 4 km tile at X0, Y0, m cells
+    around it (at least the edge cells, which a tile off the raster reads)"""
+    r0, c0, n = int((ay1 - Y0 - L1) / c) - m, int((X0 - ax0) / c) - m, int(L1 / c) + 2 * m
+    cut = lambda k, N: slice(min(max(0, k), N - 1), max(min(N, k + n), min(max(0, k), N - 1) + 1))
+    return a[cut(r0, a.shape[0]), cut(c0, a.shape[1])]
+
+
+def lookup_dbs():
+    """the footprint databases build() looks buildings up in (roofs, facades, the LiDAR massing), loaded, and the
+    measured walls (walls_near: STRtree, segments, looks)"""
+    import roofs, facades, lidar_massing
+    for f in (roof_lookup, facade_lookup, massing_lookup, walls_near): f([(0, 0), (1, 0), (0, 1)])
+    return [roofs._DB, facades._DB, *lidar_massing._DB], lidar_massing._WT
+
+
+def db_rows(db, bounds):
+    """a database's rows a building inside bounds can match: their footprints and fields (the massing's parts too)"""
+    if not db: return ()
+    k = np.sort(db['tree'].query(box(*bounds)))
+    out = [shapely.to_wkb(db['polys'][k]).tolist()] + [db[c][k] for c in sorted(db) if c not in ('tree', 'polys', 'parts') and len(db[c]) == len(db['polys'])]
+    if 'parts' in db:
+        P = db['parts']; ii = [i for h in k for i in range(int(db['po'][h]), int(db['po'][h] + db['pn'][h]))]
+        out += [P[c][ii] for c in ('pfoot', 'ptop', 'proof', 'pridge')] + [P['prc'][P['pro'][i]:P['pro'][i + 1]] for i in ii]
+    return canon(out)
+
+
+CODE = None
+NARROWED = {'data/sea.npz', 'data/mrdem32.npz', 'data/trees.csv', 'data/bf2009.geojson', 'data/decks.pkl', 'data/roofs.npz', 'data/facades.npz',
+            'data/massing22.npz', 'data/massing_lm.npz'}  # cell_key's own take on these: only what the tile reads of them
+
+
+def code_version():
+    """build()'s code (code_key) and libraries, and the data files it reads whole: computed before the workers fork, so
+    they all read the same sources"""
+    global CODE
+    if CODE is None:
+        import scipy, PIL, rasterio
+        # a data file the code reads that is not narrowed to the tile below (a new input, say): the whole file, so a
+        # change to it rebakes every tile until it is added here
+        whole = sorted(f for f in code_data(__file__, 'safe_build') - NARROWED if os.path.isfile(f))
+        CODE = digest(code_key(__file__, 'safe_build'), np.__version__, shapely.__version__, scipy.__version__, PIL.__version__, rasterio.__version__,
+                      whole, [file_digest(f) for f in whole])
+    return CODE
+
+
+def cell_key(ij):
+    """everything build(ij) reads, narrowed to the tile where it can be: its OSM bucket and HRDEM, the MRDEM and sea
+    around it, the city trees and 2009 sections in it, the roof/facade/massing rows under its buildings, its ways' deck,
+    approach and tunnel profiles, and the code (code_key: build and all it calls, the libraries' versions)"""
+    i, j = ij
+    X0, Y0 = i * L1, j * L1
+    feat = load_feat(i, j)
+    deck_profiles()
+    wids = sorted({L[0] for L in feat.get('lines', [])})
+    refs = {r for L in feat.get('lines', []) for r in L[2]}
+    dbs, walls = lookup_dbs(); wt, seg, desc = walls or (None, None, None)
+    ring_pts = np.array([p for _, prs, _ in feat.get('buildings', []) for o, _ in prs for p in o] or [(X0, Y0)])
+    bounds = (*(ring_pts.min(0) - 20), *(ring_pts.max(0) + 20))  # a porch, a part: near its footprint
+    return digest(code_version(), file_digest(f'data/feat/{i}_{j}.pkl'), file_digest(f'data/hr/{i}_{j}.npz'),
+                  window(MR, MR_X0, MR_Y1, 32, X0, Y0, 3), window(SEA_M, SEA_X0, SEA_Y1, SEA_C, X0, Y0, 8), (SEA_X0, SEA_Y1, SEA_C),
+                  [t for t in TREES if X0 - 5 <= t[0] < X0 + L1 + 5 and Y0 - 5 <= t[1] < Y0 + L1 + 5], sections_at(X0, Y0),
+                  [db_rows(db, bounds) for db in dbs], canon([(seg[k], desc[k]) for k in np.sort(wt.query(box(*bounds)))] if walls else ()),
+                  canon([(w, DECKS.get(w), APPROACH.get(w), TUNNELS.get(w), w in ROOFS) for w in wids]), sorted(refs & PORTALS))
+
+
+def safe_build(job):
+    """(i, j), the key it was last baked with -> build()'s result and the key now, or 'same' when they match"""
     import traceback
-    try: return build(ij)
+    ij, old = job
+    try:
+        key = cell_key(ij)
+        if key == old: return ij, 'same', key
+        with cpu_slot(): return (*build(ij), key)
     except Exception: return ij, 'FAILED', traceback.format_exc().splitlines()[-1]
 
-
-def write_index():
-    ls = lambda lv: sorted(f[:-4] for f in os.listdir(f'{OUT}/{lv}') if f.endswith('.bin')) if os.path.isdir(f'{OUT}/{lv}') else []
-    json.dump({'version': VERSION, 'origin': [LAT_O, LON_O], 'k': [KX, KY], 'extent': EX, 'sizes': [L0, L1], 'ground': GROUND, 'kinds': KINDS,
-               'l0': ls(0), 'l1': ls(1), 'built': int(time.time())}, open(f'{OUT}/index.json', 'w'))
 
 def selftest():
     """synthetic LiDAR: a gable whose ridge runs across the footprint, a hip, a shed, and a tower on a podium; what
@@ -2176,19 +2288,44 @@ def selftest():
     G = road_ground(dtm, street, 0, -L1)
     gx = lambda x, y: ndimage.map_coordinates(G, [[(-y) / 8], [x / 8]], order=1)[0]
     assert abs(gx(2026, -2000) - 30) < 0.8 and abs(gx(2021, -2000) - 30) < 1.0 and gx(2008, -2000) < 21, (gx(2026, -2000), gx(2021, -2000), gx(2008, -2000))
+    # pct is np.percentile to the bit; a CPU slot is held while its job runs and given back after
+    rng = np.random.default_rng(2)
+    for n in (1, 2, 7, 100, 1001):
+        for dt in (np.float32, np.float64):
+            v = rng.normal(0, 20, n).astype(dt)
+            for q in (0, 5, 10, 60, 70, 90, 97, 100):
+                assert pct(v, q) == np.percentile(v, q) and type(pct(v, q)) == type(np.percentile(v, q)), (n, dt, q)
+    import common, fcntl, tempfile
+    with tempfile.TemporaryDirectory() as d:
+        common.SLOTS = d
+        def busy():
+            fd = os.open(f'{d}/0', os.O_RDWR)
+            try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); return False
+            except OSError: return True
+            finally: os.close(fd)
+        with cpu_slot(2): assert busy()
+        assert not busy() and common.spare_cores(0) <= common.cpus() + 1e-9
     print('selftest ok')
 
 
 if __name__ == '__main__':
     if sys.argv[1:] == ['selftest']: selftest(); sys.exit()
+    # [procs] [i_j ...]: procs caps the workers (cpu_slot runs fewer while the machine is busy); FORCE=1 bakes every tile
     procs = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+    os.environ['PROCS'] = str(procs)  # cpu_slot's cap, in the workers too
     want = tile_args(sys.argv[2:]) or all_tiles()
     t0 = time.time()
-    deck_profiles()  # once, before the workers fork
-    if procs == 1:
-        for ij in want: print(safe_build(ij), flush=True)
-    else:
-        with Pool(procs) as p:
-            for r in p.imap_unordered(safe_build, want): print(r, round(time.time() - t0), 's', flush=True)
-    write_index()
+    deck_profiles(); lookup_dbs(); code_version()  # once, before the workers fork (Linux): they share them
+    size = lambda ij: os.path.getsize(f'data/feat/%d_%d.pkl' % ij) if os.path.exists(f'data/feat/%d_%d.pkl' % ij) else 0
+    want.sort(key=lambda ij: -size(ij))  # the busiest (downtown, minutes each) first, so none is left running alone at the end
+    man = manifest(OUT); cells = man.setdefault('cells', {})
+    jobs = [(ij, None if os.environ.get('FORCE') == '1' else cells.get('%d_%d' % ij)) for ij in want]
+    n = dict(same=0, ok=0, sea=0, FAILED=0)
+    with Pool(procs) as p:
+        for r in p.imap_unordered(safe_build, jobs):
+            n[r[1]] += 1
+            if r[1] != 'FAILED': cells['%d_%d' % r[0]] = r[-1]; save_manifest(OUT, man)
+            if r[1] != 'same': print(r[:-1] if r[1] != 'FAILED' else r, round(time.time() - t0), 's', flush=True)
+    print(n, 'in', round(time.time() - t0), 's', flush=True)
+    write_index(OUT)
 

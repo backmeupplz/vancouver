@@ -6,7 +6,10 @@ import numpy as np
 from PIL import Image, ImageDraw
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(__file__))
-from common import extent
+from common import extent, HERE, digest, files_digest, file_digest, code_key, stamp
+
+KEY = digest(files_digest(sorted(glob.glob('data/feat/*.pkl'))), file_digest(__file__), code_key(f'{HERE}/common.py', 'extent'))
+if stamp('data/sea.npz') == KEY and os.path.exists('data/sea.npz'): print('data/sea.npz is up to date'); sys.exit()
 
 C = 4.0
 X0, Y0, X1, Y1 = extent()
@@ -84,3 +87,4 @@ print('mixed regions (sea, land votes):', mixed[:10], flush=True)
 print('sea fraction', round(float(sea.mean()), 3), flush=True)
 np.savez_compressed('data/sea.npz', sea=sea.astype(np.uint8), x0=X0, y1=Y1, cell=C)
 Image.fromarray((sea * 255).astype(np.uint8)).resize((W // 8, H // 8)).save('data/sea-preview.png')
+stamp('data/sea.npz', KEY)

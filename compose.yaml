@@ -33,8 +33,9 @@ services:
       dockerfile: bake.Dockerfile
     command: sh tools/bake-all.sh
     environment:
-      PROCS: ${PROCS:-4}
+      PROCS: ${PROCS:-10}
       FRESH: ${FRESH:-0}
+      FORCE: ${FORCE:-0}
     volumes:
       - ./tools:/w/tools:ro
       - ./data:/w/data

@@ -6,6 +6,7 @@
 #      ... tools/roofs.py preview [yaletown|coalharbour|gastown|lat,lon]  (ortho vs sampled colours, data/ortho/preview-*.png)
 #      ... tools/roofs.py check   (self-test of the colour maths and the lookup)
 import glob, json, math, os, sys, time
+from functools import lru_cache
 from multiprocessing import Pool
 import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
@@ -189,6 +190,15 @@ def bake(procs):
 
 
 # ---------------------------------------------------------------- lookup (tiles.py)
+@lru_cache(1 << 16)
+def valid_poly(ring):
+    """shapely.make_valid(Polygon(ring)) for a tuple ring, once: the roof, facade and massing lookups and tiles.py's
+    roof_bits all ask for the same footprint"""
+    import shapely
+    from shapely.geometry import Polygon
+    return shapely.make_valid(Polygon(ring))
+
+
 def ring_db(path):
     """an npz of footprints (rc: ring points, ro: ring offsets) and per-footprint fields -> dict with an STRtree, or False"""
     import shapely
@@ -203,7 +213,7 @@ def ring_match(db, ring):
     """the footprint in db that is this ring (best overlap), else the smallest one under its centre, else None"""
     import shapely
     from shapely.geometry import Polygon
-    q = shapely.make_valid(Polygon(ring))
+    q = valid_poly(tuple(map(tuple, ring)))
     hits = db['tree'].query(q, predicate='intersects')
     if not len(hits): return None
     inter = shapely.area(shapely.intersection(db['polys'][hits], q))

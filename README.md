@@ -27,7 +27,7 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    neighbourhood: Gastown, Chinatown and Yaletown brick, West End concrete towers, downtown glass condos, Granville
    Island tin sheds, character houses (steep roofs, siding, porches) and Vancouver Specials told apart by their roofs.
    Under bridges and SkyTrain guideways the LiDAR sees the deck, so it is not used for roofs or trees there.
-   Bridge decks are profiled once for the whole map (cached in `data/decks3.pkl`): the low LiDAR surface across the
+   Bridge decks are profiled once for the whole map (cached in `data/decks.pkl`): the low LiDAR surface across the
    deck, trusses and stay cables dropped, grades clamped to 7%; sidewalks and cycle decks ride on the road deck beside
    them, and a bridge newer than the LiDAR (stal̕əw̓asəm) or a footbridge under the trees (the LiDAR sees their crowns)
    spans its abutments. Where a street goes on from a raised deck end (OpenStreetMap's bridge tag stops short of the
@@ -107,7 +107,10 @@ hiking real trails and sailing through it all. See
 Locally, `docker compose up --build` serves the site at http://localhost:48500 with `public/` mounted (edits show on
 reload) and the live service (`server/`, visitor counts, multiplayer, chat) behind `/live` as in production.
 `docker compose --profile bake run --rm bake` runs the whole bake (`tools/bake-all.sh`, `PROCS=n`, `FRESH=1`) into
-`public/tiles`.
+`public/tiles`. It is incremental: each stage and each 4 km tile is keyed on what it reads (its OSM bucket and LiDAR,
+the data rows under it, the code it runs: `out/manifest.json`, `data/*.key`) and is skipped when that is unchanged, so
+a rebake with nothing new takes a couple of minutes and a new `data/roofs.npz` redoes only the tiles whose rows in it changed;
+`FORCE=1` rebakes every tile. Only changed tiles are copied, each with its own `?v=` in `index.json`.
 
 Map data © OpenStreetMap contributors (ODbL). City of Vancouver Open Data; 2022 orthophoto and LiDAR, property tax
 report and heritage register © City of Vancouver (Open Government Licence – Vancouver). Street photos: Mapillary
