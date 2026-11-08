@@ -71,7 +71,7 @@ sun.shadow.bias = -0.0005
 scene.add(sun, sun.target)
 
 // ---------- the map ----------
-const mats = { ground: groundMaterial(), road: roadMaterial(), paint: roadMaterial(true), building: buildingMaterial(), tree: treeMaterial(treeAtlas()) }
+const mats = { ground: groundMaterial(), road: roadMaterial(), paint: roadMaterial(true), building: buildingMaterial(), tree: treeMaterial(treeAtlas(renderer)) }
 const tiles = new Tiles({
   scene, treeScene, mats,
   // shadows follow new tiles at most twice a second; a tile that loads hidden changes neither them nor the picture
@@ -80,7 +80,7 @@ const tiles = new Tiles({
   onUnload: (t) => { trees3d?.changed(); city?.emit('tile:unload', tileInfo(t)) },
 })
 const trees3d = new Trees3D({ scene, tiles, treeMaterial: mats.tree }) // real trees near a perspective camera
-tiles.cached = quality.tier.cached; trees3d.share = quality.tier.trees3d
+tiles.cached = quality.tier.cached; trees3d.share = quality.tier.trees3d; trees3d.fine = quality.tier.detail
 const tileInfo = (t) => ({ level: t.level, i: t.i, j: t.j, ox: t.ox, oy: t.oy, size: t.level ? 4096 : 1024, graph: t.graph, terrain: t.terrain, footprints: t.footprints, water: t.water,
   trees: t.trees ? { pos: t.trees.geometry.attributes.iPos.array, size: t.trees.geometry.attributes.iSize.array } : null })
 status('Loading the map…', 0.05)
@@ -446,7 +446,7 @@ function applyQuality(t) { // a new tier (core/quality.js)
   shadowQuality(t)
   setAA(t.aa)
   define('NOINK', t.ink === 'off')
-  tiles.cached = t.cached; trees3d.share = t.trees3d; trees3d.changed()
+  tiles.cached = t.cached; trees3d.share = t.trees3d; trees3d.fine = t.detail; trees3d.changed()
   res = 1; settle()
   city?.emit('quality', t)
 }

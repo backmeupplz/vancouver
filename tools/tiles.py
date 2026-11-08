@@ -113,14 +113,14 @@ MR, MR_X0, MR_Y1 = mrdem_grid()
 
 
 def city_trees():
-    """City of Vancouver public trees: (x, y, genus, species, height)"""
+    """City of Vancouver public trees: (x, y, genus, common name and cultivar, height)"""
     out = []
     with open('data/trees.csv', encoding='utf-8-sig') as fh:
         for row in csv.DictReader(fh, delimiter=';'):
             try: lat, lon = map(float, row['geo_point_2d'].split(','))
             except ValueError: continue
             x, y = xy(lat, lon)
-            out.append((x, y, row['genus_name'], row['common_name'], float(row['height_m'] or 0) or 8.0))
+            out.append((x, y, row['genus_name'], f"{row['common_name']} {row.get('cultivar_name') or ''}".upper(), float(row['height_m'] or 0) or 8.0))
     return out
 
 
@@ -140,16 +140,21 @@ SECTIONS = lidar_sections()
 print('inputs ready', len(TREES), 'city trees', len(SECTIONS), 'lidar sections', flush=True)
 
 
-# ---------------------------------------------------------------- tree species -> shape and autumn colour
-# shapes: 0 round, 1 columnar, 2 spreading, 3 weeping, 4 fir, 5 cedar, 6 pine, 7 palm
+# ---------------------------------------------------------------- tree species -> form and autumn colour
+# forms (public/core/treeforms.js): 0 round, 1 columnar, 2 spreading, 3 weeping, 4 fir, 5 cedar, 6 pine, 7 palm, 8 vase
 SHAPE = {
-    'ACER': 0, 'PRUNUS': 2, 'MALUS': 2, 'TILIA': 1, 'FRAXINUS': 0, 'QUERCUS': 2, 'CARPINUS': 1, 'BETULA': 3, 'SALIX': 3, 'ULMUS': 2,
-    'AESCULUS': 2, 'FAGUS': 2, 'PLATANUS': 2, 'LIQUIDAMBAR': 1, 'GLEDITSIA': 2, 'GINKGO': 1, 'POPULUS': 1, 'CERCIDIPHYLLUM': 0,
-    'PYRUS': 1, 'SORBUS': 0, 'CORNUS': 0, 'MAGNOLIA': 0, 'STYRAX': 0, 'PARROTIA': 0, 'NYSSA': 1, 'ZELKOVA': 2, 'CATALPA': 2,
+    'ACER': 0, 'PRUNUS': 0, 'MALUS': 0, 'TILIA': 0, 'FRAXINUS': 0, 'QUERCUS': 2, 'CARPINUS': 0, 'BETULA': 3, 'SALIX': 3, 'ULMUS': 8,
+    'AESCULUS': 2, 'FAGUS': 2, 'PLATANUS': 2, 'LIQUIDAMBAR': 0, 'GLEDITSIA': 8, 'GINKGO': 1, 'POPULUS': 1, 'CERCIDIPHYLLUM': 0,
+    'PYRUS': 0, 'SORBUS': 0, 'CORNUS': 2, 'MAGNOLIA': 0, 'STYRAX': 2, 'PARROTIA': 2, 'NYSSA': 0, 'ZELKOVA': 8, 'CATALPA': 2,
+    'CRATAEGUS': 0, 'ROBINIA': 2, 'LIRIODENDRON': 0, 'CERCIS': 2, 'ALNUS': 0, 'AMELANCHIER': 0, 'SYRINGA': 0, 'JUGLANS': 2,
     'THUJA': 5, 'CHAMAECYPARIS': 5, 'CALOCEDRUS': 5, 'CUPRESSOCYPARIS': 5, 'SEQUOIADENDRON': 4, 'SEQUOIA': 4, 'METASEQUOIA': 4,
-    'PSEUDOTSUGA': 4, 'PICEA': 4, 'ABIES': 4, 'TSUGA': 4, 'TAXODIUM': 4, 'CEDRUS': 6, 'PINUS': 6, 'ARAUCARIA': 6, 'TAXUS': 5,
+    'PSEUDOTSUGA': 4, 'PICEA': 4, 'ABIES': 4, 'TSUGA': 5, 'TAXODIUM': 4, 'CEDRUS': 5, 'PINUS': 6, 'ARAUCARIA': 6, 'TAXUS': 5,
     'TRACHYCARPUS': 7, 'ARBUTUS': 2,
 }
+# the cultivar or common name says more than the genus: Pyramidal European hornbeams, columnar Norway maples, Dawyck
+# beeches, Lombardy poplars; weeping cherries and willows; Kwanzan cherries grow as vases, globe maples as balls
+LOOK_WORDS = ((1, ('FASTIGIAT', 'COLUMN', 'PYRAMIDAL', 'SENTINEL', 'DAWYCK', 'UPRIGHT', 'ITALICA', 'LOMBARDY', 'ARMSTRONG', 'BOWHALL', 'SKYROCKET', 'SPIRE', 'CHANTICLEER', 'SLENDER')),
+              (3, ('WEEPING', 'PENDUL')), (8, ('KWANZAN',)), (0, ('GLOBE', 'GLOBOSUM', 'UMBRACULIFERA')))
 # colour families (indices into the page's palette, see public/core/trees.js): 0 green, 1 yellow, 2 orange, 3 red, 4 brown,
 # 5 dark conifer, 6 blue-green conifer, 7 forest green, 8 bare-ish (late), 9 cherry
 AUTUMN = {
@@ -157,13 +162,21 @@ AUTUMN = {
     'BETULA': (1,), 'SALIX': (0, 1), 'ULMUS': (1, 0), 'AESCULUS': (4, 2), 'FAGUS': (4, 2), 'PLATANUS': (4, 1), 'LIQUIDAMBAR': (3, 2),
     'GLEDITSIA': (1,), 'GINKGO': (1,), 'POPULUS': (1,), 'CERCIDIPHYLLUM': (2, 1), 'PYRUS': (3, 2), 'SORBUS': (2, 3), 'CORNUS': (3,),
     'PARROTIA': (2, 3), 'NYSSA': (3,), 'ZELKOVA': (2, 4), 'STYRAX': (1,), 'MAGNOLIA': (0, 4), 'ARBUTUS': (0,),
+    'CRATAEGUS': (3, 2), 'ROBINIA': (1,), 'LIRIODENDRON': (1, 2), 'CERCIS': (1,), 'AMELANCHIER': (3, 2), 'JUGLANS': (1, 4),
 }
 
 
-def tree_look(genus, rnd):
+def tree_look(genus, rnd, name='', wh=None):
+    """form and colour family of a tree of this genus (and common name + cultivar); wh: its crown's width / height
+    from the LiDAR, which makes a broad round-headed tree spreading and a narrow spreading one round"""
     g = (genus or '').upper()
     shape = SHAPE.get(g)
     if shape is None: shape = 0
+    for f, words in LOOK_WORDS:
+        if shape < 4 and any(w in name for w in words): shape = f; break
+    else:
+        if wh is not None and shape == 0 and wh > 1.25: shape = 2
+        elif wh is not None and shape == 2 and wh < 0.7: shape = 0
     if shape >= 4:
         return shape, 6 if g in ('PICEA', 'CEDRUS') else 5
     if g == 'PRUNUS': return shape, 9  # cherries and plums: autumn's red, blossom in spring (the page's palette)
@@ -1060,8 +1073,8 @@ def canopy_trees(dsm, dtm, fp, water, X0, Y0, rnd, polys, nogo):
     cw = crown_widths(chm, (chm > 3.0) & ~fp & ~water, crown_at, [k[2] for k in keep])  # crowns may overhang roofs
     # species: the city's inventory where it has the tree, else a guess from the crown and the land cover
     near = {}
-    for x, y, genus, common, h in TREES:
-        if X0 - 5 <= x < X0 + L1 + 5 and Y0 - 5 <= y < Y0 + L1 + 5: near.setdefault((int(x // 4), int(y // 4)), []).append((x, y, genus, h))
+    for x, y, genus, name, h in TREES:
+        if X0 - 5 <= x < X0 + L1 + 5 and Y0 - 5 <= y < Y0 + L1 + 5: near.setdefault((int(x // 4), int(y // 4)), []).append((x, y, genus, h, name))
     out = []
     used = set()
     for (x, y, h), w in zip(keep, cw):
@@ -1073,14 +1086,17 @@ def canopy_trees(dsm, dtm, fp, water, X0, Y0, rnd, polys, nogo):
                 if g: break
             if g: break
         if g:
-            used.add(id(g)); shape, col = tree_look(g[2], rnd)
+            used.add(id(g)); shape, col = tree_look(g[2], rnd, g[4], w / max(1.0, h))
         else:
             py, px_ = int((Y0 + L1 - y) / HR), int((x - X0) / HR)
             ring = chm[max(0, py - 2):py + 3, max(0, px_ - 2):px_ + 3]
             peaky = (h - ring.mean()) / max(1, h)
             conifer = h > 24 or peaky > 0.22 or h > 14 and rnd.random() < 0.5
-            if conifer: shape, col = rnd.choice((4, 4, 4, 5, 5, 6)), rnd.choice((5, 5, 7, 6))
-            else: shape, col = rnd.choice((0, 0, 0, 2, 1, 3)), rnd.choice((0, 0, 0, 0, 7, 1, 2, 4))
+            wh = w / max(1.0, h)  # the crown's shape picks among the likely forms: Douglas firs and cedars in the woods,
+            if conifer: shape, col = rnd.choice((6, 6, 4, 5) if wh > 0.75 and h < 20 else (4, 4, 4, 5, 5, 5, 6)), rnd.choice((5, 5, 7, 6))
+            else:  # broad crowns spread or vase out, narrow ones are often columns
+                shape = rnd.choice((2, 2, 8, 0) if wh > 1.25 else (1, 0, 0) if wh < 0.6 else (0, 0, 0, 0, 2, 8, 1, 3))
+                col = rnd.choice((0, 0, 0, 0, 7, 1, 2, 4))
         out.append((x, y, shape, col | crown_q(w) << 4, min(63.0, h)))
     # young street trees the LiDAR can't see yet
     for cell, lst in near.items():
@@ -1089,7 +1105,7 @@ def canopy_trees(dsm, dtm, fp, water, X0, Y0, rnd, polys, nogo):
             if not (X0 <= c[0] < X0 + L1 and Y0 <= c[1] < Y0 + L1): continue
             py, px_ = int((Y0 + L1 - c[1]) / HR), int((c[0] - X0) / HR)
             if 0 <= py < N and 0 <= px_ < N and blocked[py, px_]: continue
-            shape, col = tree_look(c[2], rnd)
+            shape, col = tree_look(c[2], rnd, c[4])
             out.append((c[0], c[1], shape, col | crown_q(0.45 * c[3] + 1.5) << 4, c[3]))
     return out
 
@@ -1154,6 +1170,7 @@ def turn_lanes(v):
 
 def road_pieces(items, dsm, dtm, X0, Y0, own=True):
     """pieces split at junctions: dict(kind, pts [(x,y)], z [..] or None, lanes, width, oneway, band, layer, a, b (node ids), name)"""
+    deck_profiles()  # APPROACH comes with it: a spawned worker (macOS) has not loaded it yet
     use = {}
     ways = []
     for wid, coords, refs, t in items:
@@ -1204,7 +1221,7 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
 # trusses sit above the deck), samples far above the along-bridge profile dropped, the grade clamped, then smoothed.
 # Sidewalks and cycle decks mapped beside a road deck take that deck's height; a long bridge the LiDAR does not have
 # yet (stal̕əw̓asəm, 2024) or one under the trees spans between its abutments. Cached in data/decks<version>.pkl.
-DECK_VERSION = 3
+DECK_VERSION = 4
 DECK_CACHE = f'data/decks{DECK_VERSION}.pkl'
 GRADE = 0.07  # steepest deck grade kept, rise per metre
 FOOT = {'footway', 'cycleway', 'path', 'pedestrian', 'steps', 'track'}
@@ -1404,15 +1421,35 @@ def deck_profiles():
     ease({w: [inner[ways[w][1][0]] - prof[w][0] if ways[w][1][0] in inner else 0.0, inner[ways[w][1][-1]] - prof[w][-1] if ways[w][1][-1] in inner else 0.0]
           for w in prof if prof[w] is not None and (ways[w][1][0] in inner or ways[w][1][-1] in inner)})
     DECKS = {w: (np.asarray(ways[w][0], np.float64), raw[w][1].astype(np.float32), np.asarray(prof[w], np.float32)) for w in prof if prof[w] is not None}
-    tops = {}  # every node of a deck: where an at-grade way goes on from it
-    for w in DECKS:
-        for r, x, y, h in at_nodes(w): tops.setdefault(r, []).append((x, y, h))
-    APPROACH.clear(); APPROACH.update(approaches(files, {r: np.mean(v, axis=0) for r, v in tops.items()}))
+    def go_on():  # every node of a deck: where an at-grade way goes on from it
+        tops = {}
+        for w in DECKS:
+            for r, x, y, h in at_nodes(w): tops.setdefault(r, []).append((x, y, h))
+        APPROACH.clear(); APPROACH.update(approaches(files, {r: np.mean(v, axis=0) for r, v in tops.items()}))
+    go_on()
+    # a road or rail deck's abutment with no approach (the LiDAR sees open ground just past it, or a station) meets the
+    # ground there: its profile there was something else (a viaduct over it, a station roof); cars and trains take no stairs
+    starts = {n for lst in APPROACH.values() for e in lst for n in e[:2]}  # where approaches start, or end on a deck
+    eased = 0
+    for w, (c, s, z) in DECKS.items():
+        if ways[w][3] in FOOT: continue
+        for e, r in ((0, ways[w][1][0]), (-1, ways[w][1][-1])):
+            if len(joints.get(r, ())) > 1 or r in inner or r in starts: continue  # it meets another deck or an approach
+            g = float(hr_lookup(c[[e], 0], c[[e], 1], 1)[0])
+            if not np.isfinite(g) or abs(z[e] - g) < 1.0: continue
+            prof[w] = z[:] = to_ground(s, z, g, e); eased += 1
+    if eased: go_on()  # nodes near those ends moved
     HR_CACHE.clear()
     try: pickle.dump({'key': key, 'decks': DECKS, 'approach': APPROACH}, open(DECK_CACHE, 'wb'), protocol=5)
     except OSError: pass
     print('bridge decks', len(DECKS), 'of', len(ways), 'ways,', len(missing), 'not in the LiDAR,', len(APPROACH), 'approaches', round(time.time() - t0), 's', flush=True)
     return DECKS
+
+
+def to_ground(s, z, g, e):
+    """deck heights z (at distances s along) brought to the ground height g at end e (0 or -1), no steeper than GRADE"""
+    d = s - s[0] if e == 0 else s[-1] - s
+    return np.clip(z, g - GRADE * d, g + GRADE * d)
 
 
 def approaches(files, tops):
@@ -1432,11 +1469,13 @@ def approaches(files, tops):
             if wid in ways or len(coords) < 2 or t.get('bridge') not in (None, 'no') or t.get('area') == 'yes': continue
             k = line_kind(t)
             if not k or t.get('tunnel') in ('yes', 'building_passage', 'culvert') or t.get('covered') == 'yes' and k in ('rail', 'lightrail'): continue
-            if t.get('indoor') or t.get('level', '0') != '0' or t.get('highway') == 'corridor': continue  # inside a building
+            lv = t.get('level', '0')
+            if t.get('indoor') or lv != '0' and ';' not in lv or t.get('highway') == 'corridor': continue  # inside a building (steps between levels are not)
             if not any((int(x // cell), int(y // cell)) in near for x, y in coords[::4] + coords[-1:]): continue
             ways[wid] = (coords, refs, k, road_shape(k, t)[1])
             for n_, r in enumerate(refs): at.setdefault(r, []).append((wid, n_))
         for _, prs, t in pickle.load(open(f, 'rb')).get('buildings', []):
+            if (hnum(t.get('building:min_level')) or 0) > 0 or (hnum(t.get('min_height')) or 0) > 2: continue  # up in the air: ways go on under it
             for outer, _ in prs:
                 if len(outer) >= 4 and (int(outer[0][0] // cell), int(outer[0][1] // cell)) in near: blds.append(Polygon(outer).buffer(0))
     from shapely.strtree import STRtree
@@ -1461,7 +1500,7 @@ def approaches(files, tops):
                 G = 0.8 if kind == 'steps' else 0.03 if kind == 'rail' else 0.06 if kind == 'lightrail' else 0.10 if kind in FOOT else 0.08
                 far = tops.get(refs[order[-1]])
                 if far is not None and s[-1] < 150:  # a connector between two decks: straight from one to the other
-                    if abs(far - h0) > (0.5 if kind in FOOT else 0.1) * s[-1]: continue  # too steep for a ramp: stairs, a lift
+                    if abs(far - h0) > (G if kind == 'steps' else 0.5 if kind in FOOT else 0.1) * s[-1]: continue  # too steep for a ramp (or a stair): a lift
                     z, down = h0 + (far - h0) * s / max(s[-1], 1e-6), None
                 else:  # a footway's surface beyond its bridge is a building or the trees as often as a ramp: it just comes down
                     z, down = ramp(s, low, g, h0, G, 0 if kind in FOOT else 300)
@@ -1497,7 +1536,10 @@ def ramp(s, low, g, h0, G, follow):
         c = np.clip(low[m], c - G * ds, c + 0.25 * G * ds) if follow > 0 else c - G * ds
         if np.isfinite(low[m]) and low[m] < c - 0.75 and low[m] < g[m] + 0.5:  # the LiDAR sees the open ground under it: no structure
             z[m] = g[m]
-            return z, (m if c - g[m] < 3 else -1)
+            if c - g[m] >= 3: return z, -1
+            # down to it along the way so far, not in one step (no steeper than needed from the deck end)
+            z[:m] = np.minimum(z[:m], g[m] + max(G, (h0 - g[m]) / max(s[m], 1e-6)) * (s[m] - s[:m]))
+            return z, m
         c = max(c, g[m])
         z[m] = c
         if c - g[m] < 0.3: return z, m
@@ -1702,10 +1744,23 @@ def selftest():
     assert down == -1, down
     z, down = ramp(sa, np.full(len(sa), 2.0), gr.copy(), 4.0, 0.08, 150)  # a deck end a little high: down to the ground
     assert down == 1 and np.isfinite(z[:2]).all(), (down, z[:3])
+    # the LiDAR follows a ramp down, then sees the open ground 2 m below it: down to it at the ramp's grade, not a step
+    z, down = ramp(sa, np.where(sa <= 160, 12 - 0.05 * sa, 2.2), gr.copy(), 12.0, 0.08, 300)
+    assert down == 41 and z[down] == 2.0 and np.max(-np.diff(z[:down + 1])) <= 0.08 * 4 + 1e-6, (down, z[35:42])
+    # a road deck's end the LiDAR put on a viaduct above it (16.7 m over the ground at 4.5) meets the ground at 7%
+    sd = np.arange(0, 340, 4.0); zd = np.where(sd < 260, 9.5, 9.5 + (sd - 260) * 0.09)
+    z = to_ground(sd, zd, 4.5, -1)
+    assert z[-1] == 4.5 and np.allclose(z[:120 // 4], 9.5) and np.max(np.abs(np.diff(z))) <= GRADE * 4 + 1e-6, z[-25:]
     # crowns: two 12 m trees in a 20 x 40 m patch of canopy share it, up to their reach; a lone tree in a small patch keeps a small crown
     can = np.zeros((40, 40), bool); can[10:20, 5:25] = True; can[30:33, 30:33] = True
     w = crown_widths(np.full((40, 40), 12.0), can, [(15, 10), (15, 20), (31, 31)], [12.0, 12.0, 6.0])
     assert 13 < w[0] < 17 and 13 < w[1] < 17 and w[2] < 7.5 and crown_q(w[0]) > crown_q(w[2]), w
+    # forms: the cultivar over the genus, the LiDAR crown's shape for round-headed trees, conifers by genus
+    r = random.Random(1)
+    looks = [tree_look('CARPINUS', r, 'PYRAMIDAL EUROPEAN HORNBEAM FASTIGIATA')[0], tree_look('PRUNUS', r, 'KWANZAN FLOWERING CHERRY KWANZAN')[0],
+             tree_look('ACER', r, 'NORWAY MAPLE NONE', 1.5)[0], tree_look('ACER', r, 'NORWAY MAPLE NONE', 1.0)[0], tree_look('THUJA', r, 'WESTERN RED CEDAR NONE')[0],
+             tree_look('SALIX', r)[0], tree_look('ULMUS', r)[0], tree_look('PSEUDOTSUGA', r)[0], tree_look('TRACHYCARPUS', r)[0]]
+    assert looks == [1, 8, 2, 0, 5, 3, 8, 4, 7], looks
     print('selftest ok')
 
 

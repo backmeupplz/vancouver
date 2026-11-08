@@ -106,7 +106,9 @@ export default function drive(city) {
       bb.push(x0, y0, x1, y1)
       for (let cx = Math.floor(x0 / CELL); cx <= Math.floor(x1 / CELL); cx++) for (let cy = Math.floor(y0 / CELL); cy <= Math.floor(y1 / CELL); cy++) put(fg, ckey(cx, cy), r)
     }
-    const b = { t, segs, rg, fg, fp, bb, segSeen: new Uint32Array(segs.length), fpSeen: new Uint32Array(bb.length / 4) }
+    let bx0 = t.ox, by0 = t.oy, bx1 = t.ox + 1024, by1 = t.oy + 1024 // what its roads cover: a long bridge sticks out of its tile
+    for (const s of segs) { bx0 = Math.min(bx0, s.x0, s.x1); by0 = Math.min(by0, s.y0, s.y1); bx1 = Math.max(bx1, s.x0, s.x1); by1 = Math.max(by1, s.y0, s.y1) }
+    const b = { t, segs, rg, fg, fp, bb, box: [bx0, by0, bx1, by1], segSeen: new Uint32Array(segs.length), fpSeen: new Uint32Array(bb.length / 4) }
     furniture(b)
     return b
   }
@@ -166,12 +168,15 @@ export default function drive(city) {
   }
   let stamp = 0 // dedupe marks (instead of a Set per query: these run several times a frame)
   const NEAR = [] // tilesNear's answer, reused: loop over it before asking again
-  function tilesNear(x, y, r) { // the indexes of the detail tiles near (x, north)
+  function tilesNear(x, y, r) { // the indexes of the detail tiles near (x, north), and of the next ones round whose roads reach here
     NEAR.length = 0
-    for (let i = Math.floor((x - r) / 1024); i <= Math.floor((x + r) / 1024); i++) for (let j = Math.floor((y - r) / 1024); j <= Math.floor((y + r) / 1024); j++) {
+    const i0 = Math.floor((x - r) / 1024), i1 = Math.floor((x + r) / 1024), j0 = Math.floor((y - r) / 1024), j1 = Math.floor((y + r) / 1024)
+    for (let i = i0 - 1; i <= i1 + 1; i++) for (let j = j0 - 1; j <= j1 + 1; j++) {
       const k = ckey(i, j)
       let b = built.get(k)
       if (!b) { const t = infos.get(k); if (!t) continue; b = index(t); built.set(k, b) }
+      const [bx0, by0, bx1, by1] = b.box
+      if ((i < i0 || i > i1 || j < j0 || j > j1) && (x + r < bx0 || x - r > bx1 || y + r < by0 || y - r > by1)) continue
       NEAR.push(b)
     }
     return NEAR
@@ -179,7 +184,8 @@ export default function drive(city) {
   const each = (x, y, r, fn) => { for (const b of tilesNear(x, y, r).slice()) fn(b) } // (a copy: fn may ask again)
   // the nearest road segment point within r metres: drivable ones, or walkable ones (walk), or any road with bus-only
   // ones (bus); deck: bridge decks only
-  function nearestRoad(x, y, r, deck = false, walk = false, bus = false) {
+  // atZ (decks): of the decks right under (x, y), stacked or side by side, the one nearest that height
+  function nearestRoad(x, y, r, deck = false, walk = false, bus = false, atZ = null) {
     let best = null, bd = r
     const mark = ++stamp
     for (const b of tilesNear(x, y, r)) {
@@ -191,8 +197,9 @@ export default function drive(city) {
           if ((walk ? !s.wlk : bus ? !s.bus : !s.drv) || (deck && s.z0 == null)) continue
           const dx = s.x1 - s.x0, dy = s.y1 - s.y0, L2 = dx * dx + dy * dy || 1
           const u = clamp(((x - s.x0) * dx + (y - s.y0) * dy) / L2, 0, 1), px = s.x0 + dx * u, py = s.y0 + dy * u
-          const d = Math.hypot(x - px, y - py) - s.p.w / 2
-          if (d < bd) { bd = d; best = { s, u, px, py, d: Math.max(0, d), dist: Math.hypot(x - px, y - py), z: s.z0 == null ? null : s.z0 + (s.z1 - s.z0) * u, dir: Math.atan2(dy, dx), w: s.p.w } }
+          const d = Math.hypot(x - px, y - py) - s.p.w / 2, z = s.z0 == null ? null : s.z0 + (s.z1 - s.z0) * u
+          const key = atZ != null && z != null && d < 1.2 ? Math.abs(z - atZ) - 1000 : d
+          if (key < bd) { bd = key; best = { s, u, px, py, d: Math.max(0, d), dist: Math.hypot(x - px, y - py), z, dir: Math.atan2(dy, dx), w: s.p.w } }
         }
       }
     }
@@ -698,7 +705,7 @@ export default function drive(city) {
     car.tyaw = ty; car.tx = jx - fwdX(ty) * V.trail; car.ty = jy - fwdY(ty) * V.trail
   }
   function resetTrailer() { const V = car.V; car.tyaw = car.yaw; car.tx = car.x - fwdX(car.yaw) * ((V.joint || 0) + (V.trail || 0)); car.ty = car.y - fwdY(car.yaw) * ((V.joint || 0) + (V.trail || 0)); boxes() }
-  const man = { x: 0, y: 0, h: 0, yaw: 0, speed: 0, phase: 0, run: false, bumpT: 0, board: null, stamina: 1, winded: false }
+  const man = { x: 0, y: 0, h: 0, deck: false, yaw: 0, speed: 0, phase: 0, run: false, bumpT: 0, board: null, stamina: 1, winded: false }
   const chase = { pos: new THREE.Vector3(), look: new THREE.Vector3(), yaw: 0 }
   let state = 'off', anim = null, offFrame = null, t0 = 0, mapPose = null, fromPose = null, saved = null
   let deliver = false, onFoot = false, hasVan = true, assist = true, run = null, shift = newShift(), hudAt = 0, jobRetry = 0, readAt = 0, street = null, shake = 0, skyAt = 0, fogFar = 850
@@ -1010,7 +1017,7 @@ export default function drive(city) {
   function pickDoorCam(P) {
     const fx = fwdX(P.yaw), fy = fwdY(P.yaw), lx = P.x + fx * (car.V.hl - 3) + fy * (car.V.hw + 1.2), ly = P.y + fy * (car.V.hl - 3) - fx * (car.V.hw + 1.2)
     let best = DOOR_CAMS[0], fewest = Infinity, bx, by, dx, dy, L2, hits
-    const hit = (x, y, r, kind) => { // kind 0: a tree (r its trunk, about 0.035 of the crown's width)
+    const hit = (x, y, r, kind) => { // kind 0: a tree (r its trunk, about 0.03 of the crown's width)
       const ex = x - bx, ey = y - by, e = Math.hypot(ex, ey), u = clamp((ex * dx + ey * dy) / L2, 0, 1), d = Math.hypot(bx + dx * u - x, by + dy * u - y)
       if (kind) { if (u < 0.5 && d < r + 1.2) hits++; return }
       const cr = r / 0.07, ahead = ex * dx + ey * dy > e * Math.sqrt(L2) * 0.7 // within 45° of the view's centre
@@ -1185,7 +1192,7 @@ export default function drive(city) {
   // near a deck's end (where it meets the street, often a few metres off the terrain) the van may step up or down
   function surface(x, y, curY) {
     const g = city.world.heightAt(x, -y) + 0.2
-    const r = nearestRoad(x, y, 16, true)
+    const r = nearestRoad(x, y, 16, true, false, false, curY - 0.58)
     if (!r) return { y: g, deck: false, end: false }
     const P = r.s.p.pts, m = P.length - 2, end = Math.min(Math.hypot(x - P[0], y - P[1]), Math.hypot(x - P[m], y - P[m + 1])) < 25
     const dz = r.z + 0.58
@@ -1241,7 +1248,7 @@ export default function drive(city) {
     if (run) shift.km += Math.hypot(nx - car.x, ny - car.y) / 1000
     car.x = nx; car.y = ny
     tow(); boxes()
-    for (let i = 0; i < nsec; i++) { // buildings: circles along the van (and each section of a bus)
+    for (let i = 0; i < nsec && !car.deck; i++) { // buildings: circles along the van (and each section of a bus); not the ones under a bridge it is on
       const B = secs[i], [offs, cr] = i ? [car.V.rear[2], 1.35] : car.V.circles
       for (const off of offs) {
         const p = collide(B.x + B.fx * off, B.y + B.fy * off, cr)
@@ -1313,7 +1320,7 @@ export default function drive(city) {
   // the surface under a walker: the ground, or a bridge deck (its sidewalks too) when already up on it
   function footSurface(x, y, curY) {
     const g = city.world.heightAt(x, -y) + 0.15
-    const r = nearestRoad(x, y, 16, true, true)
+    const r = nearestRoad(x, y, 16, true, true, false, curY - 0.5)
     if (!r) return { y: g, deck: false }
     const dz = r.z + 0.5, reach = r.s.p.band ? 5 : 1
     if (r.d < reach && Math.abs(dz - curY) < 2.2) return { y: Math.max(g, dz), deck: dz - g > 1.2 }
@@ -1365,7 +1372,7 @@ export default function drive(city) {
     }
     man.x = nx; man.y = ny
     // buildings, the parked van, posts and trunks (not the ones a trail runs through), signal poles, people, cars
-    const p = collide(man.x, man.y, 0.32)
+    const p = !man.deck && collide(man.x, man.y, 0.32) // (not the buildings under a bridge)
     if (p) { man.x += p.x; man.y += p.y }
     if (hasVan) { const q = circleBox(man.x, man.y, 0.32, car.x, car.y, fwdX(car.yaw), fwdY(car.yaw), car.V.hl, car.V.hw); if (q) { man.x += q.x; man.y += q.y } }
     propsNear(man.x, man.y, 1, (x, y, r, kind) => { if (!(kind === 0 && onTrail)) push(x, y, r) })
@@ -1388,6 +1395,7 @@ export default function drive(city) {
       bumped(closing, () => hitTraffic(o, closing))
     }
     const s = footSurface(man.x, man.y, man.h)
+    man.deck = s.deck
     man.h += (s.y - man.h) * (1 - Math.exp(-14 * dt))
     man.phase += dt * Math.abs(man.speed) * (man.run ? 2.3 : 3.6)
   }

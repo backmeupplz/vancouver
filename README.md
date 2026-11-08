@@ -16,7 +16,8 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
 5. `uv run --with numpy,scipy,pillow,shapely,rasterio python3 tools/tiles.py [procs]` bakes the
    map tiles into `public/tiles/` (about 2 minutes on 9 cores, ~115 MB): 1 km detail tiles and 4 km overview tiles
    with terrain, ground polygons, roads with their node graph, buildings, trees (LiDAR canopy peaks, species from the
-   city's inventory, crowns as wide as the canopy each owns, trunks never on a carriageway or a sidewalk's walking zone:
+   city's inventory picking one of nine low-poly forms (round, columnar, spreading, weeping, vase, fir, cedar, pine, palm; the
+   cultivar and the LiDAR crown's shape refine it), crowns as wide as the canopy each owns, trunks never on a carriageway or a sidewalk's walking zone:
    `tools/audit_trunks.py public/tiles` counts any left), marina docks with boats at their berths and points like traffic signals. Buildings are OSM footprints shaped by the LiDAR surface inside
    them: up to four roof levels (podium, tower, penthouse, terraces), pitched roofs fitted to it (gable either way,
    hip, shed), rooftop plant only where it shows, the city's 2009 roof sections where they still match. Their look
@@ -28,7 +29,8 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    deck, trusses and stay cables dropped, grades clamped to 7%; sidewalks and cycle decks ride on the road deck beside
    them, and a bridge newer than the LiDAR (stal̕əw̓asəm) or a footbridge under the trees (the LiDAR sees their crowns)
    spans its abutments. Where a street goes on from a raised deck end (OpenStreetMap's bridge tag stops short of the
-   structure, stairs come down off a footbridge) it follows the LiDAR down to the ground at a ramp's grade. The terrain
+   structure, stairs come down off a footbridge) it follows the LiDAR down to the ground at a ramp's grade. A road or rail
+   deck end that nothing goes on from comes down to the ground at 7%. The terrain
    is an 8 m grid in detail tiles, so streets sit on their embankments and in their cuts; piers and seawalls in the sea
    keep their height. `tools/audit_elev.py public/tiles` checks a bake: streets off the ground, decks through
    buildings, steps at abutments, steep or buried decks, tunnels on the surface (worst first, with view links).

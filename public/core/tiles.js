@@ -3,6 +3,7 @@
 // Decoding and geometry building happen in workers; this file only makes three.js objects from their buffers.
 import * as THREE from 'three'
 import { FAMILY } from './materials.js'
+import { FORMS, ASPECT } from './treeforms.js'
 import { sampleGrid } from './util.js'
 
 const SIZES = [1024, 4096]
@@ -362,17 +363,16 @@ export class Tiles {
   makeTrees(t, { pos, info }) {
     const n = pos.length / 3
     const P = new Float32Array(n * 3), S = new Float32Array(n * 2), C = new Float32Array(n * 3), V = new Float32Array(n)
-    // per shape: billboard width by height (old tiles, no crown width), per metre of crown (the painted crown fills
-    // less than its cell) and at most by height (columns and conifers stay slim however much canopy they own)
-    const W = [0.75, 0.42, 1.0, 0.8, 0.36, 0.46, 0.62, 0.62], H = [1.08, 1.05, 1.0, 1.08, 1.05, 1.05, 1.0, 1.05]
-    const K = [1.25, 1.7, 1.22, 1.25, 1.75, 1.4, 1.3, 1.3], MAXW = [1.5, 0.6, 1.7, 1.3, 0.6, 0.75, 1.0, 0.9]
+    // per form (treeforms.js): the crown's width at least / at most by the tree's height (columns and conifers stay
+    // slim however much canopy they own, a spreading tree stays wide); old tiles without crown widths: its usual width
+    const MINW = [0.5, 0.18, 0.75, 0.6, 0.22, 0.3, 0.4, 0.35, 0.65], MAXW = [1.3, 0.42, 1.7, 1.3, 0.45, 0.6, 0.95, 0.8, 1.5]
     let lo = Infinity, hi = -Infinity
     for (let i = 0; i < n; i++) {
       const shape = info[i * 4], fam = SEASONAL ? SEASONAL[info[i * 4 + 1] & 15] ?? 0 : info[i * 4 + 1] & 15, cq = info[i * 4 + 1] >> 4, h = Math.max(3, info[i * 4 + 2]), seed = Math.abs(info[i * 4 + 3])
       P[i * 3] = pos[i * 3]; P[i * 3 + 1] = pos[i * 3 + 1]; P[i * 3 + 2] = pos[i * 3 + 2]
       // the crown's width from the LiDAR canopy (tools/tiles.py crown_q), in the colour byte's high nibble
-      const w = cq ? Math.min((2 + cq * 1.4) * K[shape], h * MAXW[shape]) : h * W[shape]
-      S[i * 2] = Math.min(30, Math.max(2.6, w)); S[i * 2 + 1] = h * 0.866 * H[shape] // a wide crown stands taller (the tree material)
+      const fm = Math.min(FORMS - 1, shape), w = cq ? Math.min(Math.max(2 + cq * 1.4, h * MINW[fm]), h * MAXW[fm]) : h / ASPECT[fm]
+      S[i * 2] = Math.min(30, Math.max(1.2, w)); S[i * 2 + 1] = h * 0.866
       const f = FAMILY[fam] || FAMILY[0], c = f[Math.floor(seed * f.length) % f.length]
       const v = 0.94 + seed * 0.12
       C[i * 3] = c.r * v; C[i * 3 + 1] = c.g * v; C[i * 3 + 2] = c.b * v

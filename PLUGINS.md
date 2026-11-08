@@ -101,7 +101,7 @@ close. New tiles are built and uploaded to the GPU a few MB per frame, so stream
   `(i, j)` counts east and north from the tile's south-west corner (`ox`, `oy`), `size / n` metres each.
 - `tile.trees` (tiles with trees, else `null`): `{ pos, size }`, `Float32Array`s with 3 and 2 numbers a tree: its foot
   relative to the tile's corner (`x - ox`, ground height, `-(north - oy)`) and its crown's width and height. The trunk
-  of a tree `w` metres wide is about `0.035 w` in radius (the drive plugin bumps into it). Tiles already loaded when
+  of a tree `w` metres wide is about `0.03 w` in radius (the drive plugin bumps into it). Tiles already loaded when
   you call `eachTile` come as the streamer's own objects, whose `trees` is the billboard mesh: read its geometry's
   `iPos` and `iSize` attributes the same way.
 

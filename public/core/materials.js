@@ -2,6 +2,7 @@
 // work) with their detail drawn procedurally in the fragment shader: crisp at any zoom, nothing to download.
 import * as THREE from 'three'
 import { NOISE_GLSL } from './util.js'
+import { treeForm, FORMS, ASPECT } from './treeforms.js'
 
 const COMMON = `
   vec3 srgb(vec3 c) { return pow(c, vec3(2.2)); }
@@ -361,8 +362,8 @@ export function buildingMaterial() {
   return m
 }
 
-// ---------------------------------------------------------------- trees: painted billboards from a canvas atlas
-// shapes (tools/tiles.py): 0 round, 1 columnar, 2 spreading, 3 weeping, 4 fir, 5 cedar, 6 pine, 7 palm
+// ---------------------------------------------------------------- trees: billboards of the 3D forms
+// shapes: treeforms.js
 // colour families: 0 green, 1 yellow, 2 orange, 3 red, 4 brown, 5 dark conifer, 6 blue-green conifer, 7 forest green, 8 thin,
 // 9 cherry, 10 cherry in blossom (tiles.js picks the season's)
 const FAMILY = [ // muted, the way a canopy reads from above in late October
@@ -373,88 +374,99 @@ const FAMILY = [ // muted, the way a canopy reads from above in late October
 ].map((f) => f.map((h) => new THREE.Color(h)))
 export { FAMILY }
 
-export function treeAtlas() {
-  const ATL = 256, atlas = document.createElement('canvas')
-  atlas.width = ATL * 4; atlas.height = ATL * 2
-  const g2 = atlas.getContext('2d'), RIM = 'rgba(16,24,14,0.85)', grey = (l) => `rgb(${255 * l},${255 * l},${255 * l})`
-  const rnd = ((a) => () => { a = (a * 1664525 + 1013904223) % 4294967296; return a / 4294967296 })(7)
-  const cell = (v) => [(v % 4) * ATL, Math.floor(v / 4) * ATL]
-  const crown = (ox, oy, cx, cy, rx, ry, lobesN = 7, clumpsN = 70) => {
-    const X = (x) => ox + x * ATL, Y = (y) => oy + y * ATL
-    const lobes = []
-    for (let i = 0; i < lobesN; i++) { const a = rnd() * Math.PI * 2, d = Math.sqrt(rnd()); lobes.push([cx + Math.cos(a) * d * rx * 0.55, cy + Math.sin(a) * d * ry * 0.55, Math.min(rx, ry) * (0.55 + rnd() * 0.2)]) }
-    g2.fillStyle = RIM
-    for (const [x, y, r] of lobes) { g2.beginPath(); g2.ellipse(X(x), Y(y), (r + 0.012) * ATL * rx / Math.min(rx, ry), (r + 0.012) * ATL * ry / Math.min(rx, ry), 0, 0, 7); g2.fill() }
-    g2.save(); g2.beginPath()
-    for (const [x, y, r] of lobes) { g2.moveTo(X(x) + r * ATL * rx / Math.min(rx, ry), Y(y)); g2.ellipse(X(x), Y(y), r * ATL * rx / Math.min(rx, ry), r * ATL * ry / Math.min(rx, ry), 0, 0, 7) }
-    g2.clip()
-    g2.fillStyle = grey(0.42); g2.fillRect(ox, oy, ATL, ATL)
-    const cl = []
-    for (let i = 0; i < clumpsN; i++) cl.push([cx - rx + rnd() * rx * 2, cy - ry + rnd() * ry * 2, 0.035 + rnd() * 0.045])
-    cl.sort((a, b) => a[1] - b[1])
-    for (const [x, y, r] of cl) {
-      const light = Math.max(0.35, Math.min(1, 1.15 - (y - (cy - ry)) / (2 * ry) * 0.9 - (x - (cx - rx)) / (2 * rx) * 0.5))
-      g2.fillStyle = grey(light * 0.62); g2.beginPath(); g2.arc(X(x + r * 0.15), Y(y + r * 0.2), r * ATL, 0, 7); g2.fill()
-      g2.fillStyle = grey(light); g2.beginPath(); g2.arc(X(x), Y(y), r * 0.82 * ATL, 0, 7); g2.fill()
-    }
-    g2.restore()
+// The billboards are pictures of the 3D trees' forms (treeforms.js), drawn once at startup: one row as the map camera
+// sees them (30° down, lit by the map's sun), one as a street-level camera sees them far off (upright, a little from
+// above). Red: the light on the surface (times ATL_GAIN), green: 1 on bark (drawn in BARK, not the crown colour), and a
+// dark rim like the ink outlines. frames[row * FORMS + form]: (half width per metre of crown, bottom, top, height) of
+// the picture, in metres for a tree 1 m wide and ASPECT[form] tall, so the billboard covers just what the tree would.
+const ATL_GAIN = 1.6, ROWS = [30, 4]
+export function treeAtlas(renderer) {
+  const C = 256, SS = 2, W = FORMS * C, H = ROWS.length * C, frames = new Float32Array(FORMS * ROWS.length * 4)
+  const rt = new THREE.WebGLRenderTarget(W * SS, H * SS) // drawn at twice the size, averaged down
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { sun: { value: new THREE.Vector3(-0.55, 0.62, 0.56).normalize() } }, // main.js SUN
+    vertexShader: `attribute vec3 color; attribute float crown; varying vec3 vN; varying float vS, vT;
+      void main() { vN = normalize(mat3(modelMatrix) * normal); vS = mix(1.0, color.g, crown); vT = 1.0 - crown; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    // Lambert under main.js's hemisphere (sky 0xe8eef8, ground 0x8a8070, 2.0) and sun (2.3)
+    fragmentShader: `uniform vec3 sun; varying vec3 vN; varying float vS, vT;
+      void main() { vec3 n = normalize(vN); float l = (2.0 * mix(0.21, 0.86, 0.5 + 0.5 * n.y) + 2.3 * max(dot(n, sun), 0.0)) / 3.14159 * vS;
+        gl_FragColor = vec4(l / ${ATL_GAIN.toFixed(2)}, vT, 0.0, 1.0); }`,
+  })
+  const scene = new THREE.Scene(), mesh = new THREE.Mesh(undefined, mat), cam = new THREE.OrthographicCamera(), v = new THREE.Vector3()
+  scene.add(mesh)
+  const keep = { rt: renderer.getRenderTarget(), c: renderer.getClearColor(new THREE.Color()), a: renderer.getClearAlpha() }
+  renderer.setRenderTarget(rt); renderer.setClearColor(0, 0); renderer.clear()
+  for (let f = 0; f < FORMS; f++) {
+    const geo = treeForm(THREE, f), P = geo.attributes.position.array, A = ASPECT[f]
+    mesh.geometry = geo; mesh.scale.set(1, A, 1)
+    ROWS.forEach((deg, r) => {
+      const e = (deg * Math.PI) / 180, ce = Math.cos(e), se = Math.sin(e)
+      let X = 0, y0 = Infinity, y1 = -Infinity
+      for (let i = 0; i < P.length; i += 3) { const y = P[i + 1] * A * ce - P[i + 2] * se; X = Math.max(X, Math.abs(P[i])); y0 = Math.min(y0, y); y1 = Math.max(y1, y) }
+      const span = Math.max(2 * X, y1 - y0) * 1.08, bottom = y0 - span * 0.03
+      cam.left = -span / 2; cam.right = span / 2; cam.bottom = bottom; cam.top = bottom + span; cam.near = 0.1; cam.far = 100
+      cam.position.set(0, se * 50, ce * 50); cam.lookAt(v.set(0, 0, 0)); cam.updateProjectionMatrix()
+      frames.set([span / 2, bottom, bottom + span, A], (r * FORMS + f) * 4)
+      rt.viewport.set(f * C * SS, r * C * SS, C * SS, C * SS); rt.scissor.copy(rt.viewport); rt.scissorTest = true
+      renderer.setRenderTarget(rt); renderer.render(scene, cam)
+    })
+    geo.dispose()
   }
-  const trunk = (ox, oy, top, w = 0.06) => { g2.fillStyle = '#4a3a2e'; g2.fillRect(ox + (0.5 - w / 2) * ATL, oy + top * ATL, w * ATL, (0.99 - top) * ATL) }
-  const cone = (ox, oy, tiers, w0, w1, top, bottom, ragged) => {
-    const X = (x) => ox + x * ATL, Y = (y) => oy + y * ATL
-    for (const pass of [0, 1]) for (let i = 0; i < tiers; i++) {
-      const f = i / (tiers - 1), y0 = top + (bottom - top) * f * 0.85, y1 = y0 + (bottom - top) / tiers * 2.2, w = w0 + (w1 - w0) * f + (ragged ? (rnd() - 0.5) * 0.04 : 0)
-      const grow = pass ? 0 : 0.012
-      if (pass) { const gr = g2.createLinearGradient(X(0.5 - w), 0, X(0.5 + w), 0), l = 1 - f * 0.25; gr.addColorStop(0, grey(0.95 * l)); gr.addColorStop(0.5, grey(0.7 * l)); gr.addColorStop(1, grey(0.42 * l)); g2.fillStyle = gr } else g2.fillStyle = RIM
-      g2.beginPath(); g2.moveTo(X(0.5), Y(y0 - grow)); g2.lineTo(X(0.5 + w + grow), Y(y1 + grow * 0.5)); g2.lineTo(X(0.5 - w - grow), Y(y1 + grow * 0.5)); g2.closePath(); g2.fill()
-    }
+  const big = new Uint8Array(W * SS * H * SS * 4)
+  renderer.readRenderTargetPixels(rt, 0, 0, W * SS, H * SS, big)
+  renderer.setRenderTarget(keep.rt); renderer.setClearColor(keep.c, keep.a)
+  rt.dispose(); mat.dispose()
+  // averaged down (colours weighted by coverage), then a rim 2 px out from the edge
+  const a = new Float32Array(W * H), out = new Uint8Array(W * H * 4)
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let sa = 0, sr = 0, sg = 0
+    for (let j = 0; j < SS; j++) for (let i = 0; i < SS; i++) { const o = ((y * SS + j) * W * SS + x * SS + i) * 4, al = big[o + 3]; sa += al; sr += big[o] * al; sg += big[o + 1] * al }
+    const p = y * W + x
+    a[p] = sa / (255 * SS * SS)
+    if (sa) { out[p * 4] = sr / sa; out[p * 4 + 1] = sg / sa }
   }
-  // 0 round, 1 columnar, 2 spreading, 3 weeping
-  { const [ox, oy] = cell(0); trunk(ox, oy, 0.72); crown(ox, oy, 0.5, 0.42, 0.35, 0.32, 8, 80) }
-  { const [ox, oy] = cell(1); trunk(ox, oy, 0.8, 0.05); crown(ox, oy, 0.5, 0.42, 0.18, 0.38, 6, 60) }
-  { const [ox, oy] = cell(2); trunk(ox, oy, 0.68, 0.07); crown(ox, oy, 0.5, 0.44, 0.42, 0.3, 9, 90) }
-  { const [ox, oy] = cell(3); trunk(ox, oy, 0.6); crown(ox, oy, 0.5, 0.5, 0.32, 0.36, 7, 70)
-    const X = (x) => ox + x * ATL, Y = (y) => oy + y * ATL; g2.strokeStyle = 'rgba(20,30,16,0.35)'; g2.lineWidth = 2
-    for (let i = 0; i < 14; i++) { const x = 0.25 + i * 0.036; g2.beginPath(); g2.moveTo(X(x), Y(0.4)); g2.quadraticCurveTo(X(x - 0.02), Y(0.65), X(x - 0.03), Y(0.86)); g2.stroke() } }
-  // 4 fir, 5 cedar (broad, drooping), 6 pine (irregular), 7 palm
-  { const [ox, oy] = cell(4); trunk(ox, oy, 0.88, 0.05); cone(ox, oy, 7, 0.04, 0.26, 0.03, 0.9, false) }
-  { const [ox, oy] = cell(5); trunk(ox, oy, 0.9, 0.06); cone(ox, oy, 8, 0.06, 0.34, 0.05, 0.92, true) }
-  { const [ox, oy] = cell(6); trunk(ox, oy, 0.55, 0.06); crown(ox, oy, 0.5, 0.3, 0.3, 0.22, 6, 50) }
-  { const [ox, oy] = cell(7); const X = (x) => ox + x * ATL, Y = (y) => oy + y * ATL
-    g2.strokeStyle = '#5a4636'; g2.lineWidth = 9; g2.beginPath(); g2.moveTo(X(0.5), Y(0.98)); g2.quadraticCurveTo(X(0.47), Y(0.6), X(0.52), Y(0.28)); g2.stroke()
-    for (let i = 0; i < 9; i++) { const a = -Math.PI + (i / 8) * Math.PI; g2.fillStyle = RIM; g2.beginPath(); g2.ellipse(X(0.52 + Math.cos(a) * 0.17), Y(0.3 + Math.sin(a) * 0.06 + 0.06), 0.16 * ATL, 0.035 * ATL, a, 0, 7); g2.fill()
-      g2.fillStyle = grey(0.85 - i * 0.03); g2.beginPath(); g2.ellipse(X(0.52 + Math.cos(a) * 0.17), Y(0.3 + Math.sin(a) * 0.06 + 0.06), 0.15 * ATL, 0.025 * ATL, a, 0, 7); g2.fill() } }
-  const tex = new THREE.CanvasTexture(atlas)
-  tex.colorSpace = THREE.SRGBColorSpace
-  tex.anisotropy = 4
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const p = y * W + x
+    let rim = 0
+    for (let j = -2; j <= 2; j++) for (let i = -2; i <= 2; i++) if (i * i + j * j <= 5 && y + j >= 0 && y + j < H && x + i >= 0 && x + i < W) rim = Math.max(rim, a[p + j * W + i])
+    const ra = rim * 0.85 * (1 - a[p]), al = a[p] + ra
+    if (al > 0) { out[p * 4] = (out[p * 4] * a[p] + 12 * ra) / al; out[p * 4 + 1] = (out[p * 4 + 1] * a[p]) / al }
+    out[p * 4 + 3] = al * 255
+  }
+  const tex = new THREE.DataTexture(out, W, H)
+  tex.generateMipmaps = true; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter; tex.anisotropy = 4
+  tex.needsUpdate = true
+  tex.userData.frames = frames
   return tex
 }
 
 export function treeMaterial(atlas) {
   return new THREE.ShaderMaterial({
-    uniforms: { map: { value: atlas }, sat: { value: 1.0 }, gain: { value: new THREE.Vector3(1, 1, 1) }, tint: { value: new THREE.Vector3(1, 1, 1) }, desat: { value: 0 }, ...THREE.UniformsLib.fog,
+    uniforms: { map: { value: atlas }, frames: { value: atlas.userData.frames }, sat: { value: 1.0 }, gain: { value: new THREE.Vector3(1, 1, 1) }, tint: { value: new THREE.Vector3(1, 1, 1) }, desat: { value: 0 }, ...THREE.UniformsLib.fog,
       // a perspective camera (city.view.useCamera): upright billboards (cyl = 1), and none within near3d.z metres
       // of (near3d.x, near3d.y) on the ground, where trees3d.js draws real trees
       cyl: { value: 0 }, near3d: { value: new THREE.Vector3() } },
     fog: true, // linear fog (a THREE.Fog on the scene) mixed in before the grade, like the rest of the map
     vertexShader: `attribute vec3 iPos; attribute vec2 iSize; attribute vec3 iCol; attribute float iVar;
-      uniform float cyl; uniform vec3 near3d;
+      uniform float cyl; uniform vec3 near3d; uniform vec4 frames[${FORMS * ROWS.length}];
       varying vec2 vUv; varying vec3 vCol;
       #include <fog_pars_vertex>
       void main() {
-        float row = floor(iVar / 4.0);
-        vUv = vec2((mod(iVar, 4.0) + uv.x) / 4.0, (uv.y + 1.0 - row) / 2.0);
+        float form = min(iVar, ${FORMS - 1}.0), row = cyl > 0.5 ? 1.0 : 0.0, w = iSize.x, h = iSize.y / 0.866;
+        vec4 fr = frames[int(row * ${FORMS}.0 + form)];
+        vUv = vec2((form + uv.x) / ${FORMS}.0, (row + uv.y) / ${ROWS.length}.0);
         vCol = iCol;
+        vec2 q = vec2(position.x * 2.0 * fr.x * w, mix(fr.y, fr.z, position.y)); // the picture's corner, for a tree 1 m wide and fr.w tall
         vec4 mv;
-        if (cyl > 0.5) { // standing up in the world, turned to the camera about the vertical (the map's 0.866 undone)
-          vec3 w = (modelMatrix * vec4(iPos, 1.0)).xyz;
-          if (distance(w.xz, near3d.xy) < near3d.z) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
-          vec2 to = normalize(cameraPosition.xz - w.xz);
-          w += vec3(to.y, 0.0, -to.x) * position.x * iSize.x + vec3(0.0, position.y * iSize.y / 0.866, 0.0);
-          mv = viewMatrix * vec4(w, 1.0);
-        } else {
+        if (cyl > 0.5) { // standing up in the world, turned to the camera about the vertical
+          vec3 p = (modelMatrix * vec4(iPos, 1.0)).xyz;
+          if (distance(p.xz, near3d.xy) < near3d.z) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
+          vec2 to = normalize(cameraPosition.xz - p.xz);
+          p += vec3(to.y, 0.0, -to.x) * q.x + vec3(0.0, q.y * h / fr.w, 0.0);
+          mv = viewMatrix * vec4(p, 1.0);
+        } else { // the map camera: what shows of a tree 30° from above grows with its height and its crown's depth
           mv = modelViewMatrix * vec4(iPos, 1.0);
-          mv.xy += position.xy * vec2(iSize.x, max(iSize.y, iVar < 3.5 ? iSize.x * 0.72 : 0.0)); // broadleaf: a wide crown seen from above stands taller
+          mv.xy += vec2(q.x, q.y * (0.866 * h + 0.35 * w) / (0.866 * fr.w + 0.35));
         }
         gl_Position = projectionMatrix * mv;
         #ifdef USE_FOG
@@ -466,7 +478,7 @@ export function treeMaterial(atlas) {
       void main() {
         vec4 t = texture2D(map, vUv);
         if (t.a < 0.04) discard;
-        vec3 cc = vCol * t.rgb * 1.3;
+        vec3 cc = mix(vCol, vec3(${new THREE.Color(0x4a3a2e).toArray().map((x) => x.toFixed(4)).join(', ')}), t.g) * t.r * ${ATL_GAIN.toFixed(2)};
         #if defined(USE_FOG) && !defined(FOG_EXP2)
           cc = mix(cc, fogColor, smoothstep(fogNear, fogFar, vFogDepth));
         #endif

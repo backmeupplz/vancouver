@@ -1,87 +1,19 @@
-// Real low-poly trees near a perspective camera (city.view.useCamera): the map's tree billboards are painted for
-// the 30° map camera and read as crowns on sticks at street level, so within RADIUS of the camera each tree is
-// drawn as a trunk and a crown (lumpy icosahedra for broadleaf trees, stacked cones for conifers, fronds for
-// palms) from the same per-tile tree data (shape, colour, height). The billboards hide inside that circle (the
-// tree material's near3d uniforms), so each tree is drawn exactly once. Flat-shaded Lambert like the rest of
-// the map, so the sun, the shadows and the ink outlines all apply. One InstancedMesh per shape.
+// Real low-poly trees near a perspective camera (city.view.useCamera): within RADIUS of the camera each tree is drawn
+// in 3D in its species' form (treeforms.js: round, columnar, spreading, weeping, fir, cedar, pine, palm, vase) from the
+// same per-tile tree data (form, colour, height, crown width) as the billboards beyond, which are pictures of these same
+// forms. The billboards hide inside that circle (the tree material's near3d uniforms), so each tree is drawn exactly
+// once. Flat-shaded Lambert like the rest of the map, so the sun, the shadows and the ink outlines all apply. One
+// InstancedMesh per form and level of detail.
 import * as THREE from 'three'
 import { occluder, OCCLUDE, DISSOLVE } from './materials.js'
+import { treeForm, FORMS } from './treeforms.js'
 
 const PHONE = matchMedia('(pointer: coarse)').matches
 const R0 = PHONE ? 140 : 190 // metres around the camera (times the quality tier's trees3d share)
 const MAX = PHONE ? 1200 : 3000 // trees drawn in 3D at most (the nearest; the circle shrinks in dense parks)
 const STEP = 8 // the camera moves this far before the set is rebuilt
 const CELL = 64 // per-tile grid of trees, metres
-const TRUNK = new THREE.Color(0x4a3a2e), PALM = new THREE.Color(0x5a4636)
-
-// unit trees: 1 tall, crown about 1 wide, origin at the foot. Vertex attribute `crown` is 1 where the instance
-// colour applies (leaves) and 0 on the trunk; `shade` darkens lumps a little so a crown isn't one flat colour.
-function part(geo, crown, shade, col) {
-  if (geo.index) geo = geo.toNonIndexed()
-  const n = geo.attributes.position.count
-  geo.setAttribute('crown', new THREE.Float32BufferAttribute(new Float32Array(n).fill(crown), 1))
-  const c = new Float32Array(n * 3)
-  for (let i = 0; i < n; i++) { c[i * 3] = col.r * shade; c[i * 3 + 1] = col.g * shade; c[i * 3 + 2] = col.b * shade }
-  geo.setAttribute('color', new THREE.Float32BufferAttribute(c, 3))
-  geo.deleteAttribute('uv')
-  return geo
-}
-function merge(parts) {
-  const out = new THREE.BufferGeometry()
-  for (const k of ['position', 'normal', 'color', 'crown']) {
-    const size = parts[0].attributes[k].itemSize, arr = new Float32Array(parts.reduce((a, g) => a + g.attributes[k].array.length, 0))
-    let o = 0
-    for (const g of parts) { arr.set(g.attributes[k].array, o); o += g.attributes[k].array.length }
-    out.setAttribute(k, new THREE.BufferAttribute(arr, size))
-  }
-  return out
-}
-const WHITE = new THREE.Color(1, 1, 1)
-const trunk = (top, r = 0.035, col = TRUNK) => part(new THREE.CylinderGeometry(r * 0.75, r, top, 6, 1).translate(0, top / 2, 0), 0, 1, col)
-// the biggest lump of a crown rounder (80 faces), the others 20: ~160 triangles a broadleaf tree
-const lump = (x, y, z, r, shade, sy = 1, detail = 0) => {
-  const g = part(new THREE.IcosahedronGeometry(r, detail).scale(1, sy, 1).rotateY(x * 7 + z * 3).translate(x, y, z), 1, shade, WHITE)
-  const P = g.attributes.position.array, C = g.attributes.color.array
-  for (let i = 0; i < P.length / 3; i++) { // chunky faceted crowns: a darker underside, a sunlit top
-    const k = 0.84 + 0.3 * Math.min(1, Math.max(0, ((P[i * 3 + 1] - y) / (r * sy) + 1) / 2))
-    C[i * 3] *= k; C[i * 3 + 1] *= k; C[i * 3 + 2] *= k
-  }
-  return g
-}
-function broadleaf(bottom, lumps, trunkTop) { // crown from `bottom` to 1
-  const h = 1 - bottom, cy = bottom + h * 0.5
-  return merge([trunk(trunkTop), ...lumps.map(([x, y, z, r, s], i) => lump(x * 0.5, cy + y * h * 0.5, z * 0.5, r * Math.min(1, h * 1.25), s, h * 1.6 > 1 ? 1.25 : 1, i ? 0 : 1))])
-}
-function conifer(tiers, bottom, w) {
-  const parts = [trunk(bottom + 0.1, 0.04)]
-  for (let i = 0; i < tiers; i++) {
-    const f = i / tiers, y0 = bottom + (1 - bottom) * f * 0.8, hgt = (1 - bottom) * (1.6 / tiers + 0.08), r = w * (1 - f * 0.75) * 0.5
-    parts.push(part(new THREE.ConeGeometry(r, Math.min(hgt, 1 - y0), 7, 1).translate(0, y0 + Math.min(hgt, 1 - y0) / 2, 0), 1, 0.86 + 0.14 * f, WHITE))
-  }
-  return merge(parts)
-}
-function palm() {
-  const parts = [part(new THREE.CylinderGeometry(0.02, 0.03, 0.86, 6, 1).translate(0, 0.43, 0), 0, 1, PALM)]
-  for (let i = 0; i < 8; i++) { // fronds: long flat boxes, drooping out from the top
-    const g = new THREE.BoxGeometry(0.46, 0.012, 0.08).translate(0.23, 0, 0).rotateZ(-0.35 - (i % 2) * 0.25).rotateY((i / 8) * Math.PI * 2).translate(0, 0.88, 0)
-    parts.push(part(g, 1, 0.9 + (i % 3) * 0.06, WHITE))
-  }
-  parts.push(lump(0, 0.88, 0, 0.06, 0.8))
-  return merge(parts)
-}
-// shapes (tools/tiles.py): 0 round, 1 columnar, 2 spreading, 3 weeping, 4 fir, 5 cedar, 6 pine, 7 palm
-const L5 = [[0, 0.1, 0, 0.42, 1], [-0.45, -0.25, 0.2, 0.32, 0.9], [0.45, -0.2, -0.15, 0.33, 0.95], [0.1, -0.3, 0.5, 0.3, 0.86], [-0.05, 0.5, -0.3, 0.3, 1.06]]
-const SHAPES = [
-  () => broadleaf(0.3, L5, 0.55),
-  () => broadleaf(0.18, [[0, 0.25, 0, 0.5, 1.02], [0, -0.35, 0.1, 0.48, 0.9], [0.1, 0.65, -0.1, 0.36, 1.06]], 0.4),
-  () => broadleaf(0.36, [...L5, [0.65, 0.05, 0.35, 0.28, 0.96], [-0.6, 0.1, -0.4, 0.28, 0.92]], 0.6),
-  () => broadleaf(0.12, [[0, 0.3, 0, 0.45, 1.02], [-0.4, -0.3, 0.2, 0.36, 0.86], [0.4, -0.35, -0.2, 0.36, 0.88], [0, -0.4, -0.45, 0.33, 0.84]], 0.5),
-  () => conifer(5, 0.08, 0.8),
-  () => conifer(6, 0.06, 0.9),
-  () => broadleaf(0.5, [[0, 0.2, 0, 0.42, 1], [-0.5, -0.1, 0.25, 0.3, 0.9], [0.5, 0, -0.2, 0.32, 0.94]], 0.8),
-  palm,
-]
-
+const LOD = 60 // metres (times the share): the nearer trees get the finer forms, the rest (and all on Low) the coarse
 export class Trees3D {
   constructor({ scene, tiles, treeMaterial }) {
     Object.assign(this, { scene, tiles, treeMaterial })
@@ -107,8 +39,8 @@ export class Trees3D {
         .replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\ndissolve(vWp, vFade);')
     }
     mat.customProgramCacheKey = () => 'tree3d3'
-    this.meshes = SHAPES.map((f) => {
-      const geo = f(), P = geo.attributes.position.array, Cr = geo.attributes.crown.array
+    this.meshes = Array.from({ length: FORMS * 2 }, (_, k) => { // [form 0 fine, form 0 coarse, form 1 fine, …]
+      const geo = treeForm(THREE, k >> 1, k & 1), P = geo.attributes.position.array, Cr = geo.attributes.crown.array
       let b0 = 1
       for (let i = 0; i < Cr.length; i++) if (Cr[i] > 0.5) b0 = Math.min(b0, P[i * 3 + 1]) // where the model's leaves start
       geo.setAttribute('iBase', new THREE.InstancedBufferAttribute(new Float32Array(MAX * 2).fill(Math.max(0.02, b0)), 2))
@@ -124,6 +56,7 @@ export class Trees3D {
     this.at = new THREE.Vector3(Infinity, 0, 0)
     this.grids = new WeakMap()
     this.share = 1 // of the radius (main.js, from the quality tier)
+    this.fine = true // the finer forms near the camera (main.js: the tier's detail)
     this.near = [] // scratch: [distance², tile, index]
     this.M = new THREE.Matrix4(); this.q = new THREE.Quaternion(); this.s = new THREE.Vector3(); this.p = new THREE.Vector3(); this.c = new THREE.Color()
   }
@@ -192,11 +125,11 @@ export class Trees3D {
       for (let i = 0; i < n; i++) near[i] = live[i]
       R = Math.sqrt(near[MAX][0]); n = MAX
     }
-    const counts = this.meshes.map(() => 0), { M, q, s, p, c } = this
+    const counts = this.meshes.map(() => 0), { M, q, s, p, c } = this, L2 = this.fine ? (LOD * this.share) ** 2 : -1
     for (let k = 0; k < n; k++) {
-      const [, t, e] = near[k], A = t.trees.geometry.attributes
-      const shape = A.iVar.array[e] | 0, mesh = this.meshes[shape], h = A.iSize.array[e * 2 + 1] / 0.866
-      let w = A.iSize.array[e * 2] * 0.9
+      const [d2, t, e] = near[k], A = t.trees.geometry.attributes
+      const shape = Math.min(FORMS - 1, A.iVar.array[e] | 0), m = shape * 2 + (d2 < L2 ? 0 : 1), mesh = this.meshes[m], h = A.iSize.array[e * 2 + 1] / 0.866
+      let w = A.iSize.array[e * 2]
       const x = A.iPos.array[e * 3], y = A.iPos.array[e * 3 + 1], z = A.iPos.array[e * 3 + 2]
       const seed = (x * 0.37 + z * 0.73) % 6.283
       // clearance: leaves at least 2.5 m up over sidewalks, 4.5 m where the crown reaches over a carriageway; a young
@@ -209,15 +142,15 @@ export class Trees3D {
       }
       p.set(t.ox + x, y - 0.1, -t.oy + z)
       q.setFromAxisAngle(UP, seed)
-      s.set(w * (shape === 1 ? 1.1 : 1), h, w * (0.9 + 0.2 * Math.abs(Math.sin(seed * 3.1))))
-      const i = counts[shape]++
+      s.set(w, h, w * (0.88 + 0.24 * Math.abs(Math.sin(seed * 3.1))))
+      const i = counts[m]++
       mesh.setMatrixAt(i, M.compose(p, q, s))
       mesh.geometry.attributes.iBase.setXY(i, mesh.userData.b0, Math.min(0.7, clear / h))
-      c.fromArray(A.iCol.array, e * 3) // lit by the sun like the painted billboards
+      c.fromArray(A.iCol.array, e * 3) // the billboard's colour
       mesh.setColorAt(i, c)
     }
     this.meshes.forEach((m, i) => { // upload only what is drawn
-      m.count = counts[i]
+      m.count = counts[i]; m.visible = counts[i] > 0
       for (const a of [m.instanceMatrix, m.instanceColor, m.geometry.attributes.iBase]) { a.clearUpdateRanges(); a.addUpdateRange(0, counts[i] * a.itemSize); a.needsUpdate = true }
     })
     // the billboards inside the circle step aside
