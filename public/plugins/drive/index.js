@@ -542,8 +542,10 @@ export default function drive(city) {
       .dlv-touch button { position: absolute; bottom: 52px; width: 74px; height: 74px; border-radius: 50%; font-size: 15px; font-weight: 650; background: rgba(38,30,28,.5); border: 2px solid rgba(255,236,214,.35); touch-action: none; user-select: none; -webkit-user-select: none; }
       .dlv-touch button.on { background: rgba(232,115,90,.75) }
       .dlv-touch .l { left: 16px } .dlv-touch .r { left: 100px } .dlv-touch .gas { right: 16px; height: 100px; border-radius: 22px } .dlv-touch .brk { right: 100px; width: 66px; height: 66px }
-      .dlv-touch .act { right: 16px; bottom: 222px; width: auto; height: 40px; padding: 0 14px; border-radius: 20px; font-size: 14px; }
-      .dlv-touch .act[hidden] { display: none }
+      .dlv-touch .hrn, .dlv-touch .hb { bottom: 164px; width: 56px; height: 56px; padding: 0; font-size: 12px; line-height: 1.1; }
+      .dlv-touch .hrn { left: 25px } .dlv-touch .hb { right: 25px }
+      .dlv-touch .act { right: 16px; bottom: 232px; width: auto; height: 40px; padding: 0 14px; border-radius: 20px; font-size: 14px; }
+      .dlv-touch [hidden] { display: none }
       body.dlv-on.dlv-touchy .dlv-touch { display: block }
       body.dlv-on.dlv-touchy .dlv-help, body.dlv-on.dlv-touchy .dlv-act { display: none }
       body.dlv-on.dlv-touchy #credits { display: none !important }
@@ -612,12 +614,13 @@ export default function drive(city) {
       .compact .dlv-touch button { bottom: var(--pb); }
       .compact .dlv-touch .l { left: var(--sl) } .compact .dlv-touch .r { left: calc(var(--sl) + 84px) }
       .compact .dlv-touch .gas { right: var(--sr) } .compact .dlv-touch .brk { right: calc(var(--sr) + 86px); bottom: var(--pb) }
-      .compact .dlv-touch .act { right: var(--sr); bottom: calc(var(--pb) + 112px); height: 44px; border-radius: 22px; }
+      .compact .dlv-touch .hrn { left: calc(var(--sl) + 9px); bottom: calc(var(--pb) + 86px) } .compact .dlv-touch .hb { right: calc(var(--sr) + 9px); bottom: calc(var(--pb) + 112px) }
+      .compact .dlv-touch .act { right: var(--sr); bottom: calc(var(--pb) + 180px); height: 44px; border-radius: 22px; }
       .compact body.dlv-on .lofi { padding: 0 } .compact body.dlv-on .lofi-name, .compact body.dlv-on .lofi canvas { display: none }
       .compact body.dlv-on.dlv-touchy .lofi { bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 112px) !important; }
+      @media (orientation: portrait) { .compact body.dlv-on.dlv-touchy .toast { bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 236px); width: max-content; } } /* over the E button */
       @media (orientation: landscape) {
         .compact .dlv-job { max-width: min(420px, 50%); }
-        .compact .dlv-touch .act { bottom: calc(var(--pb) + 112px); }
         .compact body.dlv-on .lofi { padding: 0 } .compact body.dlv-on .lofi-name, .compact body.dlv-on .lofi canvas { display: none }
       .compact body.dlv-on.dlv-touchy .lofi { bottom: max(16px, calc(env(safe-area-inset-bottom) + 4px)) !important; }
       }`
@@ -639,15 +642,15 @@ export default function drive(city) {
     const photo = el('dlv dlv-photo', '')
     const aboard = document.createElement('div'); aboard.className = 'aboard'; job.lastElementChild.append(aboard)
     const stam = document.createElement('div'); stam.className = 'dlv-stam'; stam.innerHTML = '<i></i>'; job.lastElementChild.append(stam)
-    const touch = el('dlv dlv-touch', '<button class="l" data-k="left" aria-label="Turn left">◀</button><button class="r" data-k="right" aria-label="Turn right">▶</button><button class="brk" data-k="brake" aria-label="Brake and reverse">Brake</button><button class="gas" data-k="gas" aria-label="Go">Go</button><button class="act" data-act hidden></button>')
+    const touch = el('dlv dlv-touch', '<button class="l" data-k="left" aria-label="Turn left">◀</button><button class="r" data-k="right" aria-label="Turn right">▶</button><button class="brk" data-k="brake" aria-label="Brake and reverse">Brake</button><button class="gas" data-k="gas" aria-label="Go">Go</button><button class="hrn" data-k="horn" aria-label="Horn">Horn</button><button class="hb" data-k="hand" aria-label="Handbrake">Hand<br>brake</button><button class="act" data-act hidden></button>')
     const q = (e, s) => e.querySelector(s)
     return { el, co, btns, read, job, help, act, pop, pickEl, touch, sheet, flash, photo, aboard, stam, stamBar: stam.firstChild,
       all: [co, btns, read, job, help, act, pop, pickEl, touch, sheet, flash, photo], n: q(co, '[data-n]'), m: q(co, '[data-m]'), c: q(co, '[data-c]'),
       assist: q(btns, '[data-assist]'), mute: q(btns, '[data-mute]'), exit: q(btns, '[data-exit]'), arrow: q(job, 'svg'), north: q(job, '.n'), w: q(job, '[data-w]'), p: q(job, '[data-p]'), s: q(job, '[data-s]'),
-      d: q(job, '[data-d]'), t: q(job, '[data-t]'), b: q(pop, '[data-b]'), qq: q(pop, '[data-q]'), pt: q(pickEl, '[data-pt]'), cancel: q(pickEl, '[data-cancel]'), brk: q(touch, '.brk'), tact: q(touch, '[data-act]'), css }
+      d: q(job, '[data-d]'), t: q(job, '[data-t]'), b: q(pop, '[data-b]'), qq: q(pop, '[data-q]'), pt: q(pickEl, '[data-pt]'), cancel: q(pickEl, '[data-cancel]'), brk: q(touch, '.brk'), hrn: q(touch, '.hrn'), hb: q(touch, '.hb'), tact: q(touch, '[data-act]'), css }
   }
-  const touchState = { left: false, right: false, gas: false, brake: false }
-  touchButtons(ui.touch, touchState, audio)
+  const touchState = { left: false, right: false, gas: false, brake: false, horn: false, hand: false }
+  touchButtons(ui.touch, touchState, (k) => { audio(); if (k === 'horn') hornOn() }, (k) => { if (k === 'horn') hornOff() })
   ui.tact.addEventListener('click', () => (game ? game.action() : errand ? hurry() : toggleFoot()))
   ui.exit.onclick = () => exit()
   ui.cancel.onclick = () => cancelPick()
@@ -1203,7 +1206,7 @@ export default function drive(city) {
   function input() {
     const L = keys.has('ArrowLeft') || keys.has('KeyA') || touchState.left, R = keys.has('ArrowRight') || keys.has('KeyD') || touchState.right
     const up = keys.has('ArrowUp') || keys.has('KeyW') || touchState.gas, dn = keys.has('ArrowDown') || keys.has('KeyS') || (!onFoot && touchState.brake)
-    return { steer: (L ? 1 : 0) - (R ? 1 : 0), up: up || (onFoot && touchState.brake), down: dn, hand: keys.has('Space'), run: keys.has('ShiftLeft') || keys.has('ShiftRight') || (onFoot && touchState.brake) }
+    return { steer: (L ? 1 : 0) - (R ? 1 : 0), up: up || (onFoot && touchState.brake), down: dn, hand: keys.has('Space') || touchState.hand, run: keys.has('ShiftLeft') || keys.has('ShiftRight') || (onFoot && touchState.brake) }
   }
   // tyres grip less in the rain and much less in snow (the weather plugin's city.surface), a little less off the tarmac
   const gripNow = () => clamp(1 - 0.3 * (city.surface?.wet || 0) - 0.8 * (city.surface?.snow || 0), 0.3, 1) * (car.kerb ? 1 : 0.9)
@@ -1797,7 +1800,7 @@ export default function drive(city) {
       const lab = game.actionLabel()
       ui.tact.hidden = !lab; ui.tact.textContent = lab
       ui.act.hidden = touchy || !lab; ui.act.innerHTML = `<kbd>E</kbd>${lab}`
-      ui.brk.textContent = 'Brake'; ui.assist.hidden = false; ui.job.hidden = true
+      ui.brk.textContent = 'Brake'; ui.assist.hidden = ui.hrn.hidden = ui.hb.hidden = false; ui.job.hidden = true
       document.documentElement.classList.add('dlv-assist')
       return
     }
@@ -1807,7 +1810,7 @@ export default function drive(city) {
     ui.act.hidden = touchy || !(nearVan() || errand || (run && t && !onFoot && Math.abs(car.speed) >= 1.2 && Math.hypot(t.x - car.x, t.y - car.y) < ARRIVE + 8))
     ui.act.innerHTML = errand ? '<kbd>E</kbd>Hurry up' : nearVan() ? '<kbd>E</kbd>Get in the van' : 'Stop here'
     ui.brk.textContent = onFoot ? (hike ? 'Push' : 'Run') : 'Brake'
-    ui.assist.hidden = onFoot // it steers the van only
+    ui.assist.hidden = ui.hrn.hidden = ui.hb.hidden = onFoot // they're the van's only
     document.documentElement.classList.toggle('dlv-assist', !onFoot)
     const P = body(), name = street ? abbr(street.name) : ''
     ui.stam.hidden = !hike; ui.aboard.hidden = !deliver
@@ -1887,7 +1890,7 @@ export default function drive(city) {
 
   // ?drivedebug: the state, for tests in a browser (window.driveDebug)
   if (location.search.includes('drivedebug')) window.driveDebug = { car, man, goal, get run() { return run }, get hike() { return hike }, get errand() { return errand }, get shift() { return shift }, get state() { return state }, startHike: (id) => startHike(HIKES.find((h) => h.id === id)), propsNear, nearestRoad, wallHit,
-    get game() { return game }, secs, startBus: (name, dir = 0, from = 'first') => loadLines().then(({ man }) => { const ri = man.routes.findIndex((r) => r.name === name); return startBus({ ri, r: man.routes[ri], dir, from, man }) }) }
+    get game() { return game }, get horn() { return !!horn }, input, secs, startBus: (name, dir = 0, from = 'first') => loadLines().then(({ man }) => { const ri = man.routes.findIndex((r) => r.name === name); return startBus({ ri, r: man.routes[ri], dir, from, man }) }) }
   return {
     dispose() {
       cancelPick()

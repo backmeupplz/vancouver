@@ -110,10 +110,15 @@ export function streetSky() {
 }
 
 // ---------------------------------------------------------------- touch buttons
-// hold-to-press buttons ([data-k] in root) kept in state[k]; onPress() on each press (to wake the sound up)
-export function touchButtons(root, state, onPress) {
+// hold-to-press buttons ([data-k] in root) kept in state[k]; onPress(k) on each press (to wake the sound up),
+// onRelease(k) when one is let go
+export function touchButtons(root, state, onPress, onRelease) {
   for (const b of root.querySelectorAll('[data-k]')) {
-    const k = b.dataset.k, set = (on) => (e) => { e.preventDefault(); if (on && !state[k]) buzz(6); state[k] = on; b.classList.toggle('on', on); if (on) onPress?.() }
+    const k = b.dataset.k, set = (on) => (e) => {
+      e.preventDefault()
+      const was = state[k]; state[k] = on; b.classList.toggle('on', on)
+      if (on) { if (!was) buzz(6); onPress?.(k) } else if (was) onRelease?.(k)
+    }
     b.addEventListener('pointerdown', (e) => { try { b.setPointerCapture(e.pointerId) } catch {} set(true)(e) })
     for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) b.addEventListener(ev, set(false))
     b.addEventListener('contextmenu', (e) => e.preventDefault())
