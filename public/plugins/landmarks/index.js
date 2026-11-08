@@ -96,6 +96,17 @@ export default function landmarks(city) {
     const idx = THREE.ShapeUtils.triangulateShape(r.map(([x, z]) => new THREE.Vector2(x, z)), [])
     for (const [a, b, d] of idx) tri(V(r[a][0], y, r[a][1]), V(r[b][0], y, r[b][1]), V(r[d][0], y, r[d][1]), col(hex))
   }
+  // a surface over a ring at height h(x, z), its triangles split until no edge is longer than maxLen; hex(x, z)
+  // colours each triangle (at its middle)
+  function drape(r, h, hex, maxLen) {
+    const split = (a, b, c, d) => {
+      const l = Math.max(Math.hypot(a[0] - b[0], a[1] - b[1]), Math.hypot(b[0] - c[0], b[1] - c[1]), Math.hypot(c[0] - a[0], c[1] - a[1]))
+      if (l > maxLen && d < 7) { const ab = mid(a, b), bc = mid(b, c), ca = mid(c, a); split(a, ab, ca, d + 1); split(ab, b, bc, d + 1); split(ca, bc, c, d + 1); split(ab, bc, ca, d + 1); return }
+      const v3 = ([x, z]) => V(x, h(x, z), z)
+      tri(v3(a), v3(b), v3(c), col(hex((a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3)))
+    }
+    for (const [a, b, c] of THREE.ShapeUtils.triangulateShape(r.map(([x, z]) => new THREE.Vector2(x, z)), [])) split(r[a], r[b], r[c], 0)
+  }
   function loft(r0, y0, r1, y1, hex, alt) { // band between two rings with the same number of points
     for (let i = 0; i < r0.length; i++) {
       const j = (i + 1) % r0.length
@@ -151,25 +162,27 @@ export default function landmarks(city) {
       else part(p, g, (q) => q.h > 12 ? { wall: 0xe8e8e2, roof: 0xb8b9b4, bands: [4.6, 1.8, 0x6d8aa0] } : { wall: 0xf1efe8, roof: 0xa9aaa6, bands: [5, 2.2, 0x7d97aa] })
     }
   }
-  // ---------- BC Place: white roof on a ring of 36 masts with cables to the centre ----------
+  // ---------- BC Place: the oval bowl, its white cable-net roof on a ring of 36 masts, the retractable centre ----------
+  // Heights from the HRDEM LiDAR surface: the roof's rim about 50 m over the ground, its centre about 61 m
   {
     const root = ringXZ(L.bcplace.rings[0]), g = groundOf(root), c = centroid(root)
     at(...c)
     const ring = resample(root, 72)
-    prism(ring, g, g + 30, 0xdcdedd, 0xdcdedd, [8, 2.4, 0x7f97a8])
-    walls(scaleRing(ring, 1.012, c), g + 30, g + 35, 0xf4f4f0)
-    loft(scaleRing(ring, 1.012, c), g + 35, scaleRing(ring, 0.97, c), g + 37, 0xf2f2ee)
-    const levels = [[0.97, 37], [0.8, 45], [0.6, 51], [0.42, 54.5]]
-    for (let k = 0; k < levels.length - 1; k++) loft(scaleRing(ring, levels[k][0], c), g + levels[k][1], scaleRing(ring, levels[k + 1][0], c), g + levels[k + 1][1], 0xf7f7f3, 0xe9ebe8)
-    const inner = scaleRing(ring, 0.42, c)
-    loft(inner, g + 54.5, scaleRing(ring, 0.3, c), g + 55.5, 0xd7dbde)
-    cap(scaleRing(ring, 0.3, c), g + 55.5, 0xcfd5d9)
+    prism(ring, g, g + 40, 0xdcdedd, 0xdcdedd, [8, 2.4, 0x7f97a8])
+    walls(scaleRing(ring, 1.012, c), g + 40, g + 47, 0xf4f4f0, [7, 2.2, 0x5f7488]) // the LED ribbon round the top
+    const levels = [[1.012, 47], [0.97, 49.5], [0.8, 55], [0.6, 59], [0.42, 61]]
+    for (let k = 0; k < levels.length - 1; k++) loft(scaleRing(ring, levels[k][0], c), g + levels[k][1], scaleRing(ring, levels[k + 1][0], c), g + levels[k + 1][1], 0xf7f7f3, 0xe6e9e6)
+    const inner = scaleRing(ring, 0.42, c), net = scaleRing(ring, 0.72, c)
+    loft(inner, g + 61, scaleRing(ring, 0.36, c), g + 62.4, 0xd2d8dc) // the ring beam and the closed centre panels
+    cap(scaleRing(ring, 0.36, c), g + 62.4, 0xdfe5e8)
     const masts = resample(root, 36)
     for (let i = 0; i < 36; i++) {
-      const [x, z] = masts[i], top = V(c[0] + (x - c[0]) * 1.03, g + 64, c[1] + (z - c[1]) * 1.03)
-      beam(V(x, g + 26, z), top, 2.2, 0xf6f6f2)
+      const [x, z] = masts[i], top = V(c[0] + (x - c[0]) * 1.05, g + 82, c[1] + (z - c[1]) * 1.05)
+      beam(V(x, g + 30, z), V(c[0] + (x - c[0]) * 1.035, g + 66, c[1] + (z - c[1]) * 1.035), 2.6, 0xf6f6f2)
+      beam(V(c[0] + (x - c[0]) * 1.035, g + 66, c[1] + (z - c[1]) * 1.035), top, 1.7, 0xf6f6f2)
       const j = Math.round((i / 36) * inner.length) % inner.length
-      beam(top, V(inner[j][0], g + 54.5, inner[j][1]), 0.45, 0xeef0ee)
+      beam(top, V(inner[j][0], g + 61.2, inner[j][1]), 0.45, 0xe4e7e6) // the cables down to the centre ring
+      beam(top, V(net[j][0], g + 56.6, net[j][1]), 0.4, 0xe4e7e6)
     }
   }
   // ---------- Rogers Arena: grey arena with a shallow dome ----------
@@ -179,8 +192,8 @@ export default function landmarks(city) {
     prism(inflate(root, 0.3), g, g + 15, 0xc6ccd1, 0x9aa1a7, [5, 2.4, 0x50677a])
     for (const p of lm.parts) {
       const r = inflate(ringXZ(p.r), 0.4)
-      prism(r, g, g + 31, 0xd5d9dc, 0xd5d9dc, [6, 3, 0x5a7286])
-      roof(r, g + 31, 'dome', 11, 0xd3d8db)
+      prism(r, g, g + 29, 0xd5d9dc, 0xd5d9dc, [6, 3, 0x5a7286])
+      roof(r, g + 29, 'dome', 9, 0xd3d8db) // its top 38 m up (LiDAR)
     }
   }
   // ---------- Canada Place: the five white sails on the pier, the Pan Pacific, the convention centre ----------
@@ -198,7 +211,7 @@ export default function landmarks(city) {
     const o = obb(r), u = [o.ux, o.uz], v = [-o.uz, o.ux]
     const pt = (a, b, h) => V(o.cx + u[0] * a + v[0] * b, h, o.cz + u[1] * a + v[1] * b)
     walls(r, y - 9, y, 0xf0ede4, [4.5, 1.5, 0x88a0ae])
-    const prof = [[-1, 2], [0.12, 25], [1, 2]] // along the long axis: height above the roof
+    const prof = [[-1, 4], [0.12, 19.5], [1, 4]] // along the long axis: height above the roof (peaks ~45 m over the water, LiDAR)
     const W = o.hw * 0.86
     for (let k = 0; k < prof.length - 1; k++) {
       const [a0, h0] = prof[k], [a1, h1] = prof[k + 1]
@@ -211,12 +224,41 @@ export default function landmarks(city) {
     }
     for (const [a, h] of [prof[1]]) beam(pt(a * o.hl, 0, y + h - 2), pt(a * o.hl, 0, y + h + 5), 0.6, 0xd8dadb)
   }
-  // ---------- Vancouver Convention Centre West: glass, timber and the green living roof ----------
+  // ---------- Vancouver Convention Centre West: glass walls under a tilted 2.4 ha living roof ----------
+  // The roof is five planes (OSM's skillion parts), each tilted as the HRDEM LiDAR surface has it: [lat, lon of a
+  // point inside the part, roof elevation there, rise per metre east, per metre north]. Two meadow wings rise away
+  // from a flat valley between them; the west tip and the street side fall towards Jack Poole Plaza and the street.
   {
-    const lm = L.vccwest, root = ringXZ(lm.rings[0]), g = groundOf(root)
-    at(...root[0])
-    prism(inflate(root, 0.3), g, g + 13, 0xb88d62, 0x7fa654, [4.3, 2.6, 0x9ab8c6])
-    for (const p of lm.parts) part(p, g, () => ({ wall: 0xb88d62, roof: 0x86ab58, bands: [4.3, 2.6, 0x9ab8c6] }))
+    const PLANES = [[49.289116, -123.115124, 37.9, 0.06, 0.061], [49.289359, -123.116015, 37.1, -0.021, -0.072],
+      [49.28861, -123.116172, 32.5, 0.033, 0.177], [49.289158, -123.116969, 31.9, 0.144, -0.05], [49.289139, -123.11556, 33.1, -0.024, 0.014]]
+      .map(([la, lo, y, e, n]) => { const [x, z] = P(la, lo); return { x, z, y, e, n } })
+    const lm = L.vccwest
+    at(...ringXZ(lm.rings[0])[0])
+    for (const p of lm.parts) {
+      const r = inflate(ringXZ(p.r), 0.3), pl = PLANES.find((q) => inPoly(q.x, q.z, r))
+      const h = pl ? (x, z) => pl.y + (x - pl.x) * pl.e - (z - pl.z) * pl.n : () => groundOf(r) + 22
+      const g = groundOf(r) - 0.5, flat = pl && Math.abs(pl.e) + Math.abs(pl.n) < 0.05
+      for (let i = 0; i < r.length; i++) { // glass from the deck to the roof, thin mullions every storey
+        const [ax, az] = r[i], [bx, bz] = r[(i + 1) % r.length], ta = h(ax, az) - 1.4, tb = h(bx, bz) - 1.4
+        for (let y = g; y < Math.max(ta, tb); y += 4.6) {
+          const y1 = (t) => Math.min(t, y + 4.6), y0 = (t) => Math.min(t, y)
+          quad(V(ax, y0(ta), az), V(bx, y0(tb), bz), V(bx, y1(tb), bz), V(ax, y1(ta), az), col(0x88aebb))
+          quad(V(ax, y1(ta) - 0.35, az), V(bx, y1(tb) - 0.35, bz), V(bx, y1(tb), bz), V(ax, y1(ta), az), col(0x5f6f74))
+        }
+      }
+      // the roof overhangs the glass: a timber soffit, a thin pale edge, then the meadow (or the valley's paving)
+      const eave = inflate(r, flat ? 0.4 : 3)
+      for (let i = 0; i < r.length; i++) {
+        const j = (i + 1) % r.length, a = r[i], b = r[j], ea = eave[i], eb = eave[j]
+        quad(V(a[0], h(...a) - 1.4, a[1]), V(b[0], h(...b) - 1.4, b[1]), V(eb[0], h(...eb) - 1.2, eb[1]), V(ea[0], h(...ea) - 1.2, ea[1]), col(0xe8cfa6))
+        quad(V(ea[0], h(...ea) - 1.2, ea[1]), V(eb[0], h(...eb) - 1.2, eb[1]), V(eb[0], h(...eb) + 0.4, eb[1]), V(ea[0], h(...ea) + 0.4, ea[1]), col(0xdcdfdc))
+      }
+      drape(eave, (x, z) => h(x, z) + 0.4, flat ? () => 0xb9b5aa : meadow, 9)
+    }
+  }
+  function meadow(x, z) { // grass with drifts of drier, golden patches, as the roof's native meadow grows
+    const n = Math.sin(x * 0.045 + 1.7) * Math.sin(z * 0.06 - 0.4) + 0.6 * Math.sin((x - z) * 0.11) + 0.3 * Math.sin(x * 0.31 + z * 0.23)
+    return n > 0.75 ? 0x9da259 : n > 0.2 ? 0x7f9e4b : n > -0.6 ? 0x729646 : 0x668c42
   }
   // ---------- Harbour Centre and its Lookout saucer ----------
   {
@@ -337,8 +379,11 @@ export default function landmarks(city) {
     if (t.kind === 'containers') {
       const inst = []
       const CRANE = name === 'centerm' ? [0x2f6fb0, 0xf2f2ee] : [0xd2402f, 0xf2f2ee]
-      // ship-to-shore cranes every ~95 m along the berth (the terminal's edge facing the water)
+      // ship-to-shore cranes every ~95 m along the berth (the terminal's edge facing the water), none on Ballantyne
+      // Pier's cruise berth (the ships plugin berths cruise ships there)
+      const cruise = P(49.289, -123.08983)
       for (let a = 40; a < Lq - 30; a += 95) {
+        if (Math.hypot(W(a, 0)[0] - cruise[0], W(a, 0)[1] - cruise[1]) < 170) continue
         let b0 = -20
         while (b0 < 150 && !ins(W(a, b0))) b0 += 4
         if (b0 < 150 && ins(W(a, b0 + 40))) stsCrane(W(a + (rng() - 0.5) * 30, b0 + 4), u, v, g, CRANE, rng)
@@ -747,18 +792,7 @@ export default function landmarks(city) {
         const h = (x, z) => city.world.heightAt(x, z) + 0.8
         quad(V(x0 - nx, h(x0 - nx, z0 - nz), z0 - nz), V(x1 - nx, h(x1 - nx, z1 - nz), z1 - nz), V(x1 + nx, h(x1 + nx, z1 + nz), z1 + nz), V(x0 + nx, h(x0 + nx, z0 + nz), z0 + nz), col(hex))
       }
-    } else { // an area: triangulate, split until the triangles follow the ground
-      const ring = r.slice(0, -1)
-      if (ring.length < 3) continue
-      const idx = THREE.ShapeUtils.triangulateShape(ring.map(([x, z]) => new THREE.Vector2(x, z)), [])
-      const drape = (a, b, c, d) => {
-        const l = Math.max(Math.hypot(a[0] - b[0], a[1] - b[1]), Math.hypot(b[0] - c[0], b[1] - c[1]), Math.hypot(c[0] - a[0], c[1] - a[1]))
-        if (l > 24 && d < 7) { const ab = mid(a, b), bc = mid(b, c), ca = mid(c, a); drape(a, ab, ca, d + 1); drape(ab, b, bc, d + 1); drape(ca, bc, c, d + 1); drape(ab, bc, ca, d + 1); return }
-        const v3 = ([x, z]) => V(x, city.world.heightAt(x, z) + 0.8, z)
-        tri(v3(a), v3(b), v3(c), col(hex))
-      }
-      for (const [a, b, c] of idx) drape(ring[a], ring[b], ring[c], 0)
-    }
+    } else if (r.length > 3) drape(r.slice(0, -1), (x, z) => city.world.heightAt(x, z) + 0.8, () => hex, 24) // an area over the ground
   }
   for (const f of data.gondolas || []) { // the Skyride: towers, cables, two red cabins, the chalet at the top
     const r = pairs(f).map(([la, lo]) => P(la, lo)), a = r[0], z = r[r.length - 1]

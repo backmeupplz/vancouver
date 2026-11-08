@@ -1,6 +1,7 @@
 // Ships and boats on the water: freighters at the English Bay and inner-harbour anchorages, container ships,
 // bulkers and tankers at their terminals, BC Ferries on their routes from Tsawwassen and Horseshoe Bay, the
-// False Creek mini ferries, tugs towing log booms on the Fraser and a few sail and motor boats in English Bay.
+// False Creek mini ferries, tugs towing log booms on the Fraser, a few sail and motor boats in English Bay and, in
+// the Alaska season, cruise ships at Canada Place and Ballantyne Pier.
 // Simulated on the clock (Vancouver time, the same for everyone); set AIS_URL below for live positions.
 // Routes and berths: tools/ships_data.py → data.json, from OpenStreetMap (© OpenStreetMap contributors, ODbL).
 // The SeaBus belongs to the transit plugin.
@@ -21,6 +22,22 @@ const DATA = new URL('./data.json', import.meta.url)
 const ROUTES = { 1: [95, 120, 7, 21], 2: [100, 120, 6.5, 20.5], 3: [40, 120, 7.3, 21.3], 8: [20, 60, 6, 22], 30: [120, 180, 5.25, 20.25], 9: [55, 240, 9, 17] }
 const MINI_HOURS = [6.75, 22.5] // Aquabus / False Creek Ferries service
 const SMALL_ZOOM = 0.06 // below this boats under ~30 m are not drawn (or moved)
+
+// Cruise ships, April to October: a static weekly schedule (Alaska cruises turn round on the same weekday each week),
+// berthed 7:00 to 16:30 (17:30 at weekends). Berths: the ships' centre lines, stern to bow, from the 2022 orthophoto
+// (two ships at Canada Place) and Ballantyne Pier's north face. Plausible, not the port's actual schedule.
+const CRUISE = [
+  { stern: [49.28873, -123.11336], bow: [49.28991, -123.10988], days: ['Sat', 'Sun', 'Mon', 'Tue', 'Thu', 'Fri'] }, // Canada Place West
+  { stern: [49.28944, -123.10726], bow: [49.28817, -123.11082], days: ['Sat', 'Sun', 'Mon', 'Wed', 'Fri'] }, // Canada Place East
+  { stern: [49.288716, -123.087852], bow: [49.289734, -123.09152], days: ['Sat', 'Sun'], peak: true }, // Ballantyne
+]
+let cdMin = -1, cdDay = null
+function cruiseDay(ms) { // { wd, shoulder, weekend } while ships are berthed, else null (worked out once a minute)
+  if (Math.floor(ms / 60000) === cdMin) return cdDay
+  cdMin = Math.floor(ms / 60000)
+  const { p, sec, wd } = vancouver(ms), m = +p.month, weekend = wd === 'Sat' || wd === 'Sun'
+  return (cdDay = m < 4 || m > 10 || sec < 7 * 3600 || sec > (weekend ? 17.5 : 16.5) * 3600 ? null : { wd, shoulder: m === 4 || m === 10, weekend })
+}
 
 const WHITE = 0xf3f3ee, NAVY = 0x1d3463
 const BOXES = [0x2b6cb0, 0xc0392b, 0xe8e8e3, 0x7d8590, 0x2f8f5b, 0xe67e22, 0xf1c40f, 0x1d3a5f, 0x8e44ad, 0xb5651d, 0x16a085]
@@ -59,6 +76,16 @@ const MODELS = {
       ['B', 0.36 * L, 36, 0, 8, 4, B, WHITE]] }
   },
   general(r) { return MODELS.bulk(r, 150 + r() * 40, 26, true) },
+  cruise(r, L = 290, B = 36) { // white decks stepping back to the bow, rows of balconies, lifeboats, a pool deck and a raked funnel
+    const [hull, funnel] = pick(r, [[NAVY, 0x23262b], [WHITE, NAVY], [WHITE, 0x23262b], [0x1d1d22, 0xc0392b], [WHITE, 0x2b6cb0], [NAVY, WHITE]])
+    const lo = [-0.05 * L, 0.84 * L], hi = [-0.09 * L, 0.76 * L] // the two blocks of decks: middle, length
+    const p = [['H', 0, -8, 0, L, 19, B, hull], ['H', lo[0], 11, 0, lo[1], 19, B * 0.97, WHITE], ['H', hi[0], 30, 0, hi[1], 12, B * 0.95, WHITE],
+      ['B', -0.05 * L, 12.5, 0, 0.52 * L, 3.4, B * 1.05, 0xee8a1c], ['B', -0.14 * L, 42, 0, 0.5 * L, 6, B * 0.8, WHITE],
+      ['B', -0.02 * L, 48, 0, 0.12 * L, 0.4, B * 0.34, 0x46aee0], ['B', 0.27 * L, 37, 0, 6, 4.5, B * 1.1, WHITE], ['B', -0.31 * L, 46, 0, 0.07 * L, 12, B * 0.32, funnel, 0.18]]
+    for (const y of [17, 21.5, 26]) p.push(['H', lo[0], y, 0, lo[1], 1.3, B * 0.99, 0x3b4a58])
+    for (const y of [33, 37.5]) p.push(['H', hi[0], y, 0, hi[1], 1.3, B * 0.97, 0x3b4a58])
+    return { L, B, p }
+  },
   bcf(r, L = 160, B = 27) {
     return { L, B, p: [['F', 0, -4, 0, L, 8.5, B, NAVY], ['F', 0, 4.5, 0, L, 4.5, B, WHITE], ['B', 0, 9, 0, 0.84 * L, 6, B * 0.95, WHITE],
       ['B', 0, 15, 0, 0.78 * L, 1.8, B * 0.97, 0x2a3b52], ['B', 0, 16.8, 0, 0.74 * L, 4, B * 0.9, WHITE], ['B', 0, 20.8, 0, 0.3 * L, 3, B * 0.7, WHITE],
@@ -181,6 +208,16 @@ export default async function ships(city) {
       })
     }
 
+    // cruise ships at their berths on their weekdays in season (fewer in April and October)
+    for (const c of CRUISE) {
+      const [ax, az] = xz(...c.stern), [bx, bz] = xz(...c.bow), L = Math.hypot(bx - ax, bz - az), h = Math.atan2(bx - ax, -(bz - az))
+      for (const wd of c.days) add(dyn, MODELS.cruise(r, L), (t, out) => {
+        const d = cruiseDay(t * 1000)
+        if (!d || d.wd !== wd || (d.shoulder && (c.peak || !d.weekend))) return false
+        out[0] = (ax + bx) / 2; out[1] = (az + bz) / 2; out[2] = h; out[3] = 0
+        return true
+      }, { cruise: true })
+    }
     // at anchor: all swing to the tide (flood ~ every 12.4 h), facing into it
     const tide = Math.floor(Date.now() / 1000 / 22350) % 2 ? 2.0 : 5.1
     for (const [la, lo] of data.anchorages) {
@@ -190,8 +227,10 @@ export default async function ships(city) {
     }
     // at the terminals: ships along each straight quay, on its water side (OSM coastline: water on the right) and
     // clear of the terminal (b.off: how far its wharf stands out past the coastline)
+    const cruiseAt = CRUISE.map((c) => xz((c.stern[0] + c.bow[0]) / 2, (c.stern[1] + c.bow[1]) / 2))
     for (const b of data.berths) {
       const [ax, az] = xz(...b.a), [bx, bz] = xz(...b.b), len = Math.hypot(bx - ax, bz - az), ux = (bx - ax) / len, uz = (bz - az) / len
+      if (cruiseAt.some(([x, z]) => Math.hypot(x - (ax + bx) / 2, z - (az + bz) / 2) < 120)) continue // a cruise berth (Ballantyne)
       const kind = b.k === 'general' && /Auto/.test(b.t) ? 'car' : b.k
       let s = 15
       for (;;) {
@@ -304,7 +343,10 @@ export default async function ships(city) {
     }
     return r
   }
+  let berthed = ''
   function check() {
+    const t = Date.now() / 1000, now = cruiseDay(t * 1000)?.wd ?? ''
+    if (now !== berthed) { berthed = now; update(); city.requestRender() } // a cruise ship came in or left
     const want = onScreen()
     if (want === 2 && !stop) stop = city.animate()
     else if (want < 2 && stop) { stop(); stop = null; update() }
