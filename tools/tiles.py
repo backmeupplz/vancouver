@@ -8,7 +8,7 @@ from functools import lru_cache
 from multiprocessing import Pool
 import numpy as np
 import shapely
-from shapely.geometry import Polygon, box, LineString
+from shapely.geometry import Polygon, box, LineString, Point
 from shapely.ops import unary_union
 from PIL import Image, ImageDraw
 from scipy import ndimage
@@ -1256,7 +1256,8 @@ def apply_sections(out, X0, Y0, rnd, measure, under):
 # ---------------------------------------------------------------- trees
 def off_streets(trees, polys, in_building):
     """no trunk on a carriageway, a cycle track or a sidewalk's walking zone, as the ground draws them (the streets'
-    pieces above): a street tree stands in its boulevard, else in the tree pits along the kerb; one that can't is
+    pieces above; within 0.5 m of a carriageway counts, as the drawn kerb runs within a few dm of these, tools/tiles.py
+    ground_partition()): a street tree stands in its boulevard, else in the tree pits along the kerb; one that can't is
     dropped. Crowns may still overhang the street. -> (trees, moved, dropped)"""
     from shapely.strtree import STRtree
     from shapely.ops import nearest_points
@@ -1266,7 +1267,7 @@ def off_streets(trees, polys, in_building):
     C, Wk, Bv = STRtree(carr), STRtree(walk or [Polygon()]), STRtree(blvd or [Polygon()])
     pts = shapely.points(np.array([(t[0], t[1]) for t in trees]))
     hit = lambda T, **k: set(T.query(pts, **k)[0].tolist())
-    on_road, on_walk, on_blvd, pit = hit(C, predicate='intersects'), hit(Wk, predicate='intersects'), hit(Bv, predicate='intersects'), hit(C, predicate='dwithin', distance=1.2)
+    on_road, on_walk, on_blvd, pit = hit(C, predicate='dwithin', distance=0.5), hit(Wk, predicate='intersects'), hit(Bv, predicate='intersects'), hit(C, predicate='dwithin', distance=1.2)
     out, moved, dropped = [], 0, 0
     for i, t in enumerate(trees):
         if i not in on_road and (i not in on_walk or i in on_blvd or i in pit):
@@ -2238,6 +2239,58 @@ def pack_ring(out, ring):
     return struct.pack('<I', len(q)) + np.clip(d, -32768, 32767).astype('<i2').tobytes()
 
 
+GROUND_SNAP = 3  # the partition's grid in the tile's int16 steps (18.75 cm in a detail tile): its points are further apart
+# than the page welds (1.5 steps, tile-worker.js weld()), and it divides the tile's far edge (16383)
+
+
+def ground_partition(per, tx, ty, k, holes=None, simp=2):
+    """class -> overlapping polygons (later classes win) => class -> its polygons in one planar partition of the tile:
+    every border two classes share runs through the same points on both sides (their triangles share edges on the page,
+    no crack between them). All the borders are noded together, snap-rounded to GROUND_SNAP int16 steps of the tile,
+    each face goes to the last class over it (none: a tunnel's open box, else land), and each class's faces are merged."""
+    g = GROUND_SNAP / k
+    loc = {c: shapely.transform(p, lambda a: a - (tx, ty)) for c, p in per.items()}  # (the grid from the tile's corner)
+    # a border within two grid steps of the tile's edge is put on it (else a strip a step wide along the edge, hundreds of
+    # metres long: the page can only make needles of it)
+    size = 16383 / k
+    rim = lambda a: np.where(a < 2 * g, 0.0, np.where(a > size - 2 * g, size, a))
+    edges = shapely.unary_union([shapely.transform(shapely.boundary(p), rim) for p in loc.values()], grid_size=g)
+    faces = shapely.get_parts(shapely.polygonize(shapely.get_parts(edges)))
+    if not len(faces): return {}
+    pt = shapely.get_coordinates(shapely.point_on_surface(faces))
+    win = np.full(len(faces), GI['land'])
+    for c, p in loc.items():
+        shapely.prepare(p)
+        win[shapely.contains_xy(p, pt[:, 0], pt[:, 1])] = GI[c]
+    if holes is not None:
+        h = shapely.transform(holes, lambda a: a - (tx, ty)); shapely.prepare(h)
+        cov = np.zeros(len(faces), bool)
+        for p in loc.values(): cov |= shapely.contains_xy(p, pt[:, 0], pt[:, 1])
+        win[~cov & shapely.contains_xy(h, pt[:, 0], pt[:, 1])] = -1
+    cls, parts = [], []
+    for c in np.unique(win[win >= 0]):
+        u = [p for p in shapely.get_parts(shapely.coverage_union_all(faces[win == c])) if p.geom_type == 'Polygon']
+        cls += [GROUND[c]] * len(u); parts += u
+    # the zigzag the grid puts in a straight border taken out, alike on both sides (a near-straight run of points makes
+    # the page's triangulation slivers), the tile's edge kept
+    parts = list(shapely.coverage_simplify(np.array(parts, object), simp * g, simplify_boundary=False)) if parts else []
+    # a part under 30 cm across on the whole (a step-wide strip, or the wedge simplifying makes of one) joins the part
+    # beside it along most of its border: the page can only triangulate it into needles
+    thin = [i for i, p in enumerate(parts) if 2 * p.area < 0.3 * p.length]
+    if thin:
+        from shapely.strtree import STRtree
+        T = STRtree(parts)
+        for i in thin:
+            nb = [n for n in T.query(parts[i], predicate='intersects') if n != i and not parts[n].is_empty and n not in thin]
+            if not nb: continue
+            n = max(nb, key=lambda n: parts[i].boundary.intersection(parts[n].boundary).length)
+            parts[n], parts[i] = shapely.coverage_union(parts[n], parts[i]), Polygon()
+    res = {}
+    for c, p in zip(cls, parts):
+        if not p.is_empty: res.setdefault(c, []).append(shapely.transform(p, lambda a: a + (tx, ty)))
+    return res
+
+
 def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None, shops=(), beach=()):
     tb = box(tx, ty, tx + size, ty + size)
     n = terr.shape[0]
@@ -2248,12 +2301,11 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     near = lambda ps: [ps[k] for k in np.flatnonzero(shapely.intersects(np.array(ps, object), tb))] if ps else []  # (one GEOS call)
     wat = near(polys.get('water', []))
     water_u = unary_union(wat) if wat else None
-    land_base = tb.difference(water_u) if wat else tb  # land and water meet edge to edge, never overlap
-    # per class: the union clipped to the tile and simplified, small bits dropped (the class below fills in)
+    # per class: the union clipped to the tile and simplified, small bits dropped (the class below fills in); land is
+    # the whole tile, under every other class
     per = {}
     for k in GROUND:
-        src = [land_base] if k == 'land' else polys.get(k, [])
-        cand = near(src)
+        cand = [tb] if k == 'land' else near(polys.get(k, []))
         if not cand: continue
         try: g = unary_union(cand).intersection(tb)
         except Exception: g = unary_union([c.buffer(0) for c in cand]).intersection(tb)
@@ -2265,19 +2317,10 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
             if not parts: continue
             g = unary_union(parts)
         per[k] = g
-    # one non-overlapping layer: each class keeps what no class above it covers (no z-fighting anywhere)
-    covered = None
-    for k in reversed(GROUND):
-        if k not in per: continue
-        g = per[k]
-        mine = g if covered is None else g.difference(covered)
-        covered = g if covered is None else covered.union(g)
-        per[k] = mine
+    per = ground_partition(per, tx, ty, out.k, holes if detail else None)
     for k in GROUND:
         if k not in per: continue
-        g = per[k]
-        geoms = [p for p in (g.geoms if hasattr(g, 'geoms') else [g]) if p.geom_type == 'Polygon' and p.area >= 0.01]
-        if not geoms: continue
+        geoms = list(per[k])
         body = bytearray()
         for p in geoms:
             rings = [list(p.exterior.coords)[:-1]] + [list(r.coords)[:-1] for r in p.interiors]
@@ -2535,6 +2578,21 @@ def selftest():
     """synthetic LiDAR: a gable whose ridge runs across the footprint, a hip, a shed, and a tower on a podium; what
     stands on a roof"""
     from shapely.strtree import STRtree
+    # the ground: one planar partition, later classes on top, every border the same points on both sides
+    tx, ty, k = 2048.0, -1024.0, 32766 / 2048
+    tb = box(tx, ty, tx + 1024, ty + 1024)
+    road = LineString([(tx - 5, ty + 300.3), (tx + 1030, ty + 712.9)]).buffer(6, quad_segs=3)
+    part = ground_partition({'land': tb, 'grass': Point(tx + 400, ty + 470).buffer(90), 'sidewalk': road.buffer(2.5).intersection(tb), 'road': road.intersection(tb)}, tx, ty, k)
+    geoms = [p for ps in part.values() for p in ps]
+    assert abs(sum(p.area for p in geoms) - tb.area) < 1e-3 and abs(shapely.union_all(geoms).area - tb.area) < 1e-3, 'overlap or gap'
+    assert part['road'][0].contains(Point(tx + 400, ty + 459.5)) and any(p.contains(Point(tx + 400, ty + 520)) for p in part['grass'])
+    seg = {}
+    for p in geoms:
+        for r in [p.exterior, *p.interiors]:
+            c = np.round((np.asarray(r.coords) - (tx, ty)) * k / GROUND_SNAP).astype(int)
+            for a, b in zip(map(tuple, c[:-1]), map(tuple, c[1:])): seg[min(a, b), max(a, b)] = seg.get((min(a, b), max(a, b)), 0) + 1
+    E = 16383 // GROUND_SNAP
+    assert all(n == 2 or (a[0] == b[0] and a[0] in (0, E)) or (a[1] == b[1] and a[1] in (0, E)) for (a, b), n in seg.items()), 'a border not shared'
     far = [(9e5, 9e5), (9e5 + 30, 9e5), (9e5 + 30, 9e5 + 20), (9e5, 9e5 + 20)]  # nowhere near the orthophoto
     pools, sun = STRtree([box(9e5 + 5, 9e5 + 5, 9e5 + 15, 9e5 + 9)]), STRtree([shapely.geometry.Point(9e5 + 20, 9e5 + 10)])
     assert roof_bits(dict(ring=far, roof=0), {'roof:garden': 'yes'}, pools, sun) == 4 | 8 | 16

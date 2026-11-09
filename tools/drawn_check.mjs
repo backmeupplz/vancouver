@@ -164,8 +164,11 @@ function check(cell) {
         }
         return hs
       }
-      const open = [] // tunnel pieces' open stretches: [x0, y0, x1, y1, reach]
-      for (const L of T.lines) if (L.tube) for (let i = 0; i < L.pts.length / 2 - 1; i++) if (L.tube[i] || L.tube[i + 1]) open.push([L.pts[i * 2], L.pts[i * 2 + 1], L.pts[i * 2 + 2], L.pts[i * 2 + 3], L.w / 2 + 3])
+      const open = [] // tunnel pieces' open stretches, this tile's and its neighbours' (the cut reaches over the seam): [x0, y0, x1, y1, reach]
+      for (let u = -1; u <= 1; u++) for (let v = -1; v <= 1; v++) {
+        const N = tile(keyOf(T.ox + 512 + u * 1024, T.oy + 512 + v * 1024)), dx = u * 1024, dy = v * 1024
+        if (N) for (const L of N.lines) if (L.tube) for (let i = 0; i < L.pts.length / 2 - 1; i++) if (L.tube[i] || L.tube[i + 1]) open.push([L.pts[i * 2] + dx, L.pts[i * 2 + 1] + dy, L.pts[i * 2 + 2] + dx, L.pts[i * 2 + 3] + dy, L.w / 2 + 3])
+      }
       const nearOpen = (x, y) => open.some(([x0, y0, x1, y1, r]) => { const dx = x1 - x0, dy = y1 - y0, f = Math.max(0, Math.min(1, ((x - x0) * dx + (y - y0) * dy) / (dx * dx + dy * dy || 1))); return Math.hypot(x - x0 - dx * f, y - y0 - dy * f) < r })
       const rim = (v) => v < 0.05 || v > 1023.95
       for (const [c, a, b, o] of cnt.values()) {

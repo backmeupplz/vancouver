@@ -2,7 +2,7 @@
 // Coordinates in the buffers are local to the tile: x east, y up, z south, metres from the tile's SW corner.
 // Walls by what they face and the single-arm street lights follow Slop Toronto's rules (MIT, © 2026 Mr.doob, © 2026 John
 // Fewell; THIRD_PARTY.md).
-import earcut from '../vendor/earcut.js'
+import earcut, { refine as delaunay } from '../vendor/earcut.js'
 import { mulberry32 as mulberry, inPoly, sampleGrid } from './util.js'
 const GROUND_LIFT = 0 // the ground is one non-overlapping layer (tools/tiles.py), so no class needs lifting
 const KIND = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living', 'pedestrian', 'footway', 'cycleway',
@@ -181,7 +181,7 @@ function ground(t, terr, level) {
   const pos = [], cls = [], idx = Object.assign([], { rim: [] }), coarse = level === 0 ? Object.assign([], { rim: [] }) : null
   const seen = new Map() // shared vertices: one per (point, class), so each tile uploads about a third as much
   const vert = (x, y, c, lift) => {
-    const key = Math.round(x * 50) * 1e7 + Math.round(y * 50) + c * 1e14
+    const key = (Math.round(x * 1000) + 3e6) * 1e7 + Math.round(y * 1000) + 3e6 + c * 1e14 // (to the mm: two points of a sliver 2 cm across stay two)
     let i = seen.get(key)
     if (i === undefined) { i = pos.length / 3; seen.set(key, i); pos.push(x, hz(x, y, c) + lift, -y); cls.push(c) }
     return i
@@ -199,28 +199,43 @@ function ground(t, terr, level) {
     const L = Math.hypot(bx - ax, by - ay)
     if (L > cap) return true
     if (cap === Infinity || L < 1.5) return false
-    const ha = hz(ax, ay, c), hb = hz(bx, by, c), k = Math.ceil(L / (cell / 2))
-    for (let i = 1; i < k; i++) { const f = i / k; if (Math.abs(hz(ax + (bx - ax) * f, ay + (by - ay) * f, c) - ha - (hb - ha) * f) > tol) return true }
+    const ha = heightAt(terr, ax, ay), hb = heightAt(terr, bx, by), k = Math.ceil(L / (cell / 2)) // (the terrain, also under a pier: its border with the water is split alike on both sides)
+    for (let i = 1; i < k; i++) { const f = i / k; if (Math.abs(heightAt(terr, ax + (bx - ax) * f, ay + (by - ay) * f) - ha - (hb - ha) * f) > tol) return true }
     return false
   }
-  // one triangle into `out`, split first along the longest edge that bends
+  // one triangle into `out`, split at the middle of every edge that bends, all at once, so each split halves them: 12
+  // splits take the longest edge (1.4 km) under the 1.5 m no edge is split below, and a piece of an edge is as deep on
+  // either side of it, so the limit cuts both sides alike. (One edge at a time, a long flat edge
+  // kept its far corner through every split: a fan of ever thinner slivers along an edge that is straight where its
+  // pieces aren't, cut off by the depth limit before the edges the next triangles split were split here too.)
   // fl: which of its edges (1 ab, 2 bc, 4 ca) lie on its polygon's border: those triangles are listed in out.rim
   const emit = (out, tol, c, lift, ax, ay, bx, by, cx, cy, depth, fl) => {
-    if (depth < 20) {
-      const ab = bends(ax, ay, bx, by, c, tol) ? Math.hypot(bx - ax, by - ay) : 0, bc = bends(bx, by, cx, cy, c, tol) ? Math.hypot(cx - bx, cy - by) : 0
-      const ca = bends(cx, cy, ax, ay, c, tol) ? Math.hypot(ax - cx, ay - cy) : 0, m = Math.max(ab, bc, ca), d = depth + 1
-      if (m > 0) {
-        if (m === ab) { const mx = (ax + bx) / 2, my = (ay + by) / 2; emit(out, tol, c, lift, ax, ay, mx, my, cx, cy, d, fl & 5); emit(out, tol, c, lift, mx, my, bx, by, cx, cy, d, fl & 3) }
-        else if (m === bc) { const mx = (bx + cx) / 2, my = (by + cy) / 2; emit(out, tol, c, lift, ax, ay, bx, by, mx, my, d, fl & 3); emit(out, tol, c, lift, ax, ay, mx, my, cx, cy, d, fl & 6) }
-        else { const mx = (cx + ax) / 2, my = (cy + ay) / 2; emit(out, tol, c, lift, ax, ay, bx, by, mx, my, d, fl & 5); emit(out, tol, c, lift, mx, my, bx, by, cx, cy, d, fl & 6) }
-        return
-      }
+    const S = [bends(ax, ay, bx, by, c, tol), bends(bx, by, cx, cy, c, tol), bends(cx, cy, ax, ay, c, tol)], k = S[0] + S[1] + S[2]
+    if (k && depth < 12) {
+      const V = [[ax, ay], [bx, by], [cx, cy]], F = [fl & 1, fl & 2, fl & 4], d = depth + 1
+      const M = V.map((p, i) => [(p[0] + V[(i + 1) % 3][0]) / 2, (p[1] + V[(i + 1) % 3][1]) / 2])
+      const T = (p, q, r, f0, f1, f2) => emit(out, tol, c, lift, p[0], p[1], q[0], q[1], r[0], r[1], d, (f0 ? 1 : 0) | (f1 ? 2 : 0) | (f2 ? 4 : 0))
+      if (k === 3) { T(V[0], M[0], M[2], F[0], 0, F[2]); T(M[0], V[1], M[1], F[0], F[1], 0); T(M[2], M[1], V[2], 0, F[1], F[2]); T(M[0], M[1], M[2], 0, 0, 0); return }
+      if (k === 1) { const i = S.indexOf(true), j = (i + 1) % 3, o = (i + 2) % 3; T(V[i], M[i], V[o], F[i], 0, F[o]); T(M[i], V[j], V[o], F[i], F[j], 0); return }
+      const j = S.indexOf(false), e = (j + 1) % 3, g = (j + 2) % 3 // edges e and g split, j not: a corner at V[g], a quad left
+      T(M[e], V[g], M[g], F[e], F[g], 0)
+      if (Math.hypot(M[e][0] - V[j][0], M[e][1] - V[j][1]) < Math.hypot(M[g][0] - V[e][0], M[g][1] - V[e][1])) { T(V[j], V[e], M[e], F[j], F[e], 0); T(V[j], M[e], M[g], 0, 0, F[g]) }
+      else { T(V[j], V[e], M[g], F[j], 0, F[g]); T(V[e], M[e], M[g], F[e], 0, 0) }
+      return
     }
     const va = vert(ax, ay, c, lift), vb = vert(bx, by, c, lift), vc = vert(cx, cy, c, lift)
     // face up: earcut keeps the ring's winding; pick the order whose normal points +y
     const cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
     if (fl) out.rim.push(out.length, cross > 0 ? fl : ((fl & 4) >> 2) | (fl & 2) | ((fl & 1) << 2)) // (its border edges in the order kept)
     if (cross > 0) out.push(va, vb, vc); else out.push(va, vc, vb)
+  }
+  // a ring edge longer than DENSE gets its halves' points (a long border opposite short ones made needles: 300 m long,
+  // 30 cm across, tilted across by the terrain along them)
+  const DENSE = cap === Infinity ? Infinity : cell * 16
+  const halve = (out, ax, ay, bx, by) => {
+    if (Math.hypot(bx - ax, by - ay) <= DENSE) return
+    const mx = (ax + bx) / 2, my = (ay + by) / 2
+    halve(out, ax, ay, mx, my); out.push(mx, my); halve(out, mx, my, bx, by)
   }
   const polys = [] // [class, rings], read first: their borders are welded together before they're triangulated
   for (let r = 0; r < runs; r++) {
@@ -239,7 +254,10 @@ function ground(t, terr, level) {
       const ring = W.rings[ri++]
       if (ring.length < 3 || (k && !flat.length)) continue // welded down to nothing (a sliver of a ring)
       if (k) holes.push(flat.length / 2)
-      for (const i of ring) flat.push(W.xy[i * 2], W.xy[i * 2 + 1])
+      for (let n = 0; n < ring.length; n++) { // (long edges halved down to DENSE: alike from either side, so neighbours keep sharing them)
+        const a = ring[n] * 2, b = ring[(n + 1) % ring.length] * 2
+        flat.push(W.xy[a], W.xy[a + 1]); halve(flat, W.xy[a], W.xy[a + 1], W.xy[b], W.xy[b + 1])
+      }
     }
     const tri = flat.length ? earcut(flat, holes) : []
     const st = [0, ...holes, flat.length / 2], ringEdge = (i, j) => { // along one ring: consecutive points, or with only
@@ -253,9 +271,12 @@ function ground(t, terr, level) {
       }
       return on(i, j) || on(j, i)
     }
-    for (let i = 0; i < tri.length; i += 3) {
-      const a = tri[i] * 2, b = tri[i + 1] * 2, d = tri[i + 2] * 2
-      const fl = (ringEdge(tri[i], tri[i + 1]) ? 1 : 0) | (ringEdge(tri[i + 1], tri[i + 2]) ? 2 : 0) | (ringEdge(tri[i + 2], tri[i]) ? 4 : 0)
+    delaunay(tri, flat) // (fewer slivers, so fewer splits on slopes; before conform(): a flip can lay an edge back over a point)
+    let tris = conform(tri, flat)
+    delaunay(tris, flat); tris = conform(tris, flat) // (again: with the cut triangles the flips get out of the needles left)
+    for (let i = 0; i < tris.length; i += 3) {
+      const u = tris[i], v = tris[i + 1], w = tris[i + 2], a = u * 2, b = v * 2, d = w * 2
+      const fl = (ringEdge(u, v) ? 1 : 0) | (ringEdge(v, w) ? 2 : 0) | (ringEdge(w, u) ? 4 : 0)
       emit(idx, GROUND_TOL[level], c, lift, flat[a], flat[a + 1], flat[b], flat[b + 1], flat[d], flat[d + 1], 0, fl)
       if (coarse) emit(coarse, GROUND_COARSE, c, lift, flat[a], flat[a + 1], flat[b], flat[b + 1], flat[d], flat[d + 1], 0, fl)
     }
@@ -286,7 +307,7 @@ function ground(t, terr, level) {
         const vs = []; cellsOn(ax, ay, bx, by, (k) => { const l = grid.get(k); if (l) for (const v of l) vs.push(v) })
         for (const v of vs) {
           const vx = pos[v * 3], vy = -pos[v * 3 + 2], f = ((vx - ax) * (bx - ax) + (vy - ay) * (by - ay)) / L2
-          if (f <= 1e-3 || f >= 1 - 1e-3 || Math.abs((vx - ax) * (by - ay) - (vy - ay) * (bx - ax)) / L >= 0.03) continue
+          if (f <= 1e-3 || f >= 1 - 1e-3 || Math.abs((vx - ax) * (by - ay) - (vy - ay) * (bx - ax)) / L >= 1e-4) continue // (right on it: the bake's borders are shared point for point)
           const k = Math.round(vx * 50) * 65536 + Math.round(vy * 50)
           if (!on) { on = []; seen = new Set() }
           if (!seen.has(k)) { seen.add(k); on.push([f, vx, vy]) }
@@ -296,7 +317,14 @@ function ground(t, terr, level) {
         for (const [, x, y] of on) loop.push(vert(x, y, cc, lift))
       }
       if (loop.length === 3) continue
-      const gx = (pos[out[q] * 3] + pos[out[q + 1] * 3] + pos[out[q + 2] * 3]) / 3, gy = -(pos[out[q] * 3 + 2] + pos[out[q + 1] * 3 + 2] + pos[out[q + 2] * 3 + 2]) / 3, g = vert(gx, gy, cc, lift)
+      const [A, B, C] = [out[q], out[q + 1], out[q + 2]].map((v) => [pos[v * 3], -pos[v * 3 + 2]])
+      const across = Math.abs((B[0] - A[0]) * (C[1] - A[1]) - (B[1] - A[1]) * (C[0] - A[0])) / Math.max(Math.hypot(B[0] - A[0], B[1] - A[1]), Math.hypot(C[0] - B[0], C[1] - B[1]), Math.hypot(A[0] - C[0], A[1] - C[1]))
+      if (across < 0.01) { // a sliver: a fan from its first corner (its centre would be a new point all but on its long edge, the next triangles' edge)
+        out[q] = loop[0]; out[q + 1] = loop[1]; out[q + 2] = loop[2]
+        for (let j = 2; j < loop.length - 1; j++) add.push(loop[0], loop[j], loop[j + 1])
+        continue
+      }
+      const g = vert((A[0] + B[0] + C[0]) / 3, (A[1] + B[1] + C[1]) / 3, cc, lift)
       out[q] = loop[0]; out[q + 1] = loop[1]; out[q + 2] = g
       for (let j = 1; j < loop.length; j++) add.push(loop[j], loop[(j + 1) % loop.length], g)
     }
@@ -307,6 +335,43 @@ function ground(t, terr, level) {
   if (!nv) return null
   const P = new Float32Array(pos), I = nv > 65535 ? Uint32Array : Uint16Array
   return { position: P, normal: normals(terr, P), cls: new Uint8Array(cls), index: new I(idx), coarse: coarse && new I(coarse) }
+}
+
+// earcut's triangles made conforming: earcut can run an edge straight over one of the polygon's points (it leaves out a
+// point in a straight line between its neighbours, also where a bridge to a hole lines up with a border, common on the
+// tiles' grid) with a flat triangle on the other side, so the triangles either side of that line split it differently
+// (a crack). A triangle with a point on an edge is cut in two there, flat triangles go -> the triangles (indices)
+function conform(tri, flat) {
+  const G = 4, grid = new Map(), out = []
+  for (let i = 0; i < flat.length / 2; i++) { const k = Math.floor(flat[i * 2] / G) * 65536 + Math.floor(flat[i * 2 + 1] / G); let l = grid.get(k); if (!l) grid.set(k, (l = [])); l.push(i) }
+  const on = (p, q) => { // a point right inside edge p-q, else -1
+    const ax = flat[p * 2], ay = flat[p * 2 + 1], dx = flat[q * 2] - ax, dy = flat[q * 2 + 1] - ay, L = Math.hypot(dx, dy)
+    if (L < 1e-6) return -1
+    for (let s = 0; s < L + G / 2; s += G / 2) {
+      const f = Math.min(1, s / L), ci = Math.floor((ax + dx * f) / G), cj = Math.floor((ay + dy * f) / G)
+      for (let u = -1; u <= 1; u++) for (let v = -1; v <= 1; v++) for (const m of grid.get((ci + u) * 65536 + cj + v) || []) {
+        const px = flat[m * 2] - ax, py = flat[m * 2 + 1] - ay, g = (px * dx + py * dy) / (L * L)
+        if (g > 1e-6 && g < 1 - 1e-6 && Math.abs(px * dy - py * dx) / L < 1e-5) return m
+      }
+    }
+    return -1
+  }
+  for (let i = 0; i < tri.length; i += 3) {
+    const work = [tri[i], tri[i + 1], tri[i + 2]]
+    for (let n = 0; work.length; n++) {
+      if (n > 256) { out.push(...work); break } // (a guard)
+      const w = work.pop(), v = work.pop(), u = work.pop()
+      let cut = false
+      for (const [p, q, o] of [[u, v, w], [v, w, u], [w, u, v]]) {
+        const m = on(p, q)
+        if (m < 0) continue
+        if (m !== o) work.push(p, m, o, m, q, o) // (o on the edge: a flat triangle, none at all)
+        cut = true; break
+      }
+      if (!cut) out.push(u, v, w)
+    }
+  }
+  return out
 }
 
 // The bake's ground polygons meet along shared borders, but not always point for point: one side has a point the other
