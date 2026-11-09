@@ -376,6 +376,7 @@ export function busGame(ctx, pick, d0) {
   let d = 0, dLast = 0, next = 0, doors = false, doorK = 0, serving = null, boardQ = 0, alightQ = 0, tick = 0, leftAt = 0, ringAt = 0, jerkAt = 0, swayAt = 0, decel = 0, offRoute = 0
   let headway = 10, pole = { on: trolley, k: trolley ? 1 : 0, fix: 0, pitch: 0.38, yaw: 0, lat: 0 }
   const kneel = { k: 0 }
+  car.V = { ...car.V }; const push0 = car.V.push; let paid = 0 // (its own copy of the numbers: the load changes them)
   // where to start: the first stop, or the one nearest a point
   function startAt(from, nx, ny) {
     let i0 = 0
@@ -581,8 +582,15 @@ export function busGame(ctx, pick, d0) {
       s.done = true; advance(now)
     }
   }
+  // the next stop, called out as on the real buses: a chime and the stop's name (the browser's own voice)
+  function announce(s) {
+    if (!s || ctx.muted()) return
+    snd.ding()
+    try { const u = new SpeechSynthesisUtterance(`Next stop: ${s.short || s.name}`); u.rate = 0.95; u.volume = 0.7; speechSynthesis.cancel(); speechSynthesis.speak(u) } catch {}
+  }
   function advance(now) {
     next++
+    announce(stops[next])
     leftAt = now; ringAt = 3000 + Math.random() * 9000
     if (next >= N) { S.end = true; ctx.hideMarkers(); zone.m.visible = false }
   }
@@ -625,6 +633,10 @@ export function busGame(ctx, pick, d0) {
     if (early > 120 && next !== S.i0 && /Station|Exchange/.test(s.name)) { S.mood -= 2; ctx.popup('Leaving early', `${Math.round(early / 60)} min ahead of the timetable: someone running for it will miss you.`) }
     s.wait = 0; s.alight = 0; s.req = false; s.done = true
     S.served++
+    city.progress?.award('bus', 4 + 1.5 * (S.carried - paid), { quiet: true }); paid = S.carried // the stop, and a fare for everyone who got on at it
+    // a full bus is a heavy bus: slower away from the stop, and it says so once
+    car.V.push = push0 * (1 - 0.3 * S.aboard / cap)
+    if (S.aboard > cap * 0.6 && !S.full) { S.full = true; ctx.popup('Standing room only', 'A full bus is heavy: brake earlier, pull away gently.') }
     if (next === N - 1) { S.end = true; advance(performance.now()); setTimeout(() => !S.summary && ctx.summary(), 1200) } else advance(performance.now())
   }
   function serve(dt) { // while the doors are open at a stop: off at the back, on at the front, one by one
@@ -694,7 +706,11 @@ export function busGame(ctx, pick, d0) {
     const line = !S.carried ? 'No passengers this time: the depot’s kettle is on.' : S.missed ? 'A few missed stops: keep an ear out for the bell.'
       : S.harsh + S.sway > 2 ? 'Everyone got there, if a little shaken. Gently on the pedals!' : stars >= 4 ? 'Smooth, punctual and friendly: a model operator.' : 'A solid shift. Put your feet up.'
     const row = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`
-    return { title: `Coast Transit · ${r.name} ${esc(dest)}`, big: `${S.carried} rider${S.carried === 1 ? '' : 's'}`, stars, line,
+    // the grade: happiness and punctuality, less for missed stops; the score also counts how much was done
+    const q = !S.served ? 0 : (S.mood / 100) * 0.65 + (S.timed ? S.onTime / S.timed : 0.5) * 0.35 - 0.06 * S.missed
+    const rank = q >= 0.9 ? 'S' : q >= 0.78 ? 'A' : q >= 0.62 ? 'B' : q >= 0.45 ? 'C' : 'D'
+    if (S.served && !S.scored) { S.scored = true; city.progress?.score('bus', Math.round(q * (S.served * 40 + S.carried * 10))) }
+    return { rank, title: `Coast Transit · ${r.name} ${esc(dest)}`, big: `${S.carried} rider${S.carried === 1 ? '' : 's'}`, stars, line,
       rows: row('Stops served', `${S.served}${S.missed ? `, ${S.missed} missed` : ''}`) + row('On time', S.timed ? `${Math.round((100 * S.onTime) / S.timed)}% of stops` : '–') +
         row('Happiness', `${Math.round(S.mood)}%`) + row('Smooth driving', S.harsh + S.sway ? `${S.harsh} harsh stop${S.harsh === 1 ? '' : 's'}, ${S.sway} swerve${S.sway === 1 ? '' : 's'}` : 'silky') +
         row('Bumps', S.bumps || 'none') + (trolley ? row('Dewirements', S.dewire || 'none') : '') + row('Driven', `${S.km.toFixed(1)} km in ${Math.max(1, Math.round(mins))} min`) }

@@ -14,9 +14,19 @@ import { makeWalker, poseWalker } from './walker.js'
 import { kit, kitMaterial } from '../../core/kit.js'
 import { clamp, wrap, esc } from '../../core/util.js'
 import { noise } from '../../core/play.js'
+import { speedLines } from './feel.js'
 
 export const NAME = 'Rush Fare'
 const START_TIME = 50 // s on the clock
+// who gets in: most just want to get there; some change the ride (pay: times the fare; limit: times their patience;
+// stunt: times the stunt tips; clean: times the fare again if nothing was hit on the way)
+const RIDERS = [
+  { p: 0.45 },
+  { p: 0.2, name: 'Thrill-seeker', say: 'Make it wild!', stunt: 2 },
+  { p: 0.18, name: 'Late for a flight', say: 'Step on it, I’m so late!', pay: 1.8, limit: 0.7 },
+  { p: 0.17, name: 'Nervous rider', say: 'Gently, please… not a scratch.', clean: 1.7, stunt: 0.5 },
+]
+function rider() { let r = Math.random(); for (const k of RIDERS) if ((r -= k.p) < 0) return k; return RIDERS[0] }
 const CLASS = [ // fare classes: ring colour, straight-line distance (m), seconds added on pickup
   { name: 'short', col: 0x4fc3ff, css: '#4fc3ff', r: [350, 1300], add: 9 },
   { name: 'medium', col: 0xffb43a, css: '#ffb43a', r: [1300, 2700], add: 14 },
@@ -283,20 +293,7 @@ function effects(THREE, city, cab) {
   sparks.frustumCulled = false
   for (let i = 0; i < N; i++) pos[i * 3 + 1] = -1e5
   let next = 0
-  // speed lines round the view, rushing at the camera (a shader moves them: no work per line on the CPU)
-  const M = low ? 26 : 64, lp = new Float32Array(M * 6), lk = new Float32Array(M * 2), ll = new Float32Array(M * 2)
-  for (let i = 0; i < M; i++) {
-    const a = Math.random() * Math.PI * 2, r = 2.2 + Math.random() * 4.5, z = -Math.random() * 44, L = 2.5 + Math.random() * 4
-    for (let e = 0; e < 2; e++) { lp.set([Math.cos(a) * r * 1.4, Math.sin(a) * r, z], i * 6 + e * 3); lk[i * 2 + e] = e; ll[i * 2 + e] = L }
-  }
-  const lg = new THREE.BufferGeometry(); lg.setAttribute('position', new THREE.BufferAttribute(lp, 3)); lg.setAttribute('aK', new THREE.BufferAttribute(lk, 1)); lg.setAttribute('aL', new THREE.BufferAttribute(ll, 1))
-  const lineMat = new THREE.ShaderMaterial({
-    uniforms: { uT: { value: 0 }, uA: { value: 0 } },
-    vertexShader: 'attribute float aK, aL; uniform float uT; varying float vA; void main() { vec3 p = position; p.z = mod(p.z + uT * 60.0, 44.0) - 46.0 + aK * aL; vA = (1.0 - aK) * smoothstep(-46.0, -30.0, p.z) * (1.0 - smoothstep(-6.0, -2.0, p.z)); gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0); }',
-    fragmentShader: 'uniform float uA; varying float vA; void main() { gl_FragColor = vec4(vec3(1.0, 0.97, 0.9) * vA * uA, vA * uA); }',
-    transparent: true, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending,
-  })
-  const lines = new THREE.LineSegments(lg, lineMat); lines.frustumCulled = false; lines.renderOrder = 10
+  const sl = speedLines(THREE, low), lines = sl.lines, lineMat = sl.lineMat // speed lines round the view (feel.js)
   // the arrow: a fat chevron floating over the cab, pointing at where to go
   const k = kit(THREE), A = [-0.9, -0.32, 0.25, -0.32, 0.25, -0.78, 1.25, 0, 0.25, 0.78, 0.25, 0.32, -0.9, 0.32]
   k.c(0xffffff).prism(A, -0.2, 0.2, { bevel: 0.06, edge: () => k.c(0x8a8a8a) })
@@ -343,7 +340,7 @@ function effects(THREE, city, cab) {
     },
     dispose() {
       city.overlay.remove(...parts)
-      coneG.dispose(); outer.dispose(); inner.dispose(); pg.dispose(); sparks.material.dispose(); dotTex.dispose(); lg.dispose(); lineMat.dispose(); ag.dispose(); arrowMat.dispose()
+      coneG.dispose(); outer.dispose(); inner.dispose(); pg.dispose(); sparks.material.dispose(); dotTex.dispose(); sl.dispose(); ag.dispose(); arrowMat.dispose()
     },
   }
 }
@@ -509,11 +506,12 @@ export function taxiGame(ctx, choice) {
   function board(f) { // stopped in the ring: they hop in
     f.mode = 'board'; f.t = 0; f.ring.visible = f.gem.visible = false
     const d = f.dest, l = Math.hypot(d.x - f.x, d.y - f.y)
-    fare = { f, dest: d, dist: l, pay: Math.round((3.5 + 2.4 * (l / 1000)) * 100) / 100, tips: 0, limit: 10 + l / 15, t0: performance.now(), refined: false, gx: d.x, gy: d.y, r: d.shop ? 14 : 26 }
+    const who = rider()
+    fare = { f, who, hits: 0, dest: d, dist: l, pay: Math.round((3.5 + 2.4 * (l / 1000)) * (who.pay || 1) * 100) / 100, tips: 0, limit: (10 + l / 15) * (who.limit || 1), t0: performance.now(), refined: false, gx: d.x, gy: d.y, r: d.shop ? 14 : 26 }
     S.time += f.cls.add
     ctx.sfx.pickup(); ctx.buzz(30)
-    banner(`+${f.cls.add} s`, `${f.cls.name} fare`)
-    speak(`<b>“${esc(pick(HAIL).replace('{d}', d.name))}”</b>`)
+    banner(`+${f.cls.add} s`, who.name ? `${who.name} · ${f.cls.name} fare` : `${f.cls.name} fare`)
+    speak(`<b>“${esc(pick(HAIL).replace('{d}', d.name))}${who.say ? ` ${esc(who.say)}` : ''}”</b>`, who.say ? 4500 : 3500)
     nitro = Math.min(1, nitro + 0.15)
     ctx.setGoal(fare.gx, fare.gy, f.cls.col, ctx.icon)
     for (const o of folk) if (o.mode === 'wait') o.ring.visible = false
@@ -521,10 +519,13 @@ export function taxiGame(ctx, choice) {
   function dropOff() {
     const F = fare, used = (performance.now() - F.t0) / 1000, quick = used < F.limit * 0.6
     const bonus = quick ? 6 : used < F.limit ? 3 : 0
+    const clean = F.who.clean && !F.hits
+    if (F.who.clean) F.pay = Math.round(F.pay * (clean ? F.who.clean : 0.8) * 100) / 100
+    city.progress?.award('fare', F.pay + F.tips, { quiet: true })
     S.time += bonus
     S.fares++; S.cash += F.pay + F.tips; S.fareCash += F.pay; S.tips += F.tips; S.km += F.dist / 1000
     cash(); ctx.buzz([30, 60, 30, 60, 60])
-    banner(`+${money(F.pay + F.tips)}`, `${quick ? 'Speedy! ' : ''}${bonus ? `+${bonus} s` : ''}`)
+    banner(`+${money(F.pay + F.tips)}`, `${clean ? 'Not a scratch! ' : quick ? 'Speedy! ' : ''}${bonus ? `+${bonus} s` : ''}`)
     speak(`<b>“${esc(pick(THANKS))}”</b> fare ${money(F.pay)}${F.tips ? `, tips ${money(F.tips)}` : ''}`)
     const f = F.f; f.mode = 'leave'; f.t = 0; f.x = car.x + Math.cos(car.yaw) * 1.6; f.y = car.y + Math.sin(car.yaw) * 1.6; f.w.visible = true
     fare = null; nitro = Math.min(1, nitro + 0.2)
@@ -546,7 +547,8 @@ export function taxiGame(ctx, choice) {
     comboN = now - comboT < 4000 ? comboN + 1 : 1; comboT = now
     S.bestCombo = Math.max(S.bestCombo, comboN)
     nitro = Math.min(1, nitro + fill)
-    const k = 1 + 0.5 * (comboN - 1), v = Math.round(tip * k * 100) / 100
+    const k = (1 + 0.5 * (comboN - 1)) * (fare?.who.stunt || 1), v = Math.round(tip * k * 100) / 100
+    if (comboN > 1) city.progress?.stat('taxi.combo', 1)
     if (fare) fare.tips += v
     shout(name, fare ? `+${money(v)}${extra}` : extra || (comboN > 1 ? `×${comboN}` : ''))
     chime(comboN)
@@ -595,6 +597,7 @@ export function taxiGame(ctx, choice) {
   function rankOf(v) { return RANKS.find((r) => v >= r[0]) }
   function results() {
     const r = rankOf(S.cash), prev = bestOf(), isBest = !prev || S.cash > prev.score
+    if (S.cash > 0) city.progress?.score('taxi', Math.round(S.cash))
     if (isBest && S.cash > 0) { try { localStorage.setItem('taxi.best', JSON.stringify({ score: S.cash, rank: r[1], cab: cabDef.name, driver: drv.name, fares: S.fares })) } catch {} }
     const row = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`
     ctx.sheet.innerHTML = `<h3>${NAME} · end of shift</h3><div class="tx-res"><div class="rank">${r[2]}</div><div class="title">${esc(r[1])}</div></div>
@@ -756,7 +759,7 @@ export function taxiGame(ctx, choice) {
     get fov() { return boostAmt * 14 + clamp((Math.abs(car.speed) - 15) / 25, 0, 1) * 6 },
     goal: () => (fare ? { x: fare.gx, y: fare.gy } : null),
     // a knock (impact m/s), a car hit, a person bumped, a landing (s in the air, how high, off a deck)
-    bump(k) { if (k > 6 && state === 'play') { if (comboN > 1) shout('Combo broken'); comboN = 0; if (fare && fare.tips) fare.tips = Math.max(0, fare.tips - 0.5) } },
+    bump(k) { if (fare && k > 2.5) fare.hits++; if (k > 6 && state === 'play') { if (comboN > 1) shout('Combo broken'); comboN = 0; if (fare && fare.tips) fare.tips = Math.max(0, fare.tips - 0.5) } },
     hitCar(id) { nearSeen.set(id, performance.now()) },
     oops() { comboN = 0; if (fare) { fare.tips = Math.max(0, fare.tips - 2); speak('<b>“Watch the sidewalk!”</b> −$2.00 in tips') } else shout('Watch the sidewalk!') },
     landed(secs, high, deck) {

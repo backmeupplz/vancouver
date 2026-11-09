@@ -28,6 +28,8 @@ import { loadLines, loadRoute, picker, busGame, accentOf, CSS as BUS_CSS } from 
 import { makeWalker, poseWalker } from './walker.js'
 import { makeProps, LAMP, STOP, YIELD, BUS, BOLLARD, BENCH } from './props.js'
 import { makeKerbs } from './kerbs.js'
+import { makeFeel } from './feel.js'
+import { deliveryGame } from './deliver.js'
 import { clamp, smooth, wrap, esc, vancouver, circleBox } from '../../core/util.js'
 import { cellsNear, nearestStreet, abbr } from '../../core/streets.js'
 import { typing, buzz, MOVE_KEYS, mapPicker, mapCameraPose, poseOf, dive, streetSky, touchButtons, audioContext, tone as toneInto } from '../../core/play.js'
@@ -54,21 +56,6 @@ const pick = (a) => a[Math.floor(Math.random() * a.length)]
 const ckey = (cx, cy) => cx * 8192 + cy
 const NONE = [] // an empty cell (instead of a new [] per lookup)
 
-const FIRST = ['Mei', 'Arjun', 'Sofia', 'Daniel', 'Priya', 'Kenji', 'Amara', 'Liam', 'Noor', 'Jasmine', 'Tomás', 'Hana', 'Owen', 'Leilani', 'Ravi', 'Grace', 'Mateo', 'Yuki', 'Farah', 'Theo', 'Ines', 'Sam', 'Marguerite', 'Kai', 'Harpreet', 'Wei', 'Olivia', 'Jun', 'Aiyana', 'Connor', 'Fatima', 'Diego', 'Elodie', 'Min-jun', 'Rosa', 'Ezra']
-const LAST = ['Chen', 'Sandhu', 'Nguyen', 'MacLeod', 'Wong', 'Gill', 'Tremblay', 'Kim', 'Singh', 'Lee', 'Fraser', 'Santos', 'Park', 'Dhillon', 'Campbell', 'Ito', 'Hassan', 'Martin', 'Leung', 'Grewal', 'Okafor', 'Novak', 'Reyes', 'Thompson', 'Lam', 'Jackson']
-const PARCELS = ['a small parcel', 'a carefully taped box', 'a padded envelope', 'a parcel marked “fragile”', 'a flat-pack bookshelf', 'a box of vinyl records', 'a ceramic teapot (fragile!)',
-  'a potted monstera, this side up', 'a crate of BC apples', 'a new bike wheel', 'a pair of hiking boots', 'a box of books', 'a guitar in a soft case', 'a birthday cake (keep it level)',
-  'a rain jacket', 'a stack of board games', 'a sack of coffee beans', 'a tent for the weekend', 'a pair of skis', 'a cat tree']
-const THANKS = ['Thanks so much!', 'Oh, lovely. Thank you!', 'Right on time, you’re a star.', 'Perfect, have a cozy day!', 'Ah, I was hoping it’d come today!', 'Thank you, drive safe!', 'Wonderful, cheers!']
-const ITEMS = {
-  bakery: ['a box of warm cinnamon buns', 'a sourdough loaf', 'a dozen bagels'], cafe: ['two oat-milk lattes', 'a bag of fresh beans', 'a tray of matcha lattes'],
-  books: ['a stack of paperbacks', 'a signed novel'], florist: ['a bouquet of tulips', 'a little potted fern'], 'garden centre': ['a potted lemon tree', 'a sack of seed potatoes'],
-  pharmacy: ['a small paper bag'], bicycle: ['a new bike bell', 'a set of panniers'], restaurant: ['a warm dinner for two', 'a box of dumplings'], 'fast food': ['a bag of fries, still hot'],
-  'ice cream': ['a pint of salted caramel'], supermarket: ['a crate of groceries'], convenience: ['a carton of milk and some snacks'], greengrocer: ['a box of BC apples'],
-  pet: ['a bag of cat food', 'a squeaky toy'], toys: ['a wooden train set'], music: ['a vinyl record'], hardware: ['a toolbox', 'a tin of paint'], doityourself: ['a tin of paint'],
-  library: ['a pile of returned books'], tea: ['a tin of loose-leaf tea'], gift: ['a wrapped present'], clothes: ['a knitted sweater'], outdoor: ['a new rain jacket'],
-  chocolate: ['a box of truffles'], deli: ['a picnic basket'], pub: ['a growler of local ale'], seafood: ['a cooler of fresh salmon'], 'post office': ['a sack of letters'],
-}
 export default function drive(city) {
   const { THREE } = city
   const v3 = new THREE.Vector3(), v4 = new THREE.Vector3()
@@ -516,6 +503,14 @@ export default function drive(city) {
       .dlv-sheet { left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(360px, calc(100vw - 32px)); box-sizing: border-box; padding: 18px 20px 16px; pointer-events: auto; text-align: center; z-index: 30; }
       .dlv-sheet h3 { margin: 0 0 2px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #ffc9b5; font-weight: 700; }
       .dlv-sheet .big { font-size: 30px; font-weight: 750; color: #ffe1a8; font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
+      .dlv-sheet .rank { width: 62px; height: 62px; margin: 8px auto 0; border-radius: 50%; display: grid; place-items: center; font-size: 34px; font-weight: 800; color: #2a1f1c; background: #ffd38a; box-shadow: 0 0 0 4px rgba(255,211,138,.25); }
+      .dlv-sheet .rank.rS { background: #ff8fd0 } .dlv-sheet .rank.rA { background: #ffd38a } .dlv-sheet .rank.rB { background: #9fe0c8 } .dlv-sheet .rank.rC { background: #b9c7d6 } .dlv-sheet .rank.rD { background: #a89a90 }
+      .dlv-co .late, .dlv-read .gain { color: #ffd38a }
+      .dlv-how { left: 50%; top: 34%; transform: translate(-50%, -50%); width: min(340px, calc(100vw - 32px)); box-sizing: border-box; padding: 14px 18px; z-index: 29; pointer-events: auto; cursor: pointer; transition: opacity .4s; }
+      .dlv-how.fade { opacity: 0 }
+      .dlv-how h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #ffc9b5; }
+      .dlv-how ol { margin: 0; padding-left: 20px; font-size: 14px; line-height: 1.45 } .dlv-how li { margin: 3px 0 }
+      .dlv-how .k { margin-top: 8px; font-size: 11.5px; color: #d9cbbb }
       .dlv-sheet .stars { font-size: 20px; letter-spacing: 3px; color: #ffd38a; }
       .dlv-sheet dl { display: grid; grid-template-columns: 1fr auto; gap: 4px 14px; text-align: left; margin: 12px 0 10px; font-variant-numeric: tabular-nums; }
       .dlv-sheet dt { color: #d9cbbb } .dlv-sheet dd { margin: 0; font-weight: 650; text-align: right }
@@ -600,9 +595,11 @@ export default function drive(city) {
     const aboard = document.createElement('div'); aboard.className = 'aboard'; job.lastElementChild.append(aboard)
     const stam = document.createElement('div'); stam.className = 'dlv-stam'; stam.innerHTML = '<i></i>'; job.lastElementChild.append(stam)
     const touch = el('dlv dlv-touch', '<button class="l" data-k="left" aria-label="Turn left">◀</button><button class="r" data-k="right" aria-label="Turn right">▶</button><button class="brk" data-k="brake" aria-label="Brake and reverse">Brake</button><button class="gas" data-k="gas" aria-label="Go">Go</button><button class="hrn" data-k="horn" aria-label="Horn">Horn</button><button class="hb" data-k="hand" aria-label="Handbrake">Hand<br>brake</button><button class="nos" data-k="nos" aria-label="Nitro">Nitro</button><button class="act" data-act hidden></button>')
+    const how = el('dlv dlv-how card', '')
     const q = (e, s) => e.querySelector(s)
     return { el, co, btns, read, job, help, act, pop, pickEl, touch, sheet, flash, photo, aboard, stam, stamBar: stam.firstChild,
-      all: [co, btns, read, job, help, act, pop, pickEl, touch, sheet, flash, photo], n: q(co, '[data-n]'), m: q(co, '[data-m]'), c: q(co, '[data-c]'),
+      how,
+      all: [co, btns, read, job, help, act, pop, pickEl, touch, sheet, flash, photo, how], n: q(co, '[data-n]'), m: q(co, '[data-m]'), c: q(co, '[data-c]'),
       assist: q(btns, '[data-assist]'), mute: q(btns, '[data-mute]'), exit: q(btns, '[data-exit]'), arrow: q(job, 'svg'), north: q(job, '.n'), w: q(job, '[data-w]'), p: q(job, '[data-p]'), s: q(job, '[data-s]'),
       d: q(job, '[data-d]'), t: q(job, '[data-t]'), b: q(pop, '[data-b]'), qq: q(pop, '[data-q]'), pt: q(pickEl, '[data-pt]'), cancel: q(pickEl, '[data-cancel]'), brk: q(touch, '.brk'), hrn: q(touch, '.hrn'), hb: q(touch, '.hb'), tact: q(touch, '[data-act]'), css }
   }
@@ -631,6 +628,22 @@ export default function drive(city) {
     requestAnimationFrame(() => ui.pop.classList.add('on'))
     clearTimeout(popT); popT = setTimeout(() => { ui.pop.classList.remove('on'); setTimeout(() => { if (!ui.pop.classList.contains('on')) ui.pop.hidden = true }, 350) }, 2600)
   }
+  // how to play, for ten seconds (or until a tap or the first key): three lines for the mode, the controls for this device
+  const HOW = {
+    car: ['Free roam', ['Drive anywhere: the whole Lower Mainland is open.', 'Yank the handbrake into a corner: long drifts pay.', 'Honk at people, hop kerbs, find the hidden maple leaves.']],
+    deliver: ['Deliveries · a 4-minute shift', ['Stop at any beam on the order board: red is a rush order (×2), blue is fragile (×1.5).', 'Then stop at each door. On time and unrattled builds your streak, up to ×3.', 'The clock starts at your first pickup. Go for an S.']],
+    bus: ['Bus · keep them happy', ['Follow the blue line and stop in the amber bay at each stop.', 'Open the doors, let everyone on and off, close them, go.', 'Smooth braking and being on time raise happiness: that is your grade.']],
+    taxi: ['Rush Fare · beat the clock', ['Stop in a ring to pick someone up, then follow the arrow.', 'Fares add time. Fast drop-offs add more.', 'Drift, jump and graze traffic with a fare aboard for tips and nitro.']],
+  }
+  function showHowTo() {
+    const [title, lines] = HOW[taxi ? 'taxi' : game ? 'bus' : deliver ? 'deliver' : 'car']
+    const keysLine = touchy ? `Left: steer · right: gas and brake${game ? ' · Doors button at stops' : ` · ${taxi ? 'Drift and Nitro' : 'Handbrake'} beside them`}`
+      : `W gas · S brake · A D steer · ${game ? 'E doors' : taxi ? 'Space drift · Shift nitro' : 'Space handbrake'} · a gamepad works too`
+    ui.how.innerHTML = `<h3>${title}</h3><ol>${lines.map((l) => `<li>${l}</li>`).join('')}</ol><div class="k">${keysLine}</div>`
+    ui.how.hidden = false; ui.how.classList.remove('fade')
+    clearTimeout(howT); howT = setTimeout(hideHowTo, 10000)
+  }
+  function hideHowTo() { if (ui.how.hidden || ui.how.classList.contains('fade')) return; clearTimeout(howT); if (!onFoot) assistHint(); ui.how.classList.add('fade'); setTimeout(() => { ui.how.hidden = true }, 400) }
   function showHelp() { // the keys, for a few seconds after each change between van and feet (always while delivering)
     ui.help.textContent = taxi ? taxi.help() : game ? 'W gas · S brake (a tap is gentle, hold for more) · A D steer · E doors · H horn · R back on the route · Esc end the shift'
       : hike ? 'WASD or arrows to walk · Shift to push on (it tires you) · the trail guides you when you let go · Esc to the map'
@@ -670,12 +683,14 @@ export default function drive(city) {
   const man = { x: 0, y: 0, h: 0, deck: false, yaw: 0, speed: 0, phase: 0, run: false, bumpT: 0, board: null, stamina: 1, winded: false }
   const chase = { pos: new THREE.Vector3(), look: new THREE.Vector3(), yaw: 0 }
   let state = 'off', anim = null, offFrame = null, t0 = 0, mapPose = null, fromPose = null, saved = null
-  let deliver = false, onFoot = false, hasVan = true, assist = true, run = null, shift = newShift(), hudAt = 0, jobRetry = 0, readAt = 0, street = null, shake = 0, skyAt = 0, fogFar = 850
+  let deliver = false, onFoot = false, hasVan = true, assist = true, job = null, hudAt = 0, readAt = 0, street = null, shake = 0, skyAt = 0, fogFar = 850
   let pickKind = null, hike = null, errand = null, grip = 1, propsAt = null, kerbsAt = null, vista = 0 // vista: 0 .. 1 the photo's long view
   const scratch = { people: [], poles: [], props: new Float32Array(700 * 5), seen: new Map() }
   try { assist = localStorage.getItem('delivery.assist') !== '0' } catch {}
   assistLabel()
   const keys = new Set()
+  let feel = null // feel.js: tyre marks, sparks, speed lines, squeal (while something is driven)
+  let howT = 0, drift = { m: 0, t: 0, show: 0, text: '' } // a free-roam drift under way: metres so far
   let autopilot = null, probe = null // ?drivedebug (tools/drive_check.mjs): the input instead of the keys; told of every hit
 
   const button = city.ui.addButton({ label: 'Drive', icon: '🚐', title: 'Explore the streets by van or on foot, or deliver parcels (D)', panel: true, dock: true })
@@ -805,18 +820,20 @@ export default function drive(city) {
     mapPose = mapCameraPose(city)
     chase.yaw = body().yaw
     chasePose(0, true)
-    shift = newShift(); run = null; jobRetry = 0; street = null; propsAt = kerbsAt = null
+    street = null; propsAt = kerbsAt = null
     saved = { bg: city.scene.background, fog: city.scene.fog }
     if (hasVan) city.scene.add(vehicle)
     city.scene.add(walker, icons.pickup, icons.drop, icons.summit, icons.stop, props.group, lips.mesh)
     walker.visible = onFoot
     icons.pickup.visible = icons.drop.visible = icons.summit.visible = false
     city.overlay.add(blob, blob2, wblob, beam, ring, ring2, pool)
+    feel = hasVan ? makeFeel(THREE, city, { audio, out: () => master }) : null
     beam.visible = ring.visible = ring2.visible = false
     wblob.visible = onFoot; blob.visible = hasVan; blob2.visible = nsec === 2
     blob.scale.set(car.V.width / 1.8, 1, (car.V.hl * 2 + 0.6) / 4.3); blob2.scale.set(car.V.width / 1.8, 1, ((car.V.rear?.[1] || 0) * 2 + 0.6) / 4.3)
     if (hike) setGoal(hike.gx, hike.gy, 0x7fe0b0, icons.summit)
     if (kind === 'taxi') taxi = taxiGame(taxiCtx(), taxiChoice)
+    if (deliver) job = deliveryGame(deliverCtx())
     place()
     fitCamera()
     cellsNear(body().x, body().y, 800)
@@ -857,7 +874,7 @@ export default function drive(city) {
   function busCtx() {
     return { THREE, city, car, bus: vehicle, secs, roadAlong, nearestStreet, touchy, popup, sfx, buzz, setGoal, hideMarkers, icon: icons.stop, el: ui.el,
       loaded: (x, y) => infos.has(ckey(Math.floor(x / 1024), Math.floor(y / 1024))),
-      toast: (t, ms) => city.ui.toast(t, ms), audio, out: () => master, tone: (...a) => tone(...a), bell: (...a) => bell(...a),
+      toast: (t, ms) => city.ui.toast(t, ms), muted: () => muted, audio, out: () => master, tone: (...a) => tone(...a), bell: (...a) => bell(...a),
       doors: (k) => setDoors(vehicle, k),
       place: (x, y, yaw, h) => { Object.assign(car, { x, y, yaw, h }); resetTrailer() },
       summary: () => summary(),
@@ -874,11 +891,11 @@ export default function drive(city) {
     if (state === 'pick') return cancelPick()
     if (state !== 'play') return
     if (taxi && !force) return taxi.endShift() // the results first
-    if (deliver && !force && (shift.n || shift.km > 0.3)) return summary() // the end-of-shift card first
+    if (job && !force && job.S.started) return job.results() // the end-of-shift card first
     if (game && !force && (game.S.carried || game.S.km > 0.3)) return summary()
     game?.dispose()
     taxi?.dispose(); taxi = null
-    ui.sheet.hidden = true; ui.photo.classList.remove('on')
+    ui.sheet.hidden = true; ui.photo.classList.remove('on'); ui.how.hidden = true
     fromPose = poseOf(chase.pos, chase.look, pcam.fov)
     state = 'out'; t0 = performance.now()
     for (const e of ui.all) e.hidden = true
@@ -886,7 +903,6 @@ export default function drive(city) {
     keys.clear()
     if (engine) engine.g.gain.setTargetAtTime(0, ac.currentTime, 0.2)
     traffic()?.setObstacle('player-van', null); traffic()?.setObstacle('player-walker', null)
-    if (deliver) saveTotals()
   }
   function finish() { // back on the map camera, exactly where it was
     state = 'off'
@@ -895,6 +911,7 @@ export default function drive(city) {
     anim?.(); anim = null
     city.scene.remove(vehicle, walker, icons.pickup, icons.drop, icons.summit, icons.stop, props.group, lips.mesh)
     city.overlay.remove(blob, blob2, wblob, beam, ring, ring2, pool)
+    feel?.dispose(); feel = null
     if (vehicle !== van) { // the bus goes back to the depot
       vehicle.traverse((m) => { if (m.isMesh) { m.geometry.dispose(); for (const mt of [].concat(m.material)) { mt.map?.dispose(); mt.dispose() } } })
       vehicle = van
@@ -902,51 +919,22 @@ export default function drive(city) {
     game = null; busSpawn = null
     city.scene.background = saved.bg; city.scene.fog = saved.fog
     if (toGarage) { toGarage = false; setTimeout(showGarage, 0) }
-    hike = null; errand = null; run = null; vista = 0
+    hike = null; errand = null; job?.dispose(); job = null; vista = 0
     publishPlayer(true)
     document.body.classList.remove('dlv-on', 'dlv-touchy', 'dlv-shot'); document.documentElement.classList.remove('dlv-assist')
     button.button.setAttribute('aria-pressed', 'false')
     city.requestRender()
   }
-  function newShift() { return { n: 0, money: 0, tips: 0, km: 0, bumps: 0, people: 0, kerbs: 0, shops: new Set(), best: null, t0: performance.now(), saved: false } }
-  function saveTotals() {
-    if (shift.saved) return
-    shift.saved = true
-    try {
-      const t = JSON.parse(localStorage.getItem('delivery.totals') || '{"n":0,"money":0}')
-      t.n += shift.n; t.money += shift.money
-      localStorage.setItem('delivery.totals', JSON.stringify(t))
-    } catch {}
+  // what a delivery shift (deliver.js) gets to work with
+  function deliverCtx() {
+    return { THREE, city, body, stopFor, address, placesNear, setGoal, hideMarkers, icons, popup, sfx, buzz, ui, abbr, dist, mmss, busy: () => !!errand || !!man.board,
+      exit: (f) => exit(f), again: () => { job.dispose(); job = deliveryGame(deliverCtx()); hideMarkers(); showHowTo() } }
   }
-  // the end of a shift: what was done, a few stars and a kind word; keep driving, or head home
-  function summary() {
-    if (game) return busSummary()
-    const S = shift, mins = (performance.now() - S.t0) / 60000
-    let all = null
-    try { all = JSON.parse(localStorage.getItem('delivery.totals') || 'null') } catch {}
-    const care = Math.max(0, 1 - (S.bumps + 2 * S.people + 0.3 * S.kerbs) / Math.max(2, S.n * 2.5))
-    const pace = S.n ? Math.min(1, S.n / Math.max(1, mins / 3.5)) : 0
-    const stars = S.n ? Math.max(1, Math.min(5, Math.round(1 + 2.4 * care + 1.6 * pace))) : 0
-    const line = !S.n ? 'No parcels this time. The kettle’s on at the depot whenever you’re ready.'
-      : S.people ? 'Everyone’s fine, but do keep an eye out for folks on foot.'
-      : !S.bumps && !S.kerbs ? 'Not a single bump. The neighbourhood thanks you.'
-      : stars >= 4 ? 'Lovely work: smooth driving, happy doorsteps.' : 'A good day’s work. Put your feet up.'
-    const row = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`
-    ui.sheet.innerHTML = `<h3>Salmonberry Parcel Co. · shift summary</h3>
-      <div class="big">$${S.money.toFixed(2)}</div><div class="stars">${'★'.repeat(stars)}${'☆'.repeat(5 - stars)}</div>
-      <dl>${row('Parcels delivered', S.n)}${row('Tips', `$${S.tips.toFixed(2)}`)}${row('Shops visited', S.shops.size)}${row('Driven', `${S.km.toFixed(1)} km in ${Math.max(1, Math.round(mins))} min`)}
-      ${row('Bumps', S.bumps + S.kerbs ? `${S.bumps} knock${S.bumps === 1 ? '' : 's'}, ${S.kerbs} kerb${S.kerbs === 1 ? '' : 's'}` : 'none')}${row('People startled', S.people || 'nobody')}
-      ${S.best ? row('Best tip', `$${S.best.tip.toFixed(2)} from ${esc(S.best.who.split(' ')[0])}`) : ''}${all ? row('All time', `${all.n + S.n} parcels, $${(all.money + S.money).toFixed(2)}`) : ''}</dl>
-      <div class="line">${line}</div><div class="row"><button data-k>Keep driving</button><button class="main" data-end>End shift</button></div>`
-    ui.sheet.hidden = false
-    keys.clear()
-    ui.sheet.querySelector('[data-k]').onclick = () => { ui.sheet.hidden = true }
-    ui.sheet.querySelector('[data-end]').onclick = () => exit(true)
-  }
+  function summary() { return busSummary() }
   function busSummary() {
     const g = game.summary()
     game.S.summary = true
-    ui.sheet.innerHTML = `<h3>${g.title} · shift summary</h3><div class="big">${g.big}</div><div class="stars">${'★'.repeat(g.stars)}${'☆'.repeat(5 - g.stars)}</div>
+    ui.sheet.innerHTML = `<h3>${g.title} · shift summary</h3><div class="rank r${g.rank}">${g.rank}</div><div class="big">${g.big}</div><div class="stars">${'★'.repeat(g.stars)}${'☆'.repeat(5 - g.stars)}</div>
       <dl>${g.rows}</dl><div class="line">${g.line}</div><div class="row"><button data-k>Keep driving</button><button class="main" data-end>End shift</button></div>`
     ui.sheet.hidden = false
     keys.clear()
@@ -960,7 +948,7 @@ export default function drive(city) {
     pcam.aspect = innerWidth / innerHeight
     pcam.updateProjectionMatrix()
   }
-  const chaseFov = () => (innerWidth < innerHeight ? 72 : onFoot ? 62 : 58) + (taxi && !onFoot ? taxi.fov : 0) // a cab's FOV kicks out with speed and nitro
+  const chaseFov = () => (innerWidth < innerHeight ? 72 : onFoot ? 62 : 58) + (taxi && !onFoot ? taxi.fov : !onFoot && feel ? feel.fov : 0) // a van's view widens with speed; a cab's FOV kicks out with speed and nitro
   function chasePose(dt, snap) {
     const k = snap ? 1 : 1 - Math.exp(-(onFoot ? 4 : 3.2) * dt), P = body()
     if (onFoot || Math.abs(car.speed) > 0.5 || snap) chase.yaw += wrap(P.yaw - chase.yaw) * k
@@ -1149,8 +1137,7 @@ export default function drive(city) {
   function startled(sp) {
     if (taxi) return taxi.oops()
     if (deliver) {
-      shift.people++
-      if (run) for (const p of run.parcels) if (p.aboard && !p.done) p.bumps += 3
+      job?.person()
       popup('Oh! Sorry!', sp > 2.5 ? 'They’re okay, just shaken. That’ll cost you in tips: mind the pedestrians.' : 'A nudge, no harm done. Gently does it.')
     } else popup('Oops, sorry!', sp > 2.5 ? 'They’re fine, dusting themselves off.' : 'Just a nudge.')
   }
@@ -1161,10 +1148,11 @@ export default function drive(city) {
     sfx.bump(clamp(impact / 9, 0.25, 1))
     buzz(Math.round(clamp(impact * 7, 15, 70)))
     shake = Math.min(0.55, 0.08 + impact * 0.05)
+    if (!onFoot && impact > 2) feel?.impact(car, impact)
     if (!onFoot) jolt(car, clamp(impact / 8, 0.1, 0.8), 0, 0)
     if (game && impact > 2) game.bump(impact)
     if (taxi) taxi.bump(impact)
-    if (run && !onFoot && impact > 2) { shift.bumps++; for (const p of run.parcels) if (p.aboard && !p.done) p.bumps += impact > 6 ? 2 : 1 }
+    if (!onFoot && impact > 2) job?.bump(impact)
     fn?.()
   }
   function publishPlayer(emit) { // city.player (player-contract): where the user is, read by others every frame
@@ -1228,7 +1216,13 @@ export default function drive(city) {
     const L = keys.has('ArrowLeft') || keys.has('KeyA') || touchState.left, R = keys.has('ArrowRight') || keys.has('KeyD') || touchState.right
     const up = keys.has('ArrowUp') || keys.has('KeyW') || touchState.gas, dn = keys.has('ArrowDown') || keys.has('KeyS') || (!onFoot && touchState.brake)
     const shiftKey = keys.has('ShiftLeft') || keys.has('ShiftRight')
-    return { steer: (L ? 1 : 0) - (R ? 1 : 0), up: up || (onFoot && touchState.brake), down: dn, hand: keys.has('Space') || touchState.hand, run: shiftKey || (onFoot && touchState.brake), boost: shiftKey || touchState.nos }
+    // a gamepad (standard mapping): left stick or d-pad, RT / A gas, LT / B brake, X handbrake, RB / Y nitro or run
+    const pads = navigator.getGamepads?.() || NONE
+    let gp = null
+    for (const p of pads) if (p?.connected && p.mapping === 'standard') { gp = p; break }
+    const B = (i) => !!gp?.buttons[i]?.pressed, ax = gp ? (Math.abs(gp.axes[0]) > 0.15 ? gp.axes[0] : 0) + (B(15) ? 1 : 0) - (B(14) ? 1 : 0) : 0
+    const fwd = B(7) || B(0) || B(12) || (onFoot && !!gp && gp.axes[1] < -0.3), back = B(6) || B(1) || B(13) || (onFoot && !!gp && gp.axes[1] > 0.3)
+    return { steer: clamp((L ? 1 : 0) - (R ? 1 : 0) - ax, -1, 1), up: up || fwd || (onFoot && touchState.brake), down: dn || back, hand: keys.has('Space') || touchState.hand || B(2), run: shiftKey || B(5) || B(3) || (onFoot && touchState.brake), boost: shiftKey || touchState.nos || B(5) || B(3) }
   }
   // tyres grip less in the rain and much less in snow (the weather plugin's city.surface), a little less off the tarmac
   const gripNow = () => clamp(1 - 0.3 * (city.surface?.wet || 0) - 0.8 * (city.surface?.snow || 0), 0.3, 1) * (car.kerb ? 1 : 0.9)
@@ -1283,7 +1277,6 @@ export default function drive(city) {
       if (Math.abs(car.speed) > 3) sfx.splash()
       car.speed *= 0.6; car.lat *= 0.6
     }
-    if (run) shift.km += Math.hypot(nx - car.x, ny - car.y) / 1000
     car.x = nx; car.y = ny
     tow(); boxes()
     for (let i = 0; i < nsec && !car.deck; i++) { // buildings: circles along the van (and each section of a bus); not the ones under a bridge it is on,
@@ -1355,9 +1348,9 @@ export default function drive(city) {
     const side = (r.px - car.x) * Math.cos(car.yaw) + (r.py - car.y) * Math.sin(car.yaw) > 0 ? -1 : 1 // the wheels away from the street go first
     const k = clamp(sp / 9, 0.25, 1) * (was ? 1 : 0.6)
     jolt(car, k, Math.sign(car.speed), side)
-    sfx.kerb(k); buzz(Math.round(10 + 25 * k))
+    sfx.kerb(k); buzz(Math.round(10 + 25 * k)); shake = Math.max(shake, 0.07 * k)
     car.speed *= sp > 8 ? 0.93 : 0.97
-    if (run && sp > 4) { shift.kerbs++; for (const p of run.parcels) if (p.aboard && !p.done) p.bumps += 0.5 }
+    if (sp > 4) job?.kerb()
     if (game && sp > 4) game.bump(1)
   }
   function engineNote() {
@@ -1375,7 +1368,7 @@ export default function drive(city) {
     const f = (car.rpm / 60) * car.V.pulses, idle = car.V.idle
     engine.o1.frequency.setTargetAtTime(f, t, 0.05); engine.o2.frequency.setTargetAtTime(f * 2.01, t, 0.05)
     engine.lp.frequency.setTargetAtTime(170 + car.rpm * 0.06 + car.thr * 260, t, 0.08)
-    engine.g.gain.setTargetAtTime(0.014 + car.thr * 0.02 + (car.rpm - idle) / 5000 * 0.012, t, 0.1)
+    engine.g.gain.setTargetAtTime(0.022 + car.thr * 0.034 + (car.rpm - idle) / 5000 * 0.02, t, 0.1)
   }
 
   // ---------------------------------------------------------------- walking
@@ -1622,44 +1615,6 @@ export default function drive(city) {
     }
     return null
   }
-  const someone = () => `${pick(FIRST)} ${pick(LAST)}`
-  // A run: a real shop near you with one to three parcels ready, each for a door 200-900 m from the shop. Drive to
-  // the shop (stop at the kerb: the courier fetches them), then to the doors in any order (the compass points to the
-  // nearest); when the van is empty the next run starts near the last door.
-  const FRAGILE = /fragile|cake|teapot|level|vinyl|record|lemon|monstera|latte/
-  function newRun() {
-    const P = body()
-    for (const [r0, r1] of [[120, 700], [80, 1500]]) {
-      const shops = placesNear(P.x, P.y, r0, r1)
-      for (let k = 0; k < 14 && shops.length; k++) {
-        const p = shops.splice(Math.floor(Math.random() * shops.length), 1)[0], s = stopFor(p.x, p.y)
-        if (!s) continue
-        const want = 1 + (Math.random() < 0.5 ? 1 : 0) + (Math.random() < 0.25 ? 1 : 0), parcels = []
-        for (let i = 0; i < want * 3 && parcels.length < want; i++) {
-          const to = address(p.x, p.y, 200, 900)
-          if (!to || parcels.some((q) => Math.hypot(q.to.x - to.x, q.to.y - to.y) < 40)) continue
-          to.who = someone()
-          const item = ITEMS[p.kind] && Math.random() < 0.75 ? pick(ITEMS[p.kind]) : pick(PARCELS)
-          parcels.push({ to, item, who: to.who, aboard: false, done: false, bumps: 0, fragile: FRAGILE.test(item), dist: Math.hypot(to.x - s.x, to.y - s.y), t0: 0, limit: 0 })
-        }
-        if (!parcels.length) continue
-        run = { shop: { ...s, label: p.name, sub: p.addr ? abbr(p.addr) : p.kind, kind: p.kind, sx: p.x, sy: p.y }, parcels, stage: 'pickup', cur: null }
-        aim()
-        return true
-      }
-    }
-    return false
-  }
-  // where to now: the shop, else the nearest door with a parcel for it
-  function aim() {
-    const P = body()
-    if (run.stage === 'pickup') { run.cur = null; setGoal(run.shop.x, run.shop.y, 0xffb05c, icons.pickup); return }
-    let best = null
-    for (const p of run.parcels) if (!p.done && (!best || Math.hypot(p.to.x - P.x, p.to.y - P.y) < Math.hypot(best.to.x - P.x, best.to.y - P.y))) best = p
-    run.cur = best
-    if (best) setGoal(best.to.x, best.to.y, 0x5fd6c4, icons.drop)
-  }
-  function target() { return run && (run.stage === 'pickup' ? run.shop : run.cur?.to) }
   const goal = { x: 0, y: 0, gy: 0, icon: null }
   function setGoal(x, y, col, icon) {
     beamMat.uniforms.col.value.set(col); ringMat.color.set(col); ring2Mat.color.set(col)
@@ -1675,44 +1630,21 @@ export default function drive(city) {
     for (const o of [beam, ring, ring2]) o.position.set(goal.x, h + 0.08, -goal.y)
   }
   function hideMarkers() { beam.visible = ring.visible = ring2.visible = false; for (const ic of Object.values(icons)) ic.visible = false }
-  // at the shop: fetch the parcels from its door to the back of the van
-  function pickedUp() {
-    const now = performance.now(), n = run.parcels.length
-    run.parcels.sort((a, b) => a.dist - b.dist)
-    run.parcels.forEach((p, i) => { p.aboard = true; p.t0 = now; p.limit = (p.dist * 1.35 + 260 * i) / 7 + 70 })
-    run.stage = 'drop'
-    shift.shops.add(run.shop.label)
-    sfx.pickup(); buzz(30)
-    popup('Picked up!', n === 1 ? `${cap(run.parcels[0].item)} for ${run.parcels[0].who}` : `${n} parcels from ${run.shop.label}: ${run.parcels.map((p) => p.who.split(' ')[0]).join(', ')}`)
-    aim()
-  }
-  // at a door: paid, a base for the distance, a tip for being quick and for being gentle with it
-  function delivered(p) {
-    const used = (performance.now() - p.t0) / 1000, left = Math.max(0, p.limit - used)
-    const care = Math.max(0.15, 1 - 0.16 * p.bumps * (p.fragile ? 1.6 : 1))
-    const tip = Math.round(Math.max(0.5, (left > 0 ? 2.5 + 6 * (left / p.limit) : 1.2) * care) * 100) / 100
-    const pay = Math.round((6 + (p.dist / 1000) * 5 + tip) * 100) / 100
-    p.done = true
-    shift.n++; shift.money += pay; shift.tips += tip
-    if (!shift.best || tip > shift.best.tip) shift.best = { tip, who: p.who }
-    sfx.deliver(); buzz([30, 70, 30, 70, 60])
-    popup(`+$${pay.toFixed(2)}`, `${p.who.split(' ')[0]}: ${care < 0.6 ? 'It’s a bit rattled, but thanks!' : pick(THANKS)} (tip $${tip.toFixed(2)})`)
-    if (run.parcels.every((q) => q.done)) { run = null; hideMarkers(); jobRetry = performance.now() + 2500 } else aim()
-  }
   const cap = (s) => s[0].toUpperCase() + s.slice(1)
   // the van has stopped at the target (or the courier walked up to it)
   function arrive() {
-    const t = target()
+    job.take() // an order off the board, if none is ours yet
+    const t = job.target(), run = job.run
     if (onFoot) { // walked there: hand it over (or pick up) right away
-      if (run.stage === 'pickup') { carried.visible = true; pickedUp() } else { carried.visible = false; delivered(run.cur) }
+      if (run.stage === 'pickup') { carried.visible = true; job.pickedUp() } else { carried.visible = false; job.delivered(run.cur) }
       return
     }
     if (run.stage === 'pickup') {
       const d = doorFor(run.shop.sx, run.shop.sy), b = backDoors()
-      if (!startErrand([{ x: d.x, y: d.y, pause: 1.1, then: () => { carried.visible = true; sfx.knock() } }, { x: b.x, y: b.y, pause: 0.5, then: () => { carried.visible = false; pickedUp() } }])) pickedUp()
+      if (!startErrand([{ x: d.x, y: d.y, pause: 1.1, then: () => { carried.visible = true; sfx.knock() } }, { x: b.x, y: b.y, pause: 0.5, then: () => { carried.visible = false; job.pickedUp() } }])) job.pickedUp()
     } else {
       const p = run.cur, d = doorFor(p.to.house?.x ?? t.x, p.to.house?.y ?? t.y), b = backDoors()
-      if (!startErrand([{ x: b.x, y: b.y, pause: 0.6, then: () => { carried.visible = true } }, { x: d.x, y: d.y, pause: 1.2, then: () => { carried.visible = false; sfx.knock(); delivered(p) } }])) delivered(p)
+      if (!startErrand([{ x: b.x, y: b.y, pause: 0.6, then: () => { carried.visible = true } }, { x: d.x, y: d.y, pause: 1.2, then: () => { carried.visible = false; sfx.knock(); job.delivered(p) } }])) job.delivered(p)
     }
   }
 
@@ -1783,7 +1715,7 @@ export default function drive(city) {
         if (deliver) ui.co.hidden = false; else if (!hike && !game && !taxi) ui.read.hidden = false
         ui.touch.hidden = false
         showHelp()
-        if (!onFoot) assistHint()
+        if (!onFoot) showHowTo() // (the lane-assist hint follows the card)
         const g = gripNow()
         if (!onFoot && g < 0.8) city.ui.toast(g < 0.6 ? 'Snow on the roads: gentle on the pedals, the van slides and takes a long way to stop.' : 'Wet roads: leave a little more room to stop.', 5000)
         hudAt = 0
@@ -1792,8 +1724,9 @@ export default function drive(city) {
     }
     if (state !== 'play' || !(dt > 0)) return
     dt = Math.min(dt, 0.05)
+    if (!ui.how.hidden && (keys.size || touchState.gas || touchState.brake)) hideHowTo()
     const I = ui.sheet.hidden && !taxi?.frozen ? autopilot?.() || input() : STILL
-    if (onFoot) { walk(dt, I); if (hasVan) drive(dt, { steer: 0, up: false, down: false, hand: true }) } else drive(dt, I)
+    if (onFoot) { walk(dt, I); if (hasVan) drive(dt, { steer: 0, up: false, down: false, hand: true }); feel?.quiet() } else { drive(dt, I); feel.update(dt, time, car, pcam, !taxi); if (!taxi && !game && !deliver) driftScore(dt, now) }
     engineNote()
     publish()
     place()
@@ -1823,9 +1756,8 @@ export default function drive(city) {
     if (game) { game.settle(busSpawn); game.frame(dt, now, time); t = game.goal() }
     if (taxi) { taxi.frame(dt, now, time); t = taxi.goal() }
     if (deliver) {
-      if (!run && now > jobRetry) { if (!newRun()) jobRetry = now + 1000 }
-      t = target()
-      if (t && !errand && !man.board && Math.hypot(t.x - P.x, t.y - P.y) < (onFoot ? ARRIVE_FOOT : ARRIVE + t.w / 2) && (onFoot || Math.abs(car.speed) < 1.2)) { arrive(); t = target() }
+      t = job.frame(dt, now)
+      if (t && !job.S.over && !errand && !man.board && Math.hypot(t.x - P.x, t.y - P.y) < (onFoot ? ARRIVE_FOOT : ARRIVE + t.w / 2) && (onFoot || Math.abs(car.speed) < 1.2)) { arrive(); t = job.target() }
     }
     if (hike) {
       t = goal
@@ -1860,6 +1792,20 @@ export default function drive(city) {
     if (now - hudAt > 100) { hudAt = now; hud(t) }
     if (now - skyAt > 1000) { skyAt = now; atmosphere(1) }
   }
+  // free roam: a drift is measured while the tyres slide and paid when they grip again (a knock on the way voids it)
+  function driftScore(dt, now) {
+    const D = drift, sp = Math.hypot(car.speed, car.lat)
+    if (feel.slide > 0.3 && sp > 5 && Math.abs(car.lat) > 1) { D.m += sp * dt; D.t = now; if (now - car.bumpT < 400) D.m = 0 }
+    else if (D.m && now - D.t > 350) {
+      if (D.m > 8) {
+        const pay = Math.round(D.m / 6)
+        D.text = `Drift ${Math.round(D.m)} m · +$${pay}`; D.show = now + 2200
+        city.progress?.award('stunt', pay, { quiet: true }); city.progress?.stat('drive.drift', Math.round(D.m))
+        sfx.pickup()
+      }
+      D.m = 0
+    }
+  }
   function hud(t) {
     if (taxi) { ui.tact.hidden = ui.act.hidden = ui.job.hidden = ui.hrn.hidden = true; ui.hb.hidden = ui.assist.hidden = false; ui.brk.textContent = 'Brake'; return } // the rest is taxi.js's
     if (game) { // E: the doors (or the trolley poles); the bus's own cards are route.js's
@@ -1873,7 +1819,7 @@ export default function drive(city) {
     // E to get in or out (or to hurry an errand along)
     const can = errand ? 'Hurry' : nearVan() ? 'Get in' : canGetOut() ? 'Get out' : ''
     ui.tact.hidden = !can; ui.tact.textContent = can
-    ui.act.hidden = touchy || !(nearVan() || errand || (run && t && !onFoot && Math.abs(car.speed) >= 1.2 && Math.hypot(t.x - car.x, t.y - car.y) < ARRIVE + 8))
+    ui.act.hidden = touchy || !(nearVan() || errand || (job && t && !onFoot && Math.abs(car.speed) >= 1.2 && Math.hypot(t.x - car.x, t.y - car.y) < ARRIVE + 8))
     ui.act.innerHTML = errand ? '<kbd>E</kbd>Hurry up' : nearVan() ? '<kbd>E</kbd>Get in the van' : 'Stop here'
     ui.brk.textContent = onFoot ? (hike ? 'Push' : 'Run') : 'Brake'
     ui.assist.hidden = ui.hrn.hidden = ui.hb.hidden = onFoot // they're the van's only
@@ -1882,7 +1828,8 @@ export default function drive(city) {
     ui.stam.hidden = !hike; ui.aboard.hidden = !deliver
     if (!deliver && !hike) {
       const sp = Math.abs(P.speed) * 3.6, gear = onFoot ? '' : ` · ${car.gear < 0 ? 'R' : `D${car.gear}`}`
-      ui.read.innerHTML = `<b>${Math.round(sp)}</b> km/h${gear}${name ? ` <span class="st">· ${esc(name)}</span>` : ''}`
+      const dr = onFoot ? '' : drift.m > 4 ? ` <span class="gain">· Drift ${Math.round(drift.m)} m</span>` : performance.now() < drift.show ? ` <span class="gain">· ${drift.text}</span>` : ''
+      ui.read.innerHTML = `<b>${Math.round(sp)}</b> km/h${gear}${dr}${name ? ` <span class="st">· ${esc(name)}</span>` : ''}`
       return
     }
     ui.job.hidden = false
@@ -1898,27 +1845,7 @@ export default function drive(city) {
       compass(H.done ? null : goal)
       return
     }
-    ui.n.textContent = String(shift.n)
-    ui.m.textContent = `$${shift.money.toFixed(2)}`
-    const h = hourNow(), hh = Math.floor(h), mm = Math.floor((h - hh) * 60)
-    ui.c.textContent = `${((hh + 11) % 12) + 1}:${String(mm).padStart(2, '0')} ${hh < 12 ? 'am' : 'pm'}`
-    if (!t) {
-      ui.arrow.style.opacity = 0.3
-      ui.w.textContent = 'Next up'; ui.s.textContent = name ? `on ${name}` : ''; ui.d.textContent = ''; ui.t.textContent = ''; ui.aboard.textContent = ''
-      ui.p.textContent = shift.n ? 'Checking the order board…' : 'Finding your first pickup…'
-      return
-    }
-    const pickup = run.stage === 'pickup', n = run.parcels.length, left = run.parcels.filter((p) => !p.done)
-    ui.w.textContent = pickup ? `Pick up ${n === 1 ? 'a parcel' : `${n} parcels`} at` : `Deliver ${run.cur.item}`
-    ui.p.textContent = t.label
-    ui.s.textContent = pickup ? t.sub || '' : `for ${run.cur.who}${run.cur.fragile ? ' · handle with care' : ''}`
-    ui.aboard.textContent = pickup ? `For ${run.parcels.map((p) => p.who.split(' ')[0]).join(', ')}` : left.length > 1 ? `Also aboard: ${left.filter((p) => p !== run.cur).map((p) => `${p.who.split(' ')[0]} (${p.to.label})`).join(', ')}` : 'Last one in the van'
-    ui.d.textContent = `${dist(Math.hypot(t.x - P.x, t.y - P.y))} away`
-    if (pickup) { ui.t.textContent = errand ? 'fetching…' : 'stop at the kerb'; ui.t.className = '' } else {
-      const rem = run.cur.limit - (performance.now() - run.cur.t0) / 1000
-      ui.t.textContent = rem > 0 ? `${mmss(rem)} for a good tip` : 'running late, no worries'
-      ui.t.className = rem > 0 ? '' : 'late'
-    }
+    job.hud(t, name)
     compass(t)
   }
   const dist = (d) => (d > 950 ? `${(d / 1000).toFixed(1)} km` : `${Math.round(d / 10) * 10} m`)
@@ -1955,7 +1882,7 @@ export default function drive(city) {
   document.addEventListener('visibilitychange', onVis)
 
   // ?drivedebug: the state, for tests in a browser (window.driveDebug)
-  if (location.search.includes('drivedebug')) window.driveDebug = { car, man, goal, get run() { return run }, get hike() { return hike }, get errand() { return errand }, get shift() { return shift }, get state() { return state }, startHike: (id) => startHike(HIKES.find((h) => h.id === id)), propsNear, nearestRoad, wallHit, railPast,
+  if (location.search.includes('drivedebug')) window.driveDebug = { car, man, goal, get run() { return job?.run }, get job() { return job }, get drift() { return drift }, get feel() { return feel }, get hike() { return hike }, get errand() { return errand }, get shift() { return job?.S }, get state() { return state }, startHike: (id) => startHike(HIKES.find((h) => h.id === id)), propsNear, nearestRoad, wallHit, railPast,
     get game() { return game }, get horn() { return !!horn }, get taxi() { return taxi }, showGarage, startTaxi: (x, y, c = { cab: 0, livery: 0, driver: 0 }) => { taxiChoice = c; start('taxi', carSpawn(x, y) || { x, y, yaw: 0 }, { x, y }) }, input, secs, collide, surface, frame,
     set autopilot(f) { autopilot = f }, set probe(f) { probe = f }, stop: () => { if (state === 'off') return; game?.dispose(); taxi?.dispose(); taxi = null; state = 'out'; finish() },
     start: (kind, x, y, yaw = 0) => start(kind, { x, y, yaw }, { x, y }), startBus: (name, dir = 0, from = 'first') => loadLines().then(({ man }) => { const ri = man.routes.findIndex((r) => r.name === name); return startBus({ ri, r: man.routes[ri], dir, from, man }) }) }

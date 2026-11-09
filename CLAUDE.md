@@ -20,7 +20,7 @@ look; PLUGINS.md is the plugin contract. Read the parts you need, not the whole 
   `trees3d.js`/`treeforms.js` trees, `kit.js` low-poly model kit, `play.js` shared third-person game code (chase cam,
   picker, touch), `util.js` helpers, `lights.js`/`look.js` night lights + camera look, `quality.js` tiers,
   `streets.js` street names
-- `public/plugins/`: `drive/` (van, walk, hike, deliveries, bus, Rush Fare taxi; `van.js` physics specs, `route.js` bus GPS,
+- `public/plugins/`: `drive/` (van, walk, hike, bus, Rush Fare `taxi.js`; `deliver.js` delivery shift, `feel.js` tyre marks / sparks / speed lines / squeal, `van.js` physics specs, `route.js` bus GPS,
   `kerbs.js`), `life/` (traffic + pedestrians: `worker.js` sim, `index.js` render, `blades.js` street signs), `sail/`,
   `progress/` (cash, XP, levels, maple leaves, dailies, leaderboards: `city.progress`), `weather/`, `transit/`, `ships/`, `planes/`, `landmarks/`, `lofi/`, `multiplayer/`
 - `tools/`: bake (`tiles.py` main, `osm_split.py`, `sea.py`, `heights.py`, `hrdem.py`, `common.py` shared helpers),

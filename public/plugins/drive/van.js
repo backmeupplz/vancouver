@@ -103,7 +103,7 @@ export function makeVan(THREE, colour = 0xf2a07e) { // colour: the body (a hex n
 // door interlock); c.nopower: no drive (a dewired trolleybus), the brakes still work.
 export const VAN = {
   gears: [3.6, 2.15, 1.54, 1.15, 0.87], rev: 3.4, rpmPer: 160, idle: 850, redline: 6200, flare: 1500, band: [1000, 4800], up: [2300, 2700], down: [1100, 1000], pulses: 2,
-  vmax: 21, vrev: 6, wb: 2.7, push: 4.3, brake: 7.8, drag: 0.00045, lock: 0.62, lockV: 7.5, under: 0.0016, thr: 4, brk: 9, // thr / brk: how fast the pedals come in
+  vmax: 21, vrev: 6, wb: 2.7, push: 4.3, brake: 7.8, drag: 0.00045, lock: 0.62, lockV: 7.5, under: 0.0016, thr: 5.5, brk: 9, // thr / brk: how fast the pedals come in
   pitch: [0.0085, -0.075, 0.05, 70, 8], roll: [0.011, 0.085, 55, 6.5],
   hl: 2.2, hw: 0.95, length: 4.3, width: 1.8, pivot: 0, wheel: 0.36, // collision box half length / width; pivot: how far the body's middle is ahead of the axle it turns about
   circles: [[1.45, 0, -1.45], 1.05], // against buildings: circles along it (metres ahead of the middle) and their radius
@@ -113,7 +113,9 @@ export const VAN = {
   // top speed (× vmax); airYaw: steering while airborne (rad/s); keep: the share of a slide the tyres turn back into
   // speed as they grip again (an arcade drift doesn't scrub it off); drift: in an arcade drift the slide dies away at
   // this rate (1/s) rather than by the tyres' grip, so the cab holds an angle; mass (kg)
-  grip: 0.95, tract: 0.55, flat: 1, turnG: 1.05, handDrag: 5, slide: 0.3, handYaw: 1.4, slipBack: Infinity, nitro: 0, nvmax: 1, airYaw: 0, keep: 0, drift: 0, mass: 1500,
+  grip: 0.95, tract: 0.55, flat: 1, turnG: 1.05, nitro: 0, nvmax: 1, airYaw: 0, keep: 0, drift: 0, mass: 1500,
+  // the van's handbrake turn: the tail comes round in about a second and most of the slide comes back as speed
+  handDrag: 2, slide: 0.3, handYaw: 2.4, slipBack: 3, hkeep: 0.6, steerRate: 9,
 }
 // A Vancouver city bus: 12 m (New Flyer-ish) or 18 m articulated, a 6-cylinder diesel or trolley motor through a
 // five-speed automatic, slow to pull away, soft on its air springs (it leans and dives), a long wheelbase and turning
@@ -124,6 +126,7 @@ export const BUS = {
   vmax: 19.5, vrev: 3.5, wb: 6.2, push: 2.5, brake: 5.6, drag: 0.0009, lock: 0.7, lockV: 10, under: 0.0011, thr: 2.2, brk: 1.8, // air brakes build up: a tap is gentle
   pitch: [0.016, -0.06, 0.035, 26, 5], roll: [0.024, 0.075, 18, 3.6],
   hl: 6.1, hw: 1.28, length: 12.2, width: 2.55, pivot: 2.7, wheel: 0.5, circles: [[4.8, 2.4, 0, -2.4, -4.8], 1.35],
+  handDrag: 5, handYaw: 1.4, slipBack: Infinity, hkeep: 0, steerRate: 6, // a bus doesn't do handbrake turns
 }
 export const ARTIC = { ...BUS, push: 2.3, wb: 5.8, hl: 5.6, length: 18.3, pivot: 2.6, circles: [[4.4, 2.2, 0, -2.2, -4.4], 1.35],
   joint: 5.85, trail: 4.4, rear: [3.7, 3.45, [2.2, 0, -2.2]] } // the joint behind the middle, the rear axle behind it; the rear box: its middle behind the joint, half length, circles
@@ -134,7 +137,7 @@ export const TAXI = {
   vmax: 34, vrev: 9, push: 11, brake: 11, drag: 0.00035, lock: 0.6, lockV: 16, under: 0.0005, thr: 7, brk: 12,
   tract: 0.9, flat: 0.45, turnG: 1.7, handDrag: 1.2, slide: 0.35, handYaw: 1.6, slipBack: 1.8, nitro: 9, nvmax: 1.4, airYaw: 1.6, keep: 0.75, drift: 2.2,
   // arcade feel: brakes that bite past the tyres (~2 g), engine braking off the gas, quick and sharp steering
-  brake: 22, brk: 30, brakeGrip: 2.2, coast: 2.2, steerRate: 13, lockV: 30, turnG: 2.6, under: 0.0002, handYaw: 1.15,
+  hkeep: 0, brake: 22, brk: 30, brakeGrip: 2.2, coast: 2.2, steerRate: 13, lockV: 30, turnG: 2.6, under: 0.0002, handYaw: 1.15,
 }
 // s: { vmax (m/s), push, grip, mass (kg), tank (s of nitro), wb, hl, hw, wheel, circles, ... }: TAXI with those
 export const taxiSpec = (s) => ({ ...TAXI, ...s, length: s.hl * 2, width: s.hw * 2 })
@@ -197,7 +200,7 @@ export function stepVan(c, dt, I, grip) {
   if (V.drift && c.slip && !c.air) pull += (Math.abs(c.lat) * (1 - Math.exp(-V.drift * dt)) - mu * G * dt) * c.slip // arcade: an angle it holds
   const lat0 = Math.abs(c.lat)
   c.lat = Math.abs(c.lat) <= pull ? 0 : c.lat - Math.sign(c.lat) * pull
-  if (V.keep && c.speed > 1) c.speed += (lat0 - Math.abs(c.lat)) * V.keep
+  if (c.speed > 1) c.speed += (lat0 - Math.abs(c.lat)) * (V.keep + (V.hkeep || 0) * c.slip) // (hkeep: only out of a handbrake slide)
   c.yawRate = yr
   // the body on its springs: squats as it pulls away, dives under braking, leans out of turns, bounces over kerbs
   const [pk, p0, p1, ps, pd] = V.pitch, [rk, rm, rs, rd] = V.roll
