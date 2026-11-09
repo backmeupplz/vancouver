@@ -304,7 +304,7 @@ def _through(tile):
         deck = bool(L['z'])
         if not deck and not (L.get('drive') and L['kind'] in ROADS or L['kind'] in ('rail', 'lightrail')) or L.get('crossing'): continue
         Q = np.array(densify(L['pts'], 4), float)
-        ls = shapely.LineString(Q); strip = ls.buffer(L['w'] / 2, cap_style='flat')
+        ls = shapely.LineString(Q); strip = ls.buffer(L['w'] / 2 + (DECK_SIDE + (2 if L.get('band') else 0) if deck else 0), cap_style='flat')
         if deck:
             s, z = _sz(L); sq = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(Q, axis=0).T))]); h = np.interp(sq, s, z) + DECK_TOP
         else: h = tile['ground'](Q[:, 0], Q[:, 1]) + 0.02
@@ -317,7 +317,8 @@ def _through(tile):
             if not inside.any(): continue
             hs = float(h[inside].max()); lo = float(h[inside].min())
             foot, top = b['base'] + (b['mn'] or 0), b['base'] + max(b['h'], b.get('ridge') or 0)
-            if top < lo + 0.3 or foot > hs + PASS - 0.05: continue  # under the street (a deck over a low roof), or the street under it with headroom
+            under = lo + 0.3 if not deck else lo - DECK_TOP - (1.6 if KIND_I[L['kind']] <= KIND_I['tertiary'] else 0.9) + 0.4  # (a deck's girders under it)
+            if top < under or foot > hs + PASS - 0.05: continue  # under the street (a deck over a low roof), or the street under it with headroom
             out.append((k, inter, hs))
     return out
 
@@ -493,11 +494,12 @@ def log_fix(tile):
 # (the life worker's lanes) and the van (drive surface()) all take; tools/deck_check.mjs measures them on baked tiles.
 # An at-grade piece going on from a deck end up in the air (OpenStreetMap's bridge tag ends before the structure does: a
 # crossover between a bridge's carriageways, a ramp the approaches() search turned down) is drawn on the ground, its
-# paint and cars there, from a node in the air; and pieces meeting at a node at different heights step there.
+# paint and cars there, from a node in the air; and pieces meeting at a node at different heights step there. The bake
+# solves every structure's heights at once (tools/tiles.py deck_solve); these rules check what it left.
 DECK_TOP = 0.38  # a deck's drawn road over its z (tiles.py DECK_TOP)
+DECK_SIDE = 0.6  # metres: a deck's structure past its strip's edge (tools/audit_elev.py 'clash')
 AIR = 1.0  # metres: a deck end this far over the ground is in the air (a step at the abutment: tools/audit_elev.py 'step')
-GRADE = {'rail': 0.03, 'lightrail': 0.06, 'steps': 0.7}  # the steepest a raised street comes down from the deck
-ROADS = ('motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living')  # 8%; 10% on foot
+ROADS = ('motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living')
 
 
 def _lift_ground(tile, P):  # z of a deck whose drawn top is on the drawn ground (terrain + 0.02) at points P
@@ -544,30 +546,6 @@ def deck_air_check(tile):
     return out
 
 
-def deck_air_fix(tile):
-    """such a piece takes the deck's height on: straight across to the deck at its far end (a crossover), else down from
-    the deck end no steeper than a ramp until it meets the ground; one that doesn't by its far end raises the next"""
-    n = 0
-    for L, e, g in _low(tile):  # a deck end under the street going on from it: up onto it, eased back over 30 m
-        s, z = _sz(L); u = s if e == 0 else s[-1] - s
-        L['z'] = [float(v) for v in np.asarray(z) + (g - L['z'][e]) * np.clip(1 - u / min(30.0, s[-1]), 0, 1)]
-        n += 1
-    for _ in range(8):
-        todo = _air(tile)
-        if not todo: break
-        for L, ha, hb in todo:
-            P = np.array(densify(L['pts'], 12), float)
-            s = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
-            g = _lift_ground(tile, P)
-            G = GRADE.get(L['kind'], 0.08 if L['kind'] in ROADS else 0.10)
-            if ha is not None and hb is not None: z = ha + (hb - ha) * s / max(s[-1], 1e-6)
-            else: z = ha - G * s if ha is not None else hb - G * (s[-1] - s)
-            L['pts'], L['z'], L['src'] = [tuple(p) for p in P], [float(v) for v in np.maximum(z, g)], 'raised'
-            if 'decks' in tile and '_decks' not in tile: tile['decks'].append((P, np.array(L['z']), L['w']))  # (holds buildings up too)
-            n += 1
-    return n
-
-
 def _joints(tile, tol=0.15):
     """-> {node: (target height, [(piece, end index)])} where the raised pieces ending there disagree by more than tol"""
     at = {}
@@ -590,23 +568,6 @@ def deck_joint_check(tile):
         (x, y), d = L['pts'][e], max(M['z'][f] for M, f in ends) - min(M['z'][f] for M, f in ends)
         out.append(dict(kind='deck-joint', x=round(x, 1), y=round(y, 1), score=round(d, 2), hash=view_hash(x, y, h), node=n))
     return out
-
-
-def deck_joint_fix(tile):
-    """every node one height: each end off it eased to it along the whole piece (no step, no kink at the end)"""
-    n = 0
-    for _ in range(4):
-        todo = _joints(tile, 0.05)
-        if not todo: break
-        shift = {}
-        for h, ends in todo.values():
-            for L, e in ends: shift.setdefault(id(L), [L, 0.0, 0.0])[1 if e == 0 else 2] = h - L['z'][e]
-        for L, d0, d1 in shift.values():
-            P = np.array(L['pts'], float)
-            s = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))]); u = s / max(s[-1], 1e-6)
-            L['z'] = [float(v) for v in np.array(L['z']) + d0 * (1 - u) + d1 * u]
-        n += len(todo)
-    return n
 
 
 # ---------------------------------------------------------------- over baked tiles: the old audits and what the page draws
@@ -783,33 +744,6 @@ def deck_steep_check(tile):
             for L, k, g in _steep(tile)]
 
 
-def deck_steep_fix(tile):
-    """a spike or a dip in a deck's profile (the LiDAR's cables, a truss, a gap) flattened to the grade it may climb, its
-    ends where they are; a piece whose ends are further apart in height than it may climb is stairs (a path) or keeps
-    its grade (a street, held at its joints)"""
-    n = 0
-    for _ in range(4):
-        todo = _steep(tile)
-        if not todo: break
-        for L, k, g in todo:
-            G = _limit(L)
-            P = np.array(densify(L['pts'], 2), float); s, z0 = _sz(L)
-            sp = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))]); z = np.interp(sp, s, z0)
-            if abs(z[-1] - z[0]) > G * sp[-1]:
-                if L['kind'] in FOOTWAYS: L['kind'] = 'steps'; n += 1; continue
-                z = z[0] + (z[-1] - z[0]) * sp / max(sp[-1], 1e-6)  # (the grade its joints give it, evenly)
-            else:
-                up, dn = z[0] + G * sp, z[-1] + G * (sp[-1] - sp)  # within reach of both ends at the grade
-                z = np.clip(z, np.maximum(z[0] - G * sp, z[-1] - G * (sp[-1] - sp)), np.minimum(up, dn))
-                for _ in range(3):
-                    for i in range(1, len(z) - 1):
-                        d0, d1 = sp[i] - sp[i - 1], sp[i + 1] - sp[i]
-                        z[i] = min(max(z[i], z[i - 1] - G * d0, z[i + 1] - G * d1), z[i - 1] + G * d0, z[i + 1] + G * d1)
-            L['pts'], L['z'] = [tuple(p) for p in P], [float(v) for v in z]
-            n += 1
-    return n
-
-
 def deck_stack_check(tile):
     return [dict(kind='deck-stack', x=round(x, 1), y=round(y, 1), score=round(abs(dz), 2), hash=view_hash(x, y, float(np.interp(s, *_sz(A)))), piece=f"{A['a']}-{A['b']}/{B['a']}-{B['b']}")
             for A, s, B, sb, dz, x, y in _stack(tile)]
@@ -819,57 +753,12 @@ def _sz(L):
     P = np.array(L['pts'], float); return np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))]), L['z']
 
 
-def _plateaus(tile):
-    """where decks meet, their strips overlap across the junction: each one level at the node's height as far as the
-    widest of the others reaches (+1 m), eased back to its own profile over 15 m"""
-    at = {}
-    for L in tile.get('lines', ()):
-        if L['z'] and not L.get('tube') and L['kind'] in DRAWN_DECK and len(L['pts']) > 1:
-            for e, nd in ((0, L['a']), (-1, L['b'])): at.setdefault(nd, []).append((L, e))
-    todo = {}
-    for nd, ends in at.items():
-        if len(ends) < 2: continue
-        h = float(np.mean([L['z'][e] for L, e in ends]))
-        for L, e in ends: todo.setdefault(id(L), (L, []))[1].append((e, h, max(M['w'] / 2 for M, f in ends if M is not L) + 1))
-    for L, es in todo.values():
-        P = np.array(densify(L['pts'], 2), float); s, z0 = _sz(L)
-        sp = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))]); z = np.interp(sp, s, z0)
-        W = [(1 - np.clip(((sp if e == 0 else sp[-1] - sp) - d) / 15, 0, 1), h) for e, h, d in es]  # (both ends at once: a short piece between two)
-        tw = sum(w for w, _ in W); own = np.clip(1 - tw, 0, None)
-        L['pts'], L['z'] = [tuple(p) for p in P], [float(v) for v in (z * own + sum(w * h for w, h in W)) / np.maximum(own + tw, 1e-9)]
-    n = len(todo)
-    return n
-
-
-def deck_stack_fix(tile):
-    """decks drawn within CLEAR of each other are one surface: both meet half way where they overlap, eased back to
-    their own profiles over 20 m either side (then the joints made one again)"""
-    n = _plateaus(tile)
-    for it in range(60):
-        todo = _stack(tile, 0.05)
-        if not todo or max(abs(t[4]) for t in todo) < 0.1: break  # (within the 0.15 m a step shows from)
-        n += len(todo)
-        corr = {}
-        for A, s, B, sb, dz, x, y in todo:
-            corr.setdefault(id(A), (A, []))[1].append((s, -dz / 2)); corr.setdefault(id(B), (B, []))[1].append((sb, dz / 2))
-        for L, cs in corr.values():
-            P = np.array(densify(L['pts'], 4), float)
-            s, z0 = _sz(L)
-            sp = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
-            z = np.interp(sp, s, z0)
-            c = np.array(cs)
-            phi = np.maximum(0, 1 - np.abs(sp[:, None] - c[None, :, 0]) / (20 if it < 20 else 6))  # (closer in once the big steps are gone)
-            z += (phi * c[None, :, 1]).sum(1) / np.maximum(1, phi.sum(1))
-            L['pts'], L['z'] = [tuple(p) for p in P], [float(v) for v in z]
-        deck_joint_fix(tile); deck_air_fix(tile)  # (the streets going on from the decks moved go on from where they are now)
-    return n
-
-
 RULES = [
-    Rule('deck-air', deck_air_check, deck_air_fix),  # (first: a raised street is a deck the buildings' rules see)
-    Rule('deck-stack', deck_stack_check, deck_stack_fix),
-    Rule('deck-joint', deck_joint_check, deck_joint_fix),
-    Rule('deck-steep', deck_steep_check, deck_steep_fix),
+    # the decks' heights are one solve over the whole map in the bake (tools/tiles.py deck_solve): these only check it
+    Rule('deck-air', deck_air_check),
+    Rule('deck-stack', deck_stack_check),
+    Rule('deck-joint', deck_joint_check),
+    Rule('deck-steep', deck_steep_check),
     Rule('bldg-overlap', overlap_check, overlap_fix),  # (before the others: what is left of a part stands on its own)
     Rule('bldg-slope', slope_check, slope_fix),
     Rule('bldg-sunk', sunk_check, sunk_fix),
@@ -934,27 +823,15 @@ def selftest():
 
 
 def deck_selftest():
-    """a deck ending 12 m up with a street going on from it, a crossover between two decks, two streets raised from
-    either end meeting in the middle"""
+    """the deck checks: a deck ending 12 m up with a street going on from it, two decks meeting 1 m apart, a 20% deck"""
     flat = lambda x, y: np.full(len(np.atleast_1d(x)), 3.0)
     deck = dict(kind='primary', pts=[(0, 0), (100, 0)], z=[3.0, 12.0], a=1, b=2, w=10)
     on = dict(kind='primary', pts=[(100, 0), (300, 0)], z=None, a=2, b=3, w=10)
     d2 = dict(kind='motorway', pts=[(0, 50), (100, 50)], z=[30.0, 30.0], a=4, b=5, w=10)
-    d3 = dict(kind='motorway', pts=[(120, 50), (200, 50)], z=[31.0, 31.0], a=6, b=7, w=10)
-    x = dict(kind='service', pts=[(100, 50), (120, 50)], z=None, a=5, b=6, w=5)
-    t = dict(builds=[], decks=[], lines=[deck, on, d2, d3, x], ground=flat)
-    assert len(deck_air_check(t)) == 2
-    r = apply_rules(t)
-    assert not r['deck-air'][1] and not r['deck-joint'][1], r
-    assert abs(on['z'][0] - 12) < 1e-6 and abs(on['z'][-1] - (3 + 0.02 - DECK_TOP)) < 1e-6 and all(b <= a + 1e-9 for a, b in zip(on['z'], on['z'][1:]))
-    assert abs(x['z'][0] - 30) < 1e-6 and abs(x['z'][-1] - 31) < 1e-6
-    d4 = dict(kind='service', pts=[(0, 200), (50, 200)], z=[20.0, 20.0], a=10, b=11, w=5)
-    p1 = dict(kind='service', pts=[(50, 200), (60, 200)], z=None, a=11, b=12, w=5)
-    p2 = dict(kind='service', pts=[(60, 200), (70, 200)], z=None, a=12, b=13, w=5)
-    d5 = dict(kind='service', pts=[(70, 200), (80, 200)], z=[25.0, 25.0], a=13, b=14, w=5)
-    t = dict(builds=[], decks=[], lines=[d4, p1, p2, d5], ground=flat)
-    r = apply_rules(t)
-    assert not r['deck-joint'][1] and abs(p1['z'][-1] - p2['z'][0]) < 0.05 and abs(p1['z'][0] - 20) < 0.05 and abs(p2['z'][-1] - 25) < 0.05, (p1['z'], p2['z'])
+    d3 = dict(kind='motorway', pts=[(100, 50), (200, 50)], z=[31.0, 31.0], a=5, b=7, w=10)
+    d4 = dict(kind='service', pts=[(0, 200), (50, 200)], z=[3.0, 13.0], a=10, b=11, w=5)
+    r = apply_rules(dict(builds=[], decks=[], lines=[deck, on, d2, d3, d4], ground=flat), fix=False)
+    assert [len(r[k][1]) for k in ('deck-air', 'deck-joint', 'deck-steep')] == [1, 1, 1], r
 
 
 if __name__ == '__main__':

@@ -506,7 +506,7 @@ DECK_TOP = 0.38  # a deck's drawn road over its height, less the ground's (the p
 
 def road_ground(dtm, pieces, X0, Y0, decks=()):
     """the detail tiles' 8 m terrain grid over a whole 4 km tile (513 x 513 nodes, row 0 north), fitted to the at-grade
-    roads and rail: an 8 m node near a road can land in the cut, the ravine or the yard beside it and drag the street
+    roads, paths and rail (paths held half as hard): an 8 m node near a road can land in the cut, the ravine or the yard beside it and drag the street
     with it (a street beside the Grandview Cut, a ramp's foot beside a ravine, tilting the van). Where the drawn ground under a road (its
     centre line and its kerbs, level across at the middle of the three) strays from the LiDAR ground there, the nodes round it move to take it
     there (least squares, the 4 km tile's edge nodes fixed so the next tile still meets it); nodes nowhere near a road
@@ -517,14 +517,14 @@ def road_ground(dtm, pieces, X0, Y0, decks=()):
     at = lambda P: ndimage.map_coordinates(dtm, [(Y0 + L1 - P[:, 1]) / HR - 0.5, (P[:, 0] - X0) / HR - 0.5], order=1, mode='nearest')
     S = []  # x, y, weight, the ground wanted there
     for L in pieces:
-        if L['z'] is not None or L['kind'] not in DRIVE | {'rail', 'lightrail'} or len(L['pts']) < 2: continue
+        if L['z'] is not None or KI[L['kind']] >= KI['runway'] or len(L['pts']) < 2: continue  # (paths too: tools/audit_elev.py 'grade')
         P = np.array(densify(L['pts'], 2.0), float)
         t = np.gradient(P, axis=0) if len(P) > 1 else np.array([[1.0, 0.0]]); t /= np.maximum(np.hypot(t[:, 0], t[:, 1]), 1e-6)[:, None]
         n = np.stack([-t[:, 1], t[:, 0]], 1)
         e = max(0.0, L['w'] / 2 - 0.5)
         Q = [P] if e < 1 else [P, P + n * e, P - n * e]
         h = np.median([at(q) for q in Q], axis=0)  # level across, as a street is (a line drawn a metre or two off the street puts a kerb on the cut's or the embankment's slope)
-        for q in Q: S.append(np.c_[q, np.full(len(q), 0.3 if L['kind'] in ('rail', 'lightrail') else 1.0), h])
+        for q in Q: S.append(np.c_[q, np.full(len(q), 0.3 if L['kind'] in ('rail', 'lightrail') else 1.0 if L['kind'] in DRIVE else 0.5), h])
     if not S: return G
     S = np.concatenate(S)
     S = S[(S[:, 0] > X0 + 1) & (S[:, 0] < X0 + L1 - 1) & (S[:, 1] > Y0 + 1) & (S[:, 1] < Y0 + L1 - 1)]
@@ -1459,7 +1459,8 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
         bridge = t.get('bridge') not in (None, 'no')
         turns = (turn_lanes(t.get('turn:lanes:forward') or (t.get('turn:lanes') if ow else None)), turn_lanes(t.get('turn:lanes:backward')))
         if t.get('oneway') == '-1': turns = (turn_lanes(t.get('turn:lanes')), [])
-        ap = [(*sorted((refs.index(r0), refs.index(r1))), *rest) for r0, r1, _, *rest in APPROACH.get(wid, ()) if r0 in refs and r1 in refs]
+        sv = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(np.asarray(coords, float), axis=0).T))])  # along the way, as drawn
+        ap = [(*sorted((refs.index(r0), refs.index(r1))), refs.index(r0), s, z) for r0, r1, _, P, s, z, _ in APPROACH.get(wid, ()) if r0 in refs and r1 in refs]
         stops = {e for lo, hi, *_ in ap for e in (lo, hi)}  # an approach is pieces of its own, raised
         cut = [0] + [n for n in range(1, len(refs) - 1) if use.get(refs[n], 0) >= 2 or n in stops] + [len(refs) - 1]
         for a, b in zip(cut, cut[1:]):
@@ -1475,14 +1476,15 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
                 pts = densify(pts, 8)
                 z, tube = tunnel_heights(wid, pts)
                 tube = [2 if o and (e == 0 and refs[a] in PORTALS or e == len(pts) - 1 and refs[b] in PORTALS) else int(o) for e, o in enumerate(tube)]
-            elif bridge or wid in DECKS:  # bridges, roads on roofs
-                pts = densify(pts, 25)  # a long straight span needs points along it to carry its arch
-                z = deck_heights(wid, pts)
+            elif wid in DECKS:  # bridges, roads on roofs (deck_solve), from where the piece starts along the way
+                rev = t.get('oneway') == '-1'
+                pts, z = profile_at(pts, sv[-1] - sv[a] if rev else sv[a], -1 if rev else 1, *DECKS[wid][1:])
             elif raised:
-                pts = densify(pts, 12)
-                z = approach_heights(ap, a, b, pts)
-                if k in FOOT and z and max(abs(z1 - z0) / max(1e-6, math.dist(p0, p1)) for p0, p1, z0, z1 in zip(pts, pts[1:], z, z[1:])) > 0.3:
-                    kind = 'steps'  # stairs off a footbridge
+                lo, hi, k0, S, Z = next(e for e in ap if e[0] <= a and b <= e[1])
+                da, db = abs(sv[a] - sv[k0]), abs(sv[b] - sv[k0])
+                pts, z = profile_at(pts, da, 1 if db >= da else -1, S, Z)
+            if z and tube is None and own and k in FOOT and max(abs(z1 - z0) / max(1e-6, math.dist(p0, p1)) for p0, p1, z0, z1 in zip(pts, pts[1:], z, z[1:])) > 0.3:
+                kind = 'steps'  # stairs off a footbridge, a footbridge steeper than a ramp
             d = dict(turns=turns, own=mid, kind=kind, pts=pts, z=z, tube=tube, src='tunnel' if wid in TUNNELS else 'deck' if bridge or wid in DECKS else 'approach', roof=wid in ROOFS, lanes=lanes, w=w, ow=ow, band=band and tube is None, layer=int(hnum(t.get('layer')) or 0), a=refs[a], b=refs[b],
                      name=t.get('name', ''), drive=k in DRIVE and t.get('access') not in ('private', 'no') and t.get('highway') != 'busway',
                      crossing=k in ('footway', 'cycleway', 'path') and (t.get('footway') == 'crossing' or t.get('cycleway') == 'crossing') and t.get('crossing') not in ('unmarked', 'no'))
@@ -1557,7 +1559,7 @@ GRADE = 0.07  # steepest deck grade kept, rise per metre
 STAIRS = 0.7  # rise per metre of the stairs down off a footbridge end where OpenStreetMap maps none
 FOOT = {'footway', 'cycleway', 'path', 'pedestrian', 'steps', 'track'}
 DECKS = None
-APPROACH = {}  # at-grade way id -> [(deck end node, touchdown node, new node or None, points, distance along, height)]
+APPROACH = {}  # at-grade way id -> [(deck end node, touchdown node, new node or None, points, distance along, height, {sample: node})]
 TUNNEL = ('yes', 'culvert')  # underground (a building_passage runs at grade, under the building)
 TUNNELS, PORTALS = {}, set()  # tunnel way id -> (points, along, height, open); nodes where a tunnel comes out
 ROOFS = set()  # roads on roofs (decks the building carries)
@@ -1809,52 +1811,220 @@ def deck_profiles():
             z[i_] = np.interp(line.project(pts[i_]), raw[rw][1], prof[rw])
         z = robust_deck(raw[wid][1], z) if len(idx[0]) < len(P) else z
         prof[wid] = ndimage.uniform_filter1d(z, 9, mode='nearest') if len(z) >= 9 else z  # beside two decks: no hopping
-    # one height where bridge ways meet: the mean of their ends, eased in along each way
-    fix, joints = {}, {}
-    for (r, lay), lst in ends.items(): joints.setdefault(r, []).extend(lst)  # whatever their layers: a shared node is a joint
-    for r, lst in joints.items():
-        lst = [(w, e) for w, e in lst if prof.get(w) is not None]
-        if len(lst) < 2: continue
-        m = float(np.mean([prof[w][e] for w, e in lst]))
-        for w, e in lst: fix.setdefault(w, [0.0, 0.0])[0 if e == 0 else 1] = m - prof[w][e]
-    def ease(fix):
-        for w, (d0, d1) in fix.items():
-            s = raw[w][1]; u = s / max(s[-1], 1e-6)
-            prof[w] = prof[w] + d0 * (1 - u) + d1 * u
-    ease(fix)
-    def at_nodes(w):  # (node, x, y, deck height) at each node of a deck way
-        c = np.asarray(ways[w][0], float); sv = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(c, axis=0).T))])
-        return zip(ways[w][1], c[:, 0], c[:, 1], np.interp(sv, raw[w][1], prof[w]))
-    # a deck that branches off another one's middle (a ramp, a boardwalk's fork) meets it at its height there
-    inner = {r: h for w in prof if prof[w] is not None for k_, (r, x, y, h) in enumerate(at_nodes(w)) if 0 < k_ < len(ways[w][1]) - 1}
-    ease({w: [inner[ways[w][1][0]] - prof[w][0] if ways[w][1][0] in inner else 0.0, inner[ways[w][1][-1]] - prof[w][-1] if ways[w][1][-1] in inner else 0.0]
-          for w in prof if prof[w] is not None and (ways[w][1][0] in inner or ways[w][1][-1] in inner)})
+    # the heights where decks meet, of their branches and their approaches: one solve over every structure (deck_solve)
     DECKS = {w: (np.asarray(ways[w][0], np.float64), raw[w][1].astype(np.float32), np.asarray(prof[w], np.float32)) for w in prof if prof[w] is not None}
-    def go_on():  # every node of a deck: where an at-grade way goes on from it
-        tops = {}
-        for w in DECKS:
-            for r, x, y, h in at_nodes(w): tops.setdefault(r, []).append((x, y, h))
-        APPROACH.clear(); APPROACH.update(approaches(files, {r: np.mean(v, axis=0) for r, v in tops.items()}))
-    go_on()
-    # a road or rail deck's abutment with no approach (the LiDAR sees open ground just past it, or a station) meets the
-    # ground there: its profile there was something else (a viaduct over it, a station roof); cars and trains take no stairs
-    starts = {n for lst in APPROACH.values() for e in lst for n in e[:2]}  # where approaches start, or end on a deck
-    eased = 0
+    tops = {}
     for w, (c, s, z) in DECKS.items():
-        if ways[w][3] in FOOT: continue
-        for e, r in ((0, ways[w][1][0]), (-1, ways[w][1][-1])):
-            if len(joints.get(r, ())) > 1 or r in inner or r in starts: continue  # it meets another deck or an approach
-            g = float(hr_lookup(c[[e], 0], c[[e], 1], 1)[0])
-            if not np.isfinite(g) or abs(z[e] - g) < 1.0: continue
-            prof[w] = z[:] = to_ground(s, z, g, e); eased += 1
-    if eased: go_on()  # nodes near those ends moved
+        sv = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(c, axis=0).T))])
+        for r, x, y, h in zip(ways[w][1], c[:, 0], c[:, 1], np.interp(sv, s, z)): tops.setdefault(r, []).append((x, y, h))
+    endn = {}
+    for w in DECKS:
+        for r in (ways[w][1][0], ways[w][1][-1]): endn[r] = endn.get(r, 0) + 1
+    ap, grade = approaches(files, {r: np.mean(v, axis=0) for r, v in tops.items()}, {r for r, v in tops.items() if len(v) > 1 or r not in endn})
+    APPROACH.clear(); APPROACH.update(ap)
     TUNNELS.update(tunnel_profiles(tun, STRtree(water) if water else None))
+    deck_solve(ways, raw, grade, tun)
     HR_CACHE.clear(); common.HR_KEEP = 12
     try: pickle.dump({'key': key, 'decks': DECKS, 'approach': APPROACH, 'tunnels': TUNNELS, 'portals': PORTALS, 'roofs': ROOFS}, open(DECK_CACHE, 'wb'), protocol=5)
     except OSError: pass
     print('bridge decks', len(DECKS), 'of', len(ways), 'ways,', len(roofs), 'on roofs,', len(missing), 'not in the LiDAR,', len(APPROACH), 'approaches,',
           len(TUNNELS), 'tunnels', round(time.time() - t0), 's', flush=True)
     return DECKS
+
+
+MERGE = 3.0  # metres: decks drawn over each other within this of each other's height anywhere along their overlap are one surface there
+SEP = 3.2  # metres: decks stacked further apart than MERGE keep their drawn tops this far apart (tools/geom_rules.py CLEAR)
+DRAWN = DRIVE | FOOT | {'rail', 'lightrail'}  # the kinds the page draws a deck strip for (tile-worker.js roads())
+
+
+def deck_limit(k):  # the steepest a deck may climb (tools/geom_rules.py _limit), a hair under
+    return 8.9 if k == 'steps' else 0.245 if k in FOOT else 0.115
+
+
+def deck_design(k):  # the grade a structure is built to, where its LiDAR doesn't say otherwise
+    return {'rail': 0.03, 'lightrail': 0.06, 'steps': 0.8}.get(k, 0.10 if k in FOOT else 0.08)
+
+
+def deck_solve(ways, raw, grade, tun={}, ground=None, drawn=None):
+    """Every raised way's heights (DECKS, APPROACH, and the tunnels drawn beside them: TUNNELS), one linear program per
+    connected structure (ways meeting at nodes or drawn over each other), on their 4 m samples: as near their LiDAR
+    profiles as the rules let them (L1, so a truss or a gap left in the profile moves only where it must), smooth, and
+      - one height where ways meet (one variable per node), and one surface where two are drawn over each other and
+        come within MERGE of each other anywhere along that stretch (a ferry terminal's holding lanes, a sidewalk beside
+        its road deck, a ramp leaving the main line, one way approached from both its ends); further apart they are
+        stacked, SEP apart at least
+      - no steeper than their kind's design grade where they can, never than its limit
+      - on the ground (its drawn top on the LiDAR ground) where a street goes on from it at grade, at an approach's
+        foot, and at a road's or rail's dead end (cars and trains take no stairs)
+      - not under the drawn ground (tools/audit_elev.py 'buried'), 3 m clear over the streets under them ('under')
+    the rules held with weights far over the LiDAR's, so they give only where they contradict each other (a tie
+    first: a deck whose LiDAR saw the viaduct over it comes down off it). Writes the heights back.
+    (ground, drawn: the LiDAR's and the drawn ground, for the selftest)"""
+    ground, drawn = ground or ground_at, drawn or drawn_ground
+    from scipy.optimize import linprog
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    from shapely.strtree import STRtree
+    t0 = time.time()
+    gw, gat = grade
+    E = []  # [key, points, along, wanted height, weight, kind, width, {sample: node}]
+    for w, (c, s, z) in DECKS.items():
+        coords, refs, t, k = ways[w]
+        vert = np.concatenate([[0], np.cumsum([max(1, int(math.dist(a, b) / 4)) for a, b in zip(coords, coords[1:])])])
+        E.append([w, raw[w][0], np.asarray(s, float), np.asarray(z, float), 1.0, k, road_shape(k, t)[1], dict(zip(vert.tolist(), refs))])
+    for w, lst in APPROACH.items():
+        k, wd = gw[w][2], gw[w][3]
+        for n, (r0, r1, ins, P, s, z, nodes) in enumerate(lst):
+            s, z = np.asarray(s, float), np.asarray(z, float)
+            if len(s) < 2: continue
+            kk = 'steps' if k in FOOT and np.max(np.abs(np.diff(z)) / np.maximum(np.diff(s), 1e-6)) > 0.3 else k
+            E.append([(w, n), np.asarray(P, float), s, z, 0.3, kk, wd, nodes])
+    for w, (P, s, z, op) in TUNNELS.items():  # (a covered lane beside a deck is drawn with it: one surface)
+        if len(s) > 1: E.append([(w, 't'), np.asarray(P, float), np.asarray(s, float), np.asarray(z, float), 3.0, tun[w][2], tun[w][3], {}])
+    off = np.concatenate([[0], np.cumsum([len(e[1]) for e in E])]); N = int(off[-1])
+    P = np.concatenate([e[1] for e in E]); el = np.repeat(np.arange(len(E)), np.diff(off))
+    tgt = np.concatenate([e[3] for e in E])
+    # one variable per node: samples at the same node tied
+    bynode = {}
+    for i, e in enumerate(E):
+        for k_, r in e[7].items(): bynode.setdefault(r, []).append(off[i] + k_)
+    a_, b_ = [], []
+    for vs in bynode.values(): a_ += vs[:1] * (len(vs) - 1); b_ += vs[1:]
+    _, rep = connected_components(coo_matrix((np.ones(len(a_)), (a_, b_)), shape=(N, N)), directed=False)
+    # drawn over each other: each drawn way's samples (middle and edges) on another's strip
+    D = [i for i, e in enumerate(E) if e[5] in DRAWN]
+    geo = [shapely.LineString(E[i][1]) for i in D]
+    tree = STRtree([g.buffer(E[i][6] / 2, cap_style='flat') for g, i in zip(geo, D)])
+    Q, qs = [], []
+    for i in D:
+        p = E[i][1]; t = np.gradient(p, axis=0); t /= np.maximum(np.hypot(*t.T), 1e-6)[:, None]
+        for o in (-0.5, 0.0, 0.5): Q.append(p + np.c_[-t[:, 1], t[:, 0]] * o * E[i][6]); qs.append(np.arange(off[i], off[i + 1]))
+    Q, qs = np.concatenate(Q), np.concatenate(qs)
+    qi, ti = tree.query(shapely.points(Q), predicate='intersects')
+    keep = el[qs[qi]] != np.array(D)[ti]
+    qi, ti = qi[keep], ti[keep]
+    sb = shapely.line_locate_point(np.array(geo, object)[ti], shapely.points(Q[qi]))
+    way_of = lambda e: e[0][0] if isinstance(e[0], tuple) else e[0]
+    tube = lambda e: isinstance(e[0], tuple) and e[0][1] == 't'
+    ties, seps = [], []  # (sample, other's sample j, j + 1, fraction)
+    merged = set()
+    pairs = {}  # (way, other way) -> [(sample, other's sample j, fraction, height apart)]
+    for q, b, u in zip(qs[qi], np.array(D)[ti], sb):
+        S = E[b][2]; j = int(np.clip(np.searchsorted(S, u) - 1, 0, len(S) - 2)); f = float(np.clip((u - S[j]) / max(S[j + 1] - S[j], 1e-6), 0, 1))
+        f = 0.0 if f < 0.01 else 1.0 if f > 0.99 else f  # (at a sample: on it)
+        pairs.setdefault((el[q], b), []).append((q, off[b] + j, f, tgt[q] - (E[b][3][j] * (1 - f) + E[b][3][j + 1] * f)))
+    for (a, b), ps in pairs.items():  # each stretch of one drawn over the other: one surface if they meet anywhere along it
+        ps.sort()
+        for run in np.split(ps, np.nonzero(np.diff([p[0] for p in ps]) > 2)[0] + 1):
+            one = min(abs(p[3]) for p in run) < MERGE or way_of(E[a]) == way_of(E[b])  # (a ramp leaving the main line; one way approached from both ends)
+            for q, j, f, dz in run:
+                q, j = int(q), int(j)
+                if one: ties.append((q, j, j + 1, f)); merged.add(q)
+                elif abs(dz) < 15: seps.append((q, j, j + 1, f, 1.0 if dz > 0 else -1.0))
+    # the ground: drawn under each sample, the LiDAR's at the ends
+    gd = drawn(P[:, 0], P[:, 1])
+    lo = np.full(N, -np.inf)  # the lowest each sample may be
+    for i, e in enumerate(E):
+        s = e[2]; inner = (s > 12) & (s < s[-1] - 12) & (not tube(e))  # (a tunnel is under the ground)
+        lo[off[i]:off[i + 1]][inner] = gd[off[i]:off[i + 1]][inner] - 1.1
+    # 3 m clear over the at-grade streets, paths and rail under a deck (not those meeting it, nor near its ends)
+    G_ = [w for w, (c, r, k, wd) in gw.items() if w not in APPROACH and KI[k] < KI['runway']]
+    if G_:
+        gl = [shapely.LineString(gw[w][0]) for w in G_]; gt = STRtree(gl)
+        for i, e in enumerate(E):
+            s = e[2]; inner = np.nonzero((s > 12) & (s < s[-1] - 12) & (not tube(e)))[0]
+            if not len(inner): continue
+            pts = shapely.points(e[1][inner]); th = 1.6 if KI[e[5]] <= KI['tertiary'] else 0.9
+            for a, b in zip(*gt.query(pts, predicate='dwithin', distance=e[6] / 2 + 0.6)):
+                if set(gw[G_[b]][1]) & set(e[7].values()): continue  # (it meets the deck)
+                c_ = shapely.line_interpolate_point(gl[b], shapely.line_locate_point(gl[b], pts[a]))
+                k_ = off[i] + inner[a]
+                lo[k_] = max(lo[k_], float(drawn(np.array([c_.x]), np.array([c_.y]))[0]) + 3.0 + th + 0.15)
+    # on the ground: where a street goes on from a structure at grade (no approach raised it there), at an approach's
+    # foot, and at a road's or rail's dead end (cars and trains take no stairs; a dead end on another deck is on it)
+    raised = {(w, r) for w, lst in APPROACH.items() for e in lst for r in e[6].values()}
+    ends = {}  # sample -> the height it is held to
+    for i, e in enumerate(E):
+        n = len(e[1])
+        for k_, r in e[7].items():
+            q = off[i] + k_
+            if any((w, r) not in raised and w not in DECKS for w, _ in gat.get(r, ())) or k_ in (0, n - 1) and len(bynode.get(r, ())) == 1 and (
+                    isinstance(e[0], tuple) and k_ == n - 1 or e[5] not in FOOT and q not in merged):
+                ends[q] = float(ground(e[1][k_:k_ + 1, 0], e[1][k_:k_ + 1, 1])[0]) + 0.02 - DECK_TOP
+    # the structures: samples joined along their ways, at nodes, over each other
+    A = [np.arange(N - 1)[np.diff(el) == 0], np.array([t[0] for t in ties + seps], int), np.array([t[0] for t in ties + seps], int)]
+    B = [np.arange(1, N)[np.diff(el) == 0], np.array([t[1] for t in ties + seps], int), np.array([t[2] for t in ties + seps], int)]
+    A, B = rep[np.concatenate(A)], rep[np.concatenate(B)]
+    nc, comp = connected_components(coo_matrix((np.ones(len(A)), (A, B)), shape=(N, N)), directed=False)
+    # rows: (component, [(var, coef)], rhs, slack cost or None (an equality), second row sign or 0)
+    rows, seen = [], set()
+    def row(terms, rhs, cost, both=False):  # sum <= rhs + slack (both: |sum - rhs| <= slack); cost None: sum == rhs
+        t_ = {}
+        for v, a in terms: t_[v] = t_.get(v, 0.0) + a
+        terms = [(v, a) for v, a in t_.items() if abs(a) > 1e-4]  # (a node twice in a row: one term; a tie at a sample: none)
+        if cost is None and terms:  # (ties scaled and once each: HiGHS fails on near-duplicate ones)
+            m = max(abs(a) for _, a in terms); terms = [(v, a / m) for v, a in terms]
+            k = tuple(sorted((v, round(a, 5)) for v, a in terms))
+            if k in seen: return
+            seen.add(k)
+        if terms: rows.append((comp[terms[0][0]], terms, rhs, cost, both))
+    W = dict(data=1.0, bend=2.0, design=100.0, limit=1000.0, end=1000.0, low=150.0, sep=300.0, tie=300.0)  # (a tie gives before an end or a grade)
+    for i, e in enumerate(E):
+        s, n = e[2], len(e[1]); R = rep[off[i]:off[i + 1]]; Gd, Gl = deck_design(e[5]), deck_limit(e[5])
+        for k_ in range(n):
+            row([(R[k_], 1.0)], tgt[off[i] + k_], W['data'] * e[4], True)
+        for k_ in range(n - 1):
+            if R[k_] == R[k_ + 1]: continue
+            ds = s[k_ + 1] - s[k_]
+            if ds < 1e-3: row([(R[k_ + 1], 1.0), (R[k_], -1.0)], 0.0, W['limit'], True); continue  # (a point twice)
+            for sg in (1.0, -1.0):
+                row([(R[k_ + 1], sg), (R[k_], -sg)], Gd * ds, W['design']); row([(R[k_ + 1], sg), (R[k_], -sg)], Gl * ds, W['limit'])
+        for k_ in range(1, n - 1):
+            row([(R[k_ - 1], 1.0), (R[k_], -2.0), (R[k_ + 1], 1.0)], 0.0, W['bend'], True)
+    for q, h in ends.items(): row([(rep[q], 1.0)], h, W['end'], True)
+    for q in np.nonzero(np.isfinite(lo))[0]: row([(rep[q], -1.0)], -lo[q], W['low'])
+    for q, j0, j1, f in ties:
+        if rep[q] != rep[j0] or rep[q] != rep[j1]: row([(rep[q], 1.0), (rep[j0], -(1 - f)), (rep[j1], -f)], 0.0, W['tie'], True)
+    for q, j0, j1, f, sg in seps: row([(rep[q], -sg), (rep[j0], sg * (1 - f)), (rep[j1], sg * f)], -SEP, W['sep'])
+    # one program per structure
+    rows.sort(key=lambda r: r[0])
+    z = tgt.copy(); zr = {}
+    starts = np.searchsorted([r[0] for r in rows], np.arange(nc + 1))
+    bad = 0
+    for c in range(nc):
+        rs = rows[starts[c]:starts[c + 1]]
+        if not rs: continue
+        vs = sorted({v for r in rs for v, _ in r[1]}); col = {v: n for n, v in enumerate(vs)}; nv = len(vs)
+        ub, eq = ([], [], []), ([], [], [])
+        bu, be, cost = [], [], [0.0] * nv
+        h0 = float(np.median([r[2] for r in rs if r[4] and len(r[1]) == 1]))  # (heights about this one: better conditioned)
+        for _, terms, rhs, cst, both in rs:
+            rhs = 0.0 if cst is None else rhs - h0 * sum(a for _, a in terms)  # (ties: their terms sum to nothing)
+            if cst is None:
+                for v, a in terms: eq[0].append(len(be)); eq[1].append(col[v]); eq[2].append(a)
+                be.append(rhs); continue
+            t_ = len(cost); cost.append(cst)
+            for sg in ((1.0, -1.0) if both else (1.0,)):
+                for v, a in terms: ub[0].append(len(bu)); ub[1].append(col[v]); ub[2].append(sg * a)
+                ub[0].append(len(bu)); ub[1].append(t_); ub[2].append(-1.0); bu.append(sg * rhs)
+        nt = len(cost)
+        Aub = coo_matrix((ub[2], (ub[0], ub[1])), shape=(len(bu), nt)).tocsr()
+        Aeq = coo_matrix((eq[2], (eq[0], eq[1])), shape=(len(be), nt)).tocsr() if be else None
+        for pre in (True, False):  # (HiGHS's presolve trips over some: without it)
+            r = linprog(cost, A_ub=Aub, b_ub=bu, A_eq=Aeq, b_eq=be if be else None, bounds=[(None, None)] * nv + [(0, None)] * (nt - nv), method='highs', options=dict(presolve=pre))
+            if r.status == 0: break
+        if r.status != 0: bad += 1; continue  # (left at their LiDAR profiles)
+        for v, n in col.items(): zr[v] = r.x[n] + h0
+    z = np.array([zr.get(rep[q], tgt[q]) for q in range(N)])
+    for i, e in enumerate(E):
+        zi = z[off[i]:off[i + 1]].astype(np.float32)
+        if isinstance(e[0], tuple) and e[0][1] == 't':
+            TUNNELS[e[0][0]] = (*TUNNELS[e[0][0]][:2], zi, TUNNELS[e[0][0]][3])
+        elif isinstance(e[0], tuple):
+            w, n = e[0]; APPROACH[w][n] = (*APPROACH[w][n][:5], zi, APPROACH[w][n][6])
+        else:
+            DECKS[e[0]] = (DECKS[e[0]][0], DECKS[e[0]][1], zi)
+    print('deck solve:', len(E), 'ways,', N, 'samples,', nc, 'structures,', len(ties), 'ties,', len(seps), 'stacked,', bad, 'failed', round(time.time() - t0), 's', flush=True)
 
 
 def tunnel_profiles(ways, water=None):
@@ -1925,33 +2095,32 @@ def tunnel_heights(wid, pts):
     return [float(v) for v in np.interp(sp, s, z)], [bool(v) for v in c[hi] - c[lo] > 0]
 
 
-def to_ground(s, z, g, e):
-    """deck heights z (at distances s along) brought to the ground height g at end e (0 or -1), no steeper than GRADE"""
-    d = s - s[0] if e == 0 else s[-1] - s
-    return np.clip(z, g - GRADE * d, g + GRADE * d)
-
-
-def approaches(files, tops):
+def approaches(files, tops, held=()):
     """At-grade ways that go on from a deck's end well above the ground: the structure goes on past OpenStreetMap's
     bridge tag (a viaduct's last spans, a ramp on a retained fill, the guideway down to a tunnel portal, stairs off a
     footbridge, a connector across a bridge). From the deck's end they follow the low LiDAR surface along the way, no
     steeper than a ramp (a stair for steps), until they meet the ground; on into the next way if they don't, or to the
     deck at its far end. tops: deck end node -> (x, y, deck height). -> {way id: [(deck end node, touchdown node, the
-    touchdown node to add to the way (segment, fraction along it, x, y, node id) or None, points, along, height)]}"""
+    touchdown node to add to the way (segment, fraction along it, x, y, node id) or None, points, along, height)]},
+    and the at-grade ways near the decks ({way id: (coords, refs, kind, width)}, {node: [(way id, ref index)]}). From a
+    held node (a deck's middle, a joint: not one deck's end, which comes down to the ground instead) a way that is no
+    ramp (into a building, a lift, too steep) comes straight down from it anyway, no steeper than its grade"""
     cell = 512
     near = {(int(x // cell) + a, int(y // cell) + b) for x, y, _ in tops.values() for a in (-1, 0, 1) for b in (-1, 0, 1)}
     tops = {r: h for r, (x, y, h) in tops.items()}
     at = {}  # node -> [(way id, ref index)] for at-grade ways near a deck end
-    ways, blds = {}, []
+    ways, blds, up = {}, [], set()
     for f in files:
         for wid, coords, refs, t in pickle.load(open(f, 'rb')).get('lines', []):
             if wid in ways or len(coords) < 2 or t.get('bridge') not in (None, 'no') or t.get('area') == 'yes': continue
             k = line_kind(t)
-            if not k or t.get('tunnel') in ('yes', 'building_passage', 'culvert') or t.get('covered') == 'yes' and k in ('rail', 'lightrail'): continue
-            lv = t.get('level', '0')
-            if t.get('indoor') or lv != '0' and ';' not in lv or t.get('highway') == 'corridor': continue  # inside a building (steps between levels are not)
+            if not k or t.get('tunnel') in TUNNEL or t.get('tunnel') == 'building_passage' and on_level(t) or t.get('covered') == 'yes' and k in ('rail', 'lightrail'): continue  # (what road_pieces draws at grade)
             if not any((int(x // cell), int(y // cell)) in near for x, y in coords[::4] + coords[-1:]): continue
+            if k in FOOT and hidden_walk(coords, t): continue
             ways[wid] = (coords, refs, k, road_shape(k, t)[1])
+            if on_level(t):
+                if k in DRIVE: del ways[wid]; continue  # (a parkade's aisle, inside it: drawn at grade, hidden in it)
+                up.add(wid)  # (a walkway mapped up a level: it stays up as far as the LiDAR does)
             for n_, r in enumerate(refs): at.setdefault(r, []).append((wid, n_))
         for _, prs, t in pickle.load(open(f, 'rb')).get('buildings', []):
             if (hnum(t.get('building:min_level')) or 0) > 0 or (hnum(t.get('min_height')) or 0) > 2: continue  # up in the air: ways go on under it
@@ -1959,12 +2128,13 @@ def approaches(files, tops):
                 if len(outer) >= 4 and (int(outer[0][0] // cell), int(outer[0][1] // cell)) in near: blds.append(Polygon(outer).buffer(0))
     from shapely.strtree import STRtree
     blds = STRtree(blds)
-    out = {}
+    out, held, along = {}, set(held), set()
     seen = set()
     queue = [(r, h, 400.0) for r, h in tops.items() if r in at]
     while queue:
         r, h0, budget = queue.pop()
         for wid, k0 in at.get(r, []):
+            if (r, wid) in along: continue  # (the way it branches off)
             coords, refs, kind, w = ways[wid]
             for order in (list(range(k0, len(refs))), list(range(k0, -1, -1))):  # on from the deck end, either way
                 if len(order) < 2 or (wid, k0, order[1]) in seen: continue
@@ -1974,22 +2144,25 @@ def approaches(files, tops):
                 g = hr_lookup(P[:, 0], P[:, 1], 1)
                 g = np.where(np.isfinite(g), g, MR[((MR_Y1 - P[:, 1]) / 32).astype(int).clip(0, MR.shape[0] - 1), ((P[:, 0] - MR_X0) / 32).astype(int).clip(0, MR.shape[1] - 1)])
                 if not np.isfinite(g[0]) or h0 - g[0] < 1.0: continue
-                if len(blds.query(shapely.points(P[min(2, len(P) - 1)]), predicate='within')): continue  # into a building (a skywalk, a station)
+                inside = len(blds.query(shapely.points(P[min(2, len(P) - 1)]), predicate='within')) > 0  # into a building (a skywalk, a station)
+                if inside and r not in held: continue
                 vert = np.concatenate([[0], np.cumsum([max(1, int(math.dist(a, b) / 4)) for a, b in zip(pts, pts[1:])])])
                 G = 0.8 if kind == 'steps' else 0.03 if kind == 'rail' else 0.06 if kind == 'lightrail' else 0.10 if kind in FOOT else 0.08
                 far = tops.get(refs[order[-1]])
-                if far is not None and s[-1] < 150:  # a connector between two decks: straight from one to the other
-                    if abs(far - h0) > (G if kind == 'steps' else 0.5 if kind in FOOT else 0.1) * s[-1]: continue  # too steep for a ramp (or a stair): a lift
+                if inside or far is not None and s[-1] < 150 and abs(far - h0) > (G if kind == 'steps' else 0.5 if kind in FOOT else 0.1) * s[-1]:
+                    if r not in held: continue  # too steep for a ramp (or a stair): a lift
+                    z = np.maximum(h0 - G * s, g); low_ = z - g < 0.3; down = int(np.argmax(low_)) if low_.any() else None  # (straight down)
+                elif far is not None and s[-1] < 150:  # a connector between two decks: straight from one to the other
                     z, down = h0 + (far - h0) * s / max(s[-1], 1e-6), None
                 else:  # a footway's surface beyond its bridge is a building or the trees as often as a ramp: it just comes down
-                    z, down = ramp(s, low, g, h0, G, 0 if kind in FOOT else 300)
+                    z, down = ramp(s, low, g, h0, G, 0 if kind in FOOT and wid not in up else 300)
                     # the next node another way meets (a path down there: the ramp must be down by then)
                     jn = next((vert[n] for n in range(1, len(order)) if len(at.get(refs[order[n]], ())) > 1), None)
-                    if down is not None and (down < 0 or s[down] < 6) or kind in FOOT and jn is not None and (down is None or down > jn):
-                        if kind not in FOOT: continue  # down at once: a lift, not a ramp
+                    if down is not None and (down < 0 or s[down] < 6) or kind in FOOT and wid not in up and jn is not None and (down is None or down > jn):
+                        if kind not in FOOT and r not in held: continue  # down at once: a lift, not a ramp
                         # a path on from a footbridge's end down on the ground (the stairs aren't mapped): stairs down along it,
                         # down by the next junction (steeper, up to a stair tower's 1.5, where OpenStreetMap leaves no room)
-                        st = STAIRS if jn is None else min(1.5, max(STAIRS, (h0 - g[jn]) / max(s[jn], 1e-6)))
+                        st = (STAIRS if jn is None else min(1.5, max(STAIRS, (h0 - g[jn]) / max(s[jn], 1e-6)))) if kind in FOOT else G
                         z = np.maximum(h0 - st * s, g); low_ = z - g < 0.3
                         down = int(np.argmax(low_)) if low_.any() else None
                 end, ins, keep = refs[order[-1]], None, len(P)
@@ -2002,10 +2175,14 @@ def approaches(files, tops):
                         f = math.dist(coords[seg], P[down]) / max(1e-6, math.dist(coords[seg], coords[seg + 1]))
                         end, keep = (1 << 52) + wid * 64 + len(out.get(wid, ())), down + 1  # a node id of our own, below 2^53 for the page
                         ins = (seg, f, *P[down], end)
-                out.setdefault(wid, []).append((refs[order[0]], end, ins, P[:keep].copy(), s[:keep].astype(np.float32), z[:keep].astype(np.float32)))
+                nodes = {int(vert[n_]): refs[order[n_]] for n_ in range(len(order)) if vert[n_] < keep}; nodes[keep - 1] = end
+                out.setdefault(wid, []).append((refs[order[0]], end, ins, P[:keep].copy(), s[:keep].astype(np.float32), z[:keep].astype(np.float32), nodes))
                 if down is None and refs[order[-1]] not in tops and s[-1] < budget:
-                    queue.append((refs[order[-1]], float(z[-1]), budget - s[-1]))
-    return out
+                    queue.append((refs[order[-1]], float(z[-1]), budget - s[-1])); held.add(refs[order[-1]])  # (up in the air: it goes on)
+                for k_, r_ in nodes.items():  # the other ways branching off it up in the air go on from it too
+                    if 0 < k_ < keep - 1 and r_ not in tops and len(at.get(r_, ())) > 1 and z[k_] - g[k_] > 1 and s[k_] < budget:
+                        queue.append((r_, float(z[k_]), budget - s[k_])); held.add(r_); along.add((r_, wid))
+    return out, (ways, at)
 
 
 def ramp(s, low, g, h0, G, follow):
@@ -2033,23 +2210,23 @@ def ramp(s, low, g, h0, G, follow):
     return z, None
 
 
-def approach_heights(ap, a, b, pts):
-    """an at-grade piece's heights where it is part of one of its way's approaches (from ref a to ref b), else None"""
-    for lo, hi, P, s, z in ap:
-        if lo <= min(a, b) and max(a, b) <= hi:
-            line = LineString(P)
-            return [float(np.interp(line.project(shapely.geometry.Point(p)), s, z)) for p in pts]
-    return None
-
-
-def deck_heights(wid, pts):
-    """a bridge piece's deck height at each of its points (from deck_profiles), or None"""
-    d = deck_profiles().get(wid)
-    if d is None: return None
-    coords, s, z = d
-    line = LineString(coords)
-    # samples were taken every 4 m along the densified way: map a point to distance along, then to height
-    return [float(np.interp(line.project(shapely.geometry.Point(p)), s, z)) for p in pts]
+def profile_at(pts, s0, sign, S, Z, tol=0.01):
+    """a raised piece's points and heights from its way's profile (S, Z: heights along it), the piece starting s0 along
+    the way and going sign (1, -1) along it: its own points and, between them, every 4 m point where the profile bends
+    more than tol from the straight line (so pieces drawn over each other follow the one surface)"""
+    P = np.array(densify(pts, 4), float)
+    u = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
+    z = np.interp(s0 + sign * u, S, Z)
+    own = np.concatenate([[0], np.cumsum([max(1, int(math.dist(p, q) / 4)) for p, q in zip(pts, pts[1:])])]).tolist()
+    keep, todo = set(own), list(zip(own, own[1:]))
+    while todo:  # (Douglas-Peucker along the way)
+        i, j = todo.pop()
+        if j - i < 2: continue
+        k = np.arange(i + 1, j); e = np.abs(z[k] - (z[i] + (z[j] - z[i]) * (u[k] - u[i]) / max(u[j] - u[i], 1e-9)))
+        m = int(np.argmax(e))
+        if e[m] > tol: keep.add(i + 1 + m); todo += [(i, i + 1 + m), (i + 1 + m, j)]
+    keep = sorted(keep)
+    return [tuple(p) for p in P[keep]], [float(v) for v in z[keep]]
 
 
 # ---------------------------------------------------------------- tile writer
@@ -2397,10 +2574,22 @@ def selftest():
     # the LiDAR follows a ramp down, then sees the open ground 2 m below it: down to it at the ramp's grade, not a step
     z, down = ramp(sa, np.where(sa <= 160, 12 - 0.05 * sa, 2.2), gr.copy(), 12.0, 0.08, 300)
     assert down == 41 and z[down] == 2.0 and np.max(-np.diff(z[:down + 1])) <= 0.08 * 4 + 1e-6, (down, z[35:42])
-    # a road deck's end the LiDAR put on a viaduct above it (16.7 m over the ground at 4.5) meets the ground at 7%
-    sd = np.arange(0, 340, 4.0); zd = np.where(sd < 260, 9.5, 9.5 + (sd - 260) * 0.09)
-    z = to_ground(sd, zd, 4.5, -1)
-    assert z[-1] == 4.5 and np.allclose(z[:120 // 4], 9.5) and np.max(np.abs(np.diff(z))) <= GRADE * 4 + 1e-6, z[-25:]
+    # one solve over a structure: a footbridge 12 m up whose end a street goes on from (down to the ground at it), a second
+    # deck drawn half over it 0.8 m higher (one surface with it), a third crossing 4 m over them (SEP over at least)
+    global DECKS
+    old = DECKS, dict(APPROACH)
+    flat = lambda x, y: np.full(len(np.atleast_1d(x)), 3.0)
+    def way(c, refs, k, z):
+        P = np.array(densify(c, 4), float); s = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
+        return (c, refs, {'highway': k}, k), (P, s, None, None), (np.array(c, float), s, np.interp(s, [0, s[-1]], z))
+    W_ = {1: way([(0.0, 0.0), (200.0, 0.0)], [1, 2], 'footway', [12, 12]), 2: way([(0.0, 1.0), (200.0, 1.0)], [3, 4], 'cycleway', [12.8, 12.8]),
+          3: way([(100.0, -60.0), (100.0, 60.0)], [5, 6], 'path', [17.0, 17.0])}  # (foot: their far ends left where they are)
+    DECKS = {w: d for w, (_, _, d) in W_.items()}; APPROACH.clear()
+    deck_solve({w: a for w, (a, _, _) in W_.items()}, {w: r for w, (_, r, _) in W_.items()}, ({}, {2: [(9, 0)], 4: [(9, 1)]}), ground=flat, drawn=flat)
+    z1, z2, z3 = (DECKS[w][2] for w in (1, 2, 3))
+    assert abs(z1[-1] - (3 + 0.02 - DECK_TOP)) < 0.05 and 11.7 < z1[0] < 13.1 and np.max(np.abs(np.diff(z1))) <= 0.10 * 4 + 1e-3, z1
+    assert np.max(np.abs(z1 - z2)) < 0.05 and np.interp(60, DECKS[3][1], z3) - np.interp(100, DECKS[1][1], z1) >= SEP - 0.05, (z2 - z1, z3)
+    DECKS = old[0]; APPROACH.update(old[1])
     # crowns: two 12 m trees in a 20 x 40 m patch of canopy share it, up to their reach; a lone tree in a small patch keeps a small crown
     can = np.zeros((40, 40), bool); can[10:20, 5:25] = True; can[30:33, 30:33] = True
     w = crown_widths(np.full((40, 40), 12.0), can, [(15, 10), (15, 20), (31, 31)], [12.0, 12.0, 6.0])

@@ -12,7 +12,7 @@
 //   ground-crack  a slit in the drawn ground inside the tile (but round a tunnel's open box): beside an edge no other
 //                 triangle shares, 2 cm out, no ground, or ground more than 1 cm higher or lower (a T-junction's step)
 //   object        things inside each other: parked cars, lamp poles, tree trunks, beach logs and the buildings' footprints
-//   deck-zfight   two deck strips drawn over each other within 3 cm (they flicker)
+//   deck-zfight   two deck strips drawn over each other within 3 cm (they flicker; not where they only meet along an edge)
 import fs from 'node:fs'
 import zlib from 'node:zlib'
 import vm from 'node:vm'
@@ -62,13 +62,14 @@ function addSurf(k) {
       }
   }
 }
-function decks(x, y) { // [[height, kind]] of the deck strips drawn over (x, y)
+function decks(x, y, m = 0) { // [[height, kind]] of the deck strips drawn over (x, y) (m: at least m metres inside them)
   const out = []
   for (const T of grid.get(Math.floor(x / C) * 65536 + Math.floor(y / C)) || []) {
     const d = (T[4] - T[7]) * (T[0] - T[6]) + (T[6] - T[3]) * (T[1] - T[7])
     if (!d) continue
     const l1 = ((T[4] - T[7]) * (x - T[6]) + (T[6] - T[3]) * (y - T[7])) / d, l2 = ((T[7] - T[1]) * (x - T[6]) + (T[0] - T[6]) * (y - T[7])) / d, l3 = 1 - l1 - l2
-    if (l1 >= -1e-6 && l2 >= -1e-6 && l3 >= -1e-6) out.push([l1 * T[2] + l2 * T[5] + l3 * T[8], T[9]])
+    const e = m ? [Math.hypot(T[3] - T[6], T[4] - T[7]), Math.hypot(T[0] - T[6], T[1] - T[7]), Math.hypot(T[0] - T[3], T[1] - T[4])].map((l) => (m * l) / Math.abs(d)) : [-1e-6, -1e-6, -1e-6]
+    if (l1 >= e[0] && l2 >= e[1] && l3 >= e[2]) out.push([l1 * T[2] + l2 * T[5] + l3 * T[8], T[9]])
   }
   return out
 }
@@ -220,7 +221,7 @@ function check(cell) {
       for (let i = 0; i < P.length / 2 - 1; i++) {
         const x0 = P[i * 2] + T.ox, y0 = P[i * 2 + 1] + T.oy, x1 = P[i * 2 + 2] + T.ox, y1 = P[i * 2 + 3] + T.oy, l = Math.hypot(x1 - x0, y1 - y0)
         for (let s = 0; s < l; s += 2) {
-          const hs = decks(x0 + (x1 - x0) * s / l, y0 + (y1 - y0) * s / l).filter(([, k]) => k < 100).map(([h]) => h).sort((a, b) => a - b)
+          const hs = decks(x0 + (x1 - x0) * s / l, y0 + (y1 - y0) * s / l, 0.01).filter(([, k]) => k < 100).map(([h]) => h).sort((a, b) => a - b)
           for (let q = 1; q < hs.length; q++) if (hs[q] - hs[q - 1] > 0.001 && hs[q] - hs[q - 1] < 0.03) { add('deck-zfight', x0 + (x1 - x0) * s / l, y0 + (y1 - y0) * s / l, hs[q], hs[q] - hs[q - 1], `two deck strips ${(hs[q] - hs[q - 1]).toFixed(3)} m apart`); break }
         }
       }
