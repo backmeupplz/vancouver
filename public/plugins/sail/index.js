@@ -12,6 +12,7 @@
 import { kit, kitMaterial, repaint } from '../../core/kit.js'
 import { makeWater } from './water.js'
 import { makeGoals, fmtTime } from './goals.js'
+import { want } from './fleet.js'
 import { clamp, smooth, wrap, circleBox } from '../../core/util.js'
 import { typing, buzz, MOVE_KEYS, mapPicker, mapCameraPose, poseOf, dive, streetSky, touchButtons, audioContext, tone, noise } from '../../core/play.js'
 
@@ -201,7 +202,7 @@ export default function sail(city) {
     .sl-tgt .ar { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: rgba(255,210,122,.22); color: #ffd27a; font-size: 13px; transition: transform .12s linear; }
     .sl-tgt.race .ar { background: rgba(255,154,74,.25); color: #ffb37a }
     .sl-tgt b { font-weight: 700 } .sl-tgt .tm { color: #ffd27a; font-weight: 700 }
-    .sl-goals { right: 12px; top: 56px; width: 290px; padding: 12px 14px; pointer-events: auto; }
+    .sl-goals { right: 12px; top: 56px; width: 290px; padding: 12px 14px; pointer-events: auto; max-height: calc(100dvh - 130px); overflow-y: auto; }
     .sl-goals h3 { margin: 0 0 6px; font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; color: #b8c6d0; }
     .sl-goals .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 0; }
     .sl-goals .row small { display: block; color: #b8c6d0; font-size: 11.5px }
@@ -301,8 +302,8 @@ export default function sail(city) {
   city.ui.inMenu?.(goalsBtn); city.ui.inMenu?.(learnBtn)
   q(ui.learn, '[data-ok]').onclick = () => hideLearn()
   let popT = 0, helpT = 0
-  function popup(text) { ui.pop.textContent = text; ui.pop.hidden = false; requestAnimationFrame(() => ui.pop.classList.add('on')); clearTimeout(popT); popT = setTimeout(() => ui.pop.classList.remove('on'), 1600) }
-  const goals = makeGoals(THREE, city, { chime, popup })
+  let popHold = 0 // a long popup (a race's result) isn't talked over by a short one
+  function popup(text, ms = 1600) { const now = performance.now(); if (ms <= 1600 && now < popHold) return; if (ms > 1600) popHold = now + ms; ui.pop.textContent = text; ui.pop.hidden = false; requestAnimationFrame(() => ui.pop.classList.add('on')); clearTimeout(popT); popT = setTimeout(() => ui.pop.classList.remove('on'), ms) }
 
   // ================================================================ state
   const pcam = new THREE.PerspectiveCamera(58, innerWidth / innerHeight, 1, 900)
@@ -317,6 +318,9 @@ export default function sail(city) {
   let hudAt = 0, skyAt = 0, obsAt = 0, fogFar = 850, obs = [], seaMix = 0, playT = 0
   const keys = new Set()
   let seenAt = { surf: -99, plane: -99, gust: -99 }
+  const topSpeed = (ws) => Math.min(VMAX, 0.8 + 0.6 * ws) // m/s at the best angle in this wind
+  const goals = makeGoals(THREE, city, { chime, popup, makeBoat, wind, polar, top: topSpeed, wet })
+  let tgtNow = null, auto = null // tests (?drivedebug): the computer steers the player round the course
 
   const button = city.ui.addButton({ label: 'Sail', icon: '⛵', title: 'Sail a small boat on the real water, in the real wind', onClick: () => startPick(), dock: true })
 
@@ -463,6 +467,9 @@ export default function sail(city) {
     const L = keys.has('ArrowLeft') || keys.has('KeyA') || touchState.left, R = keys.has('ArrowRight') || keys.has('KeyD') || touchState.right
     const up = keys.has('ArrowUp') || keys.has('KeyW') || touchState.trim, dn = keys.has('ArrowDown') || keys.has('KeyS') || touchState.ease
     I.steer = (L ? 1 : 0) - (R ? 1 : 0); I.sheet = (up ? 1 : 0) - (dn ? 1 : 0)
+    if (auto && tgtNow) { auto.x = B.x; auto.z = B.z }
+    if (auto && tgtNow?.slow && B.speed > 1) I.sheet = -1
+    if (auto && tgtNow) I.steer = clamp(wrap(want(auto, tgtNow.x, tgtNow.z, wind, wet, 0.016) - B.h) * 4, -1, 1)
   }
   function sailStep(dt, t) {
     windStep(dt, t)
@@ -484,7 +491,7 @@ export default function sail(city) {
     // speed: towards the polar's for this angle and wind, quicker to build than to fade (tacks carry through); planing
     // past PLANE lifts her a little further, and running down a wave's face pushes her on (surfing)
     const p = polar(B.twa)
-    let target = B.eff * (p * Math.min(VMAX, 0.8 + 0.6 * ws)) - (p === 0 ? 0.4 : 0)
+    let target = B.eff * (p * topSpeed(ws)) - (p === 0 ? 0.4 : 0)
     B.plane += (smooth(PLANE - 0.4, PLANE + 0.8, B.speed) - B.plane) * (1 - Math.exp(-2 * dt))
     target *= 1 + 0.14 * B.plane
     B.speed += (target - B.speed) * (1 - Math.exp(-(target > B.speed ? 0.45 : 0.2) * dt))
@@ -546,6 +553,7 @@ export default function sail(city) {
     obs = []
     try { if (city.ships?.nearby) for (const o of city.ships.nearby(B.x, B.z, 60)) obs.push(o) } catch (e) { console.warn('sail: ships.nearby', e) }
     try { if (city.multiplayer?.nearby) for (const o of city.multiplayer.nearby(B.x, B.z, 40)) obs.push(o) } catch (e) { console.warn('sail: multiplayer.nearby', e) }
+    for (const o of goals.boats()) obs.push(o)
     for (const o of obs) o.at = performance.now()
   }
   function collideObstacles() {
@@ -676,7 +684,7 @@ export default function sail(city) {
     place(time, dt)
     wakeStep(time)
     sprayStep(dt, time)
-    const tgt = goals.step(dt, time, B, seaAt, wet)
+    const tgt = tgtNow = goals.step(dt, time, B, seaAt, wet)
     feel(time)
     publish()
     chasePose(dt)
@@ -693,7 +701,7 @@ export default function sail(city) {
   function feel(t) {
     if (B.surfT > 0.6 && t - seenAt.surf > 25) { seenAt.surf = t; popup('Surfing!'); buzz(20) }
     if (B.plane > 0.7 && t - seenAt.plane > 40) { seenAt.plane = t; popup('Planing!') }
-    if (B.gust > 0.15 && t - seenAt.gust > 30) { seenAt.gust = t; popup('Gust!') }
+    if (B.gust > 0.15 && t - seenAt.gust > 12) { seenAt.gust = t; splash(0.8); buzz(15) } // into a gust: a hiss of spray (goals.js counts the ride)
   }
 
   // ---------------------------------------------------------------- the how-to card: the boat turning through the wind
@@ -729,7 +737,7 @@ export default function sail(city) {
       || pick('trim', `The sail is flapping: trim it in ${kb('trim')}`, B.ideal - B.sheet > 0.2 && I.sheet <= 0 && B.twa > 40)
       || pick('run', 'Dead downwind is slow: head up a little onto a broad reach', B.twa > 168 && B.speed > 0.8, 2)
       || pick('gust', 'A dark ruffled patch on the water is a gust: sail into it for speed', nearGust && B.gust < 0.05, 2)
-      || pick('goals', `Want a goal? Open ${city.ui.compact ? '<b>⋯</b> → ' : ''}<b>Goals</b>${touchy ? '' : ' (<kbd>G</kbd>)'}: race the buoys or collect the sights`, t - playT > 45 && goals.found === 0 && goals.S.mode !== 'race', 1)
+      || pick('goals', `Want a goal? Open ${city.ui.compact ? '<b>⋯</b> → ' : ''}<b>Goals</b>${touchy ? '' : ' (<kbd>G</kbd>)'}: race three rivals round the buoys, dock, or collect the sights`, t - playT > 20 && goals.found === 0 && goals.S.mode !== 'race', 1)
     if (h) {
       if (h[0] !== hint.name && t - hint.at > 1.5) { hint.name = h[0]; hint.at = t; hint.shown[h[0]] = (hint.shown[h[0]] || 0) + 1; showHelp(h[1], city.ui.compact ? 4500 : 0) } // phones: a moment, then out of the way
       hint.quiet = t
@@ -743,15 +751,16 @@ export default function sail(city) {
     ui.goals.innerHTML = `<h3>Sights · ${G.found} of ${G.sights.length}</h3>
       <div class="sights">${G.sights.map((s) => `<span class="${G.has(s.name) ? 'got' : ''}">${s.name}</span>`).join('')}</div>
       <div class="row"><span>Beacon on the nearest sight</span><button data-show>${G.S.show ? 'On' : 'Off'}</button></div>
-      <h3 style="margin-top:8px">Buoy races</h3>
-      ${G.courses.map((c) => `<div class="row"><span>${c.name}<small>${c.pts.length - 1} legs · best ${G.best(c.id) ? fmtTime(G.best(c.id)) : '–'}</small></span><button data-race="${c.id}">${race && G.S.race.c.id === c.id ? 'Restart' : 'Race'}</button></div>`).join('')}
+      <h3 style="margin-top:8px">Regattas · 3 rivals and your ghost</h3>
+      ${G.courses.map((c, i) => `${c.dock && !G.courses[i - 1].dock ? '<h3 style="margin-top:8px">Docking · stop in the ring</h3>' : ''}<div class="row"><span>${G.medal(c.id)} ${c.name}<small>${c.dock ? '' : `${c.pts.length - 1} legs · `}best ${G.best(c.id) ? fmtTime(G.best(c.id)) : '–'}</small></span><button data-race="${c.id}">${race && G.S.race.c.id === c.id ? 'Restart' : c.dock ? 'Dock' : 'Race'}</button></div>`).join('')}
+      <div class="row"><span><small>Gusts ridden ${G.tally.gusts} · sea life spotted ${G.tally.spotted}</small></span></div>
       ${race ? '<div class="row"><span></span><button data-quit>Stop racing</button></div>' : ''}`
     ui.goals.hidden = false; hideLearn()
     q(ui.goals, '[data-show]').onclick = () => { G.S.show = !G.S.show; toggleGoals(); toggleGoals() }
     for (const b of ui.goals.querySelectorAll('[data-race]')) b.onclick = () => {
       const p = G.startRace(b.dataset.race)
       ui.goals.hidden = true; cards()
-      if (p) { teleport(p.x, p.z, p.h); popup('Sail through the start buoy') }
+      if (p) { teleport(p.x, p.z, p.h); popup(G.S.race.c.dock ? 'Through the buoy, then stop at the dock' : 'Through the start buoy: beat the fleet', 3000) }
     }
     const qb = q(ui.goals, '[data-quit]'); if (qb) qb.onclick = () => { G.quitRace(); ui.goals.hidden = true; cards() }
   }
@@ -816,6 +825,7 @@ export default function sail(city) {
   addEventListener('resize', onResize)
   document.addEventListener('visibilitychange', onVis)
 
+  if (location.search.includes('drivedebug')) window.sailDebug = { B, wind, goals, wet, teleport, toggleGoals, set auto(v) { auto = v ? { tack: 0, tackT: 0 } : null } }
   return {
     dispose() {
       cancelPick()

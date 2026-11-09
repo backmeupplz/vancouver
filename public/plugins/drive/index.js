@@ -26,6 +26,7 @@ import { openGarage, taxiGame, specOf, CABS, DRIVERS, makeCab, CSS as TAXI_CSS }
 import { makeBus, setDoors } from './bus.js'
 import { loadLines, loadRoute, picker, busGame, accentOf, CSS as BUS_CSS } from './route.js'
 import { makeWalker, poseWalker } from './walker.js'
+import { makeFoot } from './foot.js'
 import { makeProps, LAMP, STOP, YIELD, BUS, BOLLARD, BENCH } from './props.js'
 import { makeKerbs } from './kerbs.js'
 import { makeFeel } from './feel.js'
@@ -47,6 +48,7 @@ const HIKES = [
   { id: 'grind', name: 'Grouse Grind', from: [49.37109, -123.0982], to: [49.37897, -123.0833], goal: 'the Grind finish at the Grouse chalet', ele: 1127, view: 200, blurb: 'Mother Nature’s Stairmaster: 2.9 km, 850 m up' },
   { id: 'quarry', name: 'Quarry Rock', from: [49.33001, -122.9497], to: [49.3337, -122.93659], goal: 'Quarry Rock lookout over Indian Arm', ele: 100, view: 95, blurb: 'Baden-Powell Trail from Deep Cove: 1.8 km, roots and rock' },
   { id: 'lynn', name: 'Lynn Canyon', from: [49.34372, -123.01913], to: [49.34147, -123.01595], goal: 'Twin Falls bridge', ele: 140, view: 150, blurb: 'Over the suspension bridge, down to the falls: 600 m' },
+  { id: 'seawall', name: 'Seawall run', from: [49.2869, -123.1433], to: [49.30809, -123.15503], goal: 'Siwash Rock lookout', ele: 12, view: 280, blurb: 'English Bay to Siwash Rock past Second and Third Beach, against the clock: 3.3 km, flat' },
   { id: 'siwash', name: 'Stanley Park seawall', from: [49.3027, -123.15653], to: [49.30809, -123.15503], goal: 'Siwash Rock lookout', ele: 12, view: 280, blurb: 'Third Beach to Siwash Rock along the water: 700 m, flat' },
   { id: 'wreck', name: 'Pacific Spirit: Wreck Beach', from: [49.2634, -123.25928], to: [49.26223, -123.26153], goal: 'the beach at the bottom of the stairs', ele: 3, view: 250, blurb: 'Down Trail 6’s 470 stairs through the forest to the sea' },
   { id: 'lighthouse', name: 'Lighthouse Park', from: [49.33656, -123.26265], to: [49.33153, -123.26449], goal: 'the viewpoint by Point Atkinson lighthouse', ele: 25, view: 160, blurb: 'Old-growth firs down to the rocks: 700 m' },
@@ -646,8 +648,8 @@ export default function drive(city) {
   function hideHowTo() { if (ui.how.hidden || ui.how.classList.contains('fade')) return; clearTimeout(howT); if (!onFoot) assistHint(); ui.how.classList.add('fade'); setTimeout(() => { ui.how.hidden = true }, 400) }
   function showHelp() { // the keys, for a few seconds after each change between van and feet (always while delivering)
     ui.help.textContent = taxi ? taxi.help() : game ? 'W gas · S brake (a tap is gentle, hold for more) · A D steer · E doors · H horn · R back on the route · Esc end the shift'
-      : hike ? 'WASD or arrows to walk · Shift to push on (it tires you) · the trail guides you when you let go · Esc to the map'
-      : onFoot ? 'WASD or arrows to walk · Shift to run · E to get in the van · Esc to the map'
+      : hike ? 'WASD or arrows to walk · Shift to push on (it tires you; each quarter mark is a second wind) · the trail guides you when you let go · Esc to the map'
+      : onFoot ? 'WASD or arrows to walk · Shift to run · P camera: snap the landmarks · C sit a while · E van · Esc to the map'
       : `W gas · S brake, hold to reverse · A D steer · Space handbrake · E get out · H horn · R back on the road · Esc map`
     ui.help.hidden = false; ui.help.classList.remove('fade')
     clearTimeout(helpT)
@@ -715,7 +717,7 @@ export default function drive(city) {
       }
       if (b.dataset.m === 'hike') { // the trailheads, then back to the menu
         const log = hikeLog()
-        menuEl.innerHTML = HIKES.map((h) => `<button data-h="${h.id}"><span>⛰️</span><div>${h.name}<small>${h.blurb}</small></div>${log[h.id] ? `<span class="done">✓ ${mmss(log[h.id].best)}</span>` : ''}</button>`).join('') + '<button class="back" data-back>‹ Back</button>'
+        menuEl.innerHTML = HIKES.map((h) => `<button data-h="${h.id}"><span>⛰️</span><div>${h.name}<small>${h.blurb}</small></div>${log[h.id] ? `<span class="done">${foot.medal(h.id) || '✓'} ${mmss(log[h.id].best)}</span>` : ''}</button>`).join('') + '<button class="back" data-back>‹ Back</button>'
         for (const e of menuEl.querySelectorAll('[data-h]')) e.addEventListener('click', () => { closeMenu(); startHike(HIKES.find((h) => h.id === e.dataset.h)) })
         menuEl.querySelector('[data-back]').addEventListener('click', () => { menuEl.innerHTML = menuHTML; menu() })
         return
@@ -792,6 +794,8 @@ export default function drive(city) {
   }
   const yawFromDir = (dir) => dir - Math.PI / 2 // road direction atan2(dy, dx) in (x, north) to a yaw
   const fwdX = (yaw) => -Math.sin(yaw), fwdY = (yaw) => Math.cos(yaw) // forward in (x, north)
+  // photo walk, sitting, hike splits and wildlife (foot.js)
+  const foot = makeFoot(THREE, city, { man, walker, popup, sfx, wallHit, wet: isWater, fwdX, fwdY, hikeSpeed: HIKE, flash() { ui.flash.hidden = false; ui.flash.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => ui.flash.classList.remove('on'))); setTimeout(() => { ui.flash.hidden = true }, 1000) } })
 
   function start(kind, spot, at) {
     deliver = kind === 'deliver'
@@ -832,6 +836,7 @@ export default function drive(city) {
     wblob.visible = onFoot; blob.visible = hasVan; blob2.visible = nsec === 2
     blob.scale.set(car.V.width / 1.8, 1, (car.V.hl * 2 + 0.6) / 4.3); blob2.scale.set(car.V.width / 1.8, 1, ((car.V.rear?.[1] || 0) * 2 + 0.6) / 4.3)
     if (hike) setGoal(hike.gx, hike.gy, 0x7fe0b0, icons.summit)
+    if (onFoot) foot.start(hike)
     if (kind === 'taxi') taxi = taxiGame(taxiCtx(), taxiChoice)
     if (deliver) job = deliveryGame(deliverCtx())
     place()
@@ -920,6 +925,7 @@ export default function drive(city) {
     city.scene.background = saved.bg; city.scene.fog = saved.fog
     if (toGarage) { toGarage = false; setTimeout(showGarage, 0) }
     hike = null; errand = null; job?.dispose(); job = null; vista = 0
+    foot.stop()
     publishPlayer(true)
     document.body.classList.remove('dlv-on', 'dlv-touchy', 'dlv-shot'); document.documentElement.classList.remove('dlv-assist')
     button.button.setAttribute('aria-pressed', 'false')
@@ -1404,6 +1410,7 @@ export default function drive(city) {
     }
     if (errand) return walkErrand(dt)
     if (hike?.photo) { man.speed = 0; return } // posing for the view
+    if (foot.busy(I, dt)) { man.speed = 0; return } // framing a photo, sat down
     man.run = I.run && !(hike && man.winded)
     const tr = hike ? nearestRoad(man.x, man.y, 4, false, true) : null, onTrail = !!tr && tr.d < 0.8
     const target = hike ? hikeSpeed(dt, I, onTrail) : I.up ? (I.run ? RUN : WALK) : I.down ? -WALK * 0.6 : 0
@@ -1462,7 +1469,7 @@ export default function drive(city) {
   // the walker (radius 0.32) out of a circle at (x, y) of radius r: true if it touched
   function push(x, y, r) {
     const dx = man.x - x, dy = man.y - y, d = Math.hypot(dx, dy), m = r + 0.32
-    if (d >= m) return false
+    if (!(d < m)) return false // (a NaN neighbour never pushes: it blacked the view out)
     const k = (m - d) / (d || 1)
     man.x += (d ? dx : 1) * k; man.y += dy * k
     return true
@@ -1565,6 +1572,7 @@ export default function drive(city) {
       walker.position.set(man.x, man.h - 0.05, -man.y)
       walker.rotation.set(0, man.yaw, 0)
       poseWalker(walker, man.phase, clamp(Math.abs(man.speed) / WALK, 0, 1), (man.run || !!errand) && Math.abs(man.speed) > WALK + 0.3, carried.visible)
+      foot.pose(walker)
       wblob.position.set(man.x, man.h + 0.03, -man.y)
     }
   }
@@ -1665,7 +1673,7 @@ export default function drive(city) {
       const cx = man.x - dx * back + dy * side, cy = man.y - dy * back - dx * side
       if (wallHit(man.x, man.y, cx, cy) === 1 && !collide(cx, cy, 3)) { spot = [back, side, 10]; break }
     }
-    hike.photo = { t0: now, shot: false, secs, best: best && prev, from: chase.pos.clone(), look: chase.look.clone(), h: man.h, spot }
+    hike.photo = { t0: now, shot: false, secs, best: best && prev, medal: foot.summit(hike, secs), from: chase.pos.clone(), look: chase.look.clone(), h: man.h, spot }
     keys.clear()
   }
   // the camera pulls back and up beside the hiker, over the view (they stand at the left of it), then a photo
@@ -1689,7 +1697,7 @@ export default function drive(city) {
     ui.flash.hidden = false; ui.flash.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => ui.flash.classList.remove('on')))
     setTimeout(() => { ui.flash.hidden = true }, 1000)
     document.body.classList.add('dlv-shot')
-    ui.photo.innerHTML = `<div class="t">${esc(hike.name)}</div><div class="s">${esc(cap(hike.goal))} · ${Math.round(F.h)} m${hike.climb > 20 ? ` · climbed ${Math.round(hike.climb)} m` : ''}${F.secs ? ` · ${mmss(F.secs)}${F.best ? ' · a new best!' : ''}` : ''}</div>
+    ui.photo.innerHTML = `<div class="t">${esc(hike.name)}</div><div class="s">${esc(cap(hike.goal))} · ${Math.round(F.h)} m${hike.climb > 20 ? ` · climbed ${Math.round(hike.climb)} m` : ''}${F.secs ? ` · ${mmss(F.secs)}${F.best ? ' · a new best!' : ''}${F.medal ? ` · ${F.medal}` : ''}` : ''}</div>
       <div class="row"><button data-k>Keep exploring</button><button data-x>Back to map</button></div>`
     ui.photo.hidden = false; requestAnimationFrame(() => ui.photo.classList.add('on'))
     ui.photo.querySelector('[data-k]').onclick = () => { ui.photo.classList.remove('on'); ui.photo.hidden = true; document.body.classList.remove('dlv-shot'); hike.photo = null; vista = 0; atmosphere(1) }
@@ -1736,6 +1744,7 @@ export default function drive(city) {
     pcam.position.copy(chase.pos)
     if (shake > 0.001) { pcam.position.x += (Math.random() - 0.5) * shake; pcam.position.y += (Math.random() - 0.5) * shake; shake *= Math.exp(-10 * dt) }
     pcam.up.set(0, 1, 0); pcam.lookAt(chase.look)
+    foot.frame(dt, now, pcam, hike, onFoot && !errand && !man.board)
     const P = body(), ahead = onFoot ? 60 : 180
     opts.focus.set(P.x + fwdX(P.yaw) * ahead, P.h, -(P.y + fwdY(P.yaw) * ahead))
     opts.radius = 900; opts.shadowRadius = 300
@@ -1830,6 +1839,9 @@ export default function drive(city) {
       const sp = Math.abs(P.speed) * 3.6, gear = onFoot ? '' : ` · ${car.gear < 0 ? 'R' : `D${car.gear}`}`
       const dr = onFoot ? '' : drift.m > 4 ? ` <span class="gain">· Drift ${Math.round(drift.m)} m</span>` : performance.now() < drift.show ? ` <span class="gain">· ${drift.text}</span>` : ''
       ui.read.innerHTML = `<b>${Math.round(sp)}</b> km/h${gear}${dr}${name ? ` <span class="st">· ${esc(name)}</span>` : ''}`
+      const c = onFoot && !man.board && foot.card() // a free walk: the photo walk's card
+      ui.job.hidden = !c
+      if (c) { ui.w.textContent = c.title; ui.p.textContent = c.line; ui.s.textContent = c.sub; ui.d.textContent = ui.t.textContent = ''; compass(c.target) }
       return
     }
     ui.job.hidden = false
@@ -1865,6 +1877,7 @@ export default function drive(city) {
     if (state !== 'play') return
     if (CONTROL.has(e.code)) { keys.add(e.code); e.preventDefault() }
     if (e.repeat) return
+    if (onFoot && !errand && !man.board && foot.key(e.code)) { e.preventDefault(); return }
     if (e.code === 'KeyE') { if (taxi) return; if (game) game.action(); else if (errand) hurry(); else toggleFoot() }
     else if (e.code === 'KeyR' && !onFoot) resetToRoad()
     else if (e.code === 'KeyH' && !onFoot) hornOn()
@@ -1890,6 +1903,7 @@ export default function drive(city) {
     dispose() {
       cancelPick()
       garage?.close(); garage = null
+      foot.dispose()
       if (state !== 'off') { traffic()?.setObstacle('player-van', null); traffic()?.setObstacle('player-walker', null); taxi?.dispose(); taxi = null; state = 'out'; finish() }
       for (const f of offTiles) f()
       removeEventListener('keydown', onKey); removeEventListener('keyup', onKeyUp); removeEventListener('blur', onBlur); removeEventListener('resize', onResize)

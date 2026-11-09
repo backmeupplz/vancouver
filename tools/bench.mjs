@@ -1,8 +1,8 @@
-// node tools/bench.mjs [--dpr 2] [--tier high|low] [--cpu 4] [--secs 20] [--res 0.6] map|drive|sail (--res pins the adaptive resolution)
+// node tools/bench.mjs [--dpr 2] [--tier high|low] [--cpu 4] [--secs 20] [--res 0.6] [--race 1] map|drive|sail (--res pins the adaptive resolution; --race: sail in a regatta)
 // One JSON line: {p50,p95,p99,over33,frames,tris,calls,gpuMs?}. map = continuous pan at #13645,11243,0.1295;
 // drive = autopilot in a van downtown; sail = sailing in English Bay. Frame times are unlocked (no vsync).
 import { args, server, open, settle } from './pw.mjs'
-const [o, [mode = 'map']] = args(process.argv.slice(2), { dpr: 2, tier: 'high', cpu: 1, secs: 20, res: 0 })
+const [o, [mode = 'map']] = args(process.argv.slice(2), { dpr: 2, tier: 'high', cpu: 1, secs: 20, res: 0, race: '' })
 const srv = await server(o.port)
 const init = () => { // per-frame dt via rAF, GPU time via timer query on renderer.render
   const P = (window.__b = { dts: [], last: 0, on: false, gpu: [], pend: [] }), raf = window.requestAnimationFrame.bind(window)
@@ -52,6 +52,7 @@ if (mode === 'drive') { // downtown W Georgia, then pure-pursuit autopilot on dr
   const [x, y] = await page.evaluate(([la, lo]) => { const p = city.world.fromLatLon(la, lo).project(city.camera); return [(p.x + 1) / 2 * innerWidth, (1 - p.y) / 2 * innerHeight] }, [la, lo])
   await page.mouse.click(x, y); await page.waitForTimeout(4500)
   await page.keyboard.down('KeyW'); await page.waitForTimeout(800); await page.keyboard.up('KeyW')
+  if (o.race) { await page.keyboard.press('KeyG'); await page.click('[data-race]'); await page.waitForTimeout(30000) } // a regatta under way: 3 rivals
 }
 if (+o.res) await page.evaluate((r) => { view.res = r }, +o.res)
 if (+o.cpu > 1) await (await ctx.newCDPSession(page)).send('Emulation.setCPUThrottlingRate', { rate: +o.cpu })
