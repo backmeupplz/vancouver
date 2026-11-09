@@ -3,7 +3,7 @@
 // Walls by what they face and the single-arm street lights follow Slop Toronto's rules (MIT, © 2026 Mr.doob, © 2026 John
 // Fewell; THIRD_PARTY.md).
 import earcut, { refine as delaunay } from '../vendor/earcut.js'
-import { mulberry32 as mulberry, inPoly, sampleGrid } from './util.js'
+import { mulberry32 as mulberry, inPoly, sampleGrid, wallGrid, wallHeight } from './util.js'
 const GROUND_LIFT = 0 // the ground is one non-overlapping layer (tools/tiles.py), so no class needs lifting
 const KIND = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living', 'pedestrian', 'footway', 'cycleway',
   'path', 'steps', 'track', 'rail', 'lightrail', 'runway', 'taxiway']
@@ -143,6 +143,17 @@ function terrain(t) {
     for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) e[(j + M) * N + i + M] = h[j * n + i]
     out.ext = { n: N, h: e, size: t.size + 2 * M * c, off: M * c }
   }
+  const w = t.sections.SEAW // the seawalls (tools/tiles.py seawall_section): the ground on their walks, the water at their feet
+  if (w) {
+    const dv = t.dv, nr = dv.getUint32(w.off, true), P = [], starts = [0]
+    let o = w.off + 4
+    for (let r = 0; r < nr; r++) {
+      const n = dv.getUint32(o, true); o += 4
+      for (let i = 0; i < n; i++, o += 11) P.push(dv.getInt16(o, true) * t.k, dv.getInt16(o + 2, true) * t.k, dv.getInt16(o + 4, true) / 100, dv.getInt16(o + 6, true) / 100, dv.getUint8(o + 8) / 10, dv.getUint8(o + 9) / 255, dv.getUint8(o + 10))
+      starts.push(P.length / 7)
+    }
+    out.wall = wallGrid(Float32Array.from(P), starts)
+  }
   return out
 }
 // surface normals from the terrain's slope (cheaper than averaging faces, and the same across tile edges)
@@ -157,12 +168,13 @@ function normals(terr, pos) {
   }
   return n
 }
-const heightAt = (terr, x, y) => sampleGrid(terr.h, terr.n, terr.size, x, y) // tile-local metres, y north
+// the drawn ground at tile-local (x, y north): the terrain, and the seawalls' walks and feet (low: core/util.js wallHeight)
+const heightAt = (terr, x, y, low) => { const g = sampleGrid(terr.h, terr.n, terr.size, x, y); return terr.wall ? wallHeight(terr.wall, g, x, y, low) : g }
 // the ground at tile-local (x, y) on past the tile's edge (a decal, a building reaching into the next tile): the next
 // tiles' terrain (terr.ext, tools/tiles.py margins()), else carried on on the slope at the edge
 function groundOut(terr, x, y) {
   const e = terr.ext
-  if (e) return sampleGrid(e.h, e.n, e.size, x + e.off, y + e.off)
+  if (e) { const g = sampleGrid(e.h, e.n, e.size, x + e.off, y + e.off); return terr.wall ? wallHeight(terr.wall, g, x, y) : g }
   const S = terr.size, cx = Math.min(S, Math.max(0, x)), cy = Math.min(S, Math.max(0, y)), h = heightAt(terr, cx, cy)
   const gx = cx === x ? 0 : (h - heightAt(terr, cx - Math.sign(x - cx) * 4, cy)) / 4, gy = cy === y ? 0 : (h - heightAt(terr, cx, cy - Math.sign(y - cy) * 4)) / 4
   return h + gx * Math.abs(x - cx) + gy * Math.abs(y - cy)
@@ -193,7 +205,7 @@ function ground(t, terr, level) {
   // looks at the edge alone, so both triangles that share an edge split it alike (no cracks; where polygons meet, a gap
   // is under tol); slopes and flat ground keep big triangles (an 8 m grid split everywhere was ~3x the triangles for the same picture).
   const cell = t.size / (terr.n - 1), cap = hmax - hmin < 2 ? Infinity : cell * 4
-  const hz = (x, y, c) => { const h = heightAt(terr, x, y); return c === PIER ? Math.max(h, 0.45) : h }
+  const hz = (x, y, c) => { const h = heightAt(terr, x, y, c === WATER || c === SAND); return c === PIER ? Math.max(h, 0.45) : h }
   const bends = (ax, ay, bx, by, c, tol) => {
     if (ax > bx || (ax === bx && ay > by)) return bends(bx, by, ax, ay, c, tol) // one way along an edge, whichever side asks
     const L = Math.hypot(bx - ax, by - ay)
@@ -444,7 +456,7 @@ function weld(rings, size, tol) {
 }
 
 // detail tiles: a WATER_N x WATER_N mask (1 = water), cell (i east, j north) from the tile's SW corner
-const WATER_N = 256, WATER = 19, PIER = 20 // GROUND class indices of water and piers (tools/tiles.py)
+const WATER_N = 256, WATER = 19, PIER = 20, SAND = 10 // GROUND class indices of water, piers and sand (tools/tiles.py)
 function water(t) { const m = raster(t, new Set([WATER]), WATER_N); return m && { n: WATER_N, mask: m } }
 // and a 1 m mask of the carriageways and cycle tracks as drawn (bits, row-major from the SW corner): street furniture
 // stands outside it (city.world.offRoad)
@@ -1084,6 +1096,7 @@ function buildings(t, terr, level, lines, carriage) {
   if (!s) return {}
   if (level === 0) tubes(W, lines)
   if (level === 0) railings(W, Bal, lines, terr) // (a road on a roof has the building's parapet)
+  if (level === 0 && terr.wall) seawalls(W, Bal, terr.wall, terr)
   const dv = t.dv
   let o = s.off
   const n = dv.getUint32(o, true); o += 4
@@ -1567,6 +1580,38 @@ function railings(W, Bal, lines, terr) {
     }
   }
 }
+// the seawalls (tools/seawall.py, terrain()'s wall): a stone face from the walk's edge (the drawn ground on top) down
+// past the water or sand at its foot, a coping stone along its top, and a railing on it where OSM maps one. Its own
+// tile's stretch only (the pieces reach 60 m past it for the ground)
+const STONE = lin(0x9d978b), COPING = lin(0xc8c2b4), SW_FACE = 18 // materials.js pattern 18: stone courses
+function seawalls(W, Bal, WL, terr) {
+  const P = WL.P, R = WL.runs, inside = (x, y) => x >= 0 && y >= 0 && x <= terr.size && y <= terr.size
+  for (let r = 0; r < R.length - 1; r++) {
+    const n = R[r + 1] - R[r], o = R[r], xy = new Float32Array(n * 2)
+    for (let i = 0; i < n; i++) { xy[i * 2] = P[(o + i) * 7]; xy[i * 2 + 1] = P[(o + i) * 7 + 1] }
+    const side = sides(xy), top = [], low = []
+    for (let i = 0; i < n; i++) { top.push(heightAt(terr, xy[i * 2], xy[i * 2 + 1], false)); low.push(heightAt(terr, xy[i * 2], xy[i * 2 + 1], true)) }
+    const at = (i, off, y) => [xy[i * 2] + side[i][0] * off, y, -(xy[i * 2 + 1] + side[i][1] * off)]
+    let u = 0
+    for (let i = 0; i < n - 1; i++) {
+      const j = i + 1, len = Math.hypot(xy[j * 2] - xy[i * 2], xy[j * 2 + 1] - xy[i * 2 + 1]); u += len
+      const mx = (xy[i * 2] + xy[j * 2]) / 2, my = (xy[i * 2 + 1] + xy[j * 2 + 1]) / 2
+      if (!inside(mx, my) || Math.max(top[i] - low[i], top[j] - low[j]) < 0.3) continue
+      const nx = side[i][0] + side[j][0], ny = side[i][1] + side[j][1], l = Math.hypot(nx, ny) || 1, out = [-nx / l, 0, ny / l], up = [0, 1, 0], inw = [nx / l, 0, -ny / l]
+      const c0 = top[i] + 0.06, c1 = top[j] + 0.06, f0 = Math.min(low[i], top[i] - 0.3) - 0.8, f1 = Math.min(low[j], top[j] - 0.3) - 0.8, seed = (o + i) % 7 / 7
+      const sw = (uu, z) => [SW_FACE, uu, z, seed]
+      // (the face just out past the cut in the ground along the line, tools/tiles.py; the coping over the cut)
+      quad(W, at(i, -0.22, f0), at(j, -0.22, f1), at(j, -0.22, c1), at(i, -0.22, c0), STONE, out, sw(u - len, f0), sw(u, f1), sw(u, c1), sw(u - len, c0))
+      quad(W, at(i, -0.25, c0), at(j, -0.25, c1), at(j, 0.45, c1), at(i, 0.45, c0), COPING, up, ROOFW(0.5))
+      quad(W, at(i, -0.25, c0 - 0.12), at(j, -0.25, c1 - 0.12), at(j, -0.25, c1), at(i, -0.25, c0), COPING, out, ROOFW(0.5))
+      quad(W, at(i, 0.45, top[i] - 0.05), at(j, 0.45, top[j] - 0.05), at(j, 0.45, c1), at(i, 0.45, c0), COPING, inw, ROOFW(0.5))
+      if (P[(o + i) * 7 + 6] && P[(o + j) * 7 + 6]) {
+        const rw = (uu, h) => [12, uu, h, 0.5] // materials.js pattern 12 (railings())
+        for (const want of [out, inw]) quad(Bal, at(i, 0.2, c0), at(j, 0.2, c1), at(j, 0.2, c1 + 1.1), at(i, 0.2, c0 + 1.1), RAILING, want, rw(u - len, 0.06), rw(u, 0.06), rw(u, 1.16), rw(u - len, 1.16))
+      }
+    }
+  }
+}
 // tunnels (tools/tiles.py tunnel_profiles): a dark tube round the road all the way (seen from both sides, so a chase
 // camera that swings out of it on a bend sees its walls), and where the bake cut the ground near a portal its concrete
 // box, roof flush with the ground, and at the portal a face with the opening in it
@@ -1793,8 +1838,9 @@ function boats(t, terr) {
 
 // ---------------------------------------------------------------- the beaches: driftwood logs, lifeguard towers, volleyball nets
 // the LOGS section (tools/tiles.py beach_bits: x, north, angle 1/256 turn, length 1/10 m, diameter 1/100 m, kind: 0-7 a
-// log, +4 with a root ball; 16 a lifeguard tower; 17 a net) -> { d: 8 floats each (tile-local x, height of the ground
+// log, +4 with a root ball; 16 a lifeguard tower; 17 a net; 18-22 a picnic table, bin, stand, washroom, fountain) -> { d: 8 floats each (tile-local x, height of the ground
 // under its middle, z, angle (from east towards north), length, diameter, kind, rise from end to end), solid: boxes } or null
+const KIT_HALF = { 18: [0.9, 0.85], 19: [0.33, 0.33], 20: [2.2, 2.5], 21: [2.2, 3.2], 22: [0.2, 0.2] } // the beach things' footprints (tools/seawall.py KIT_SIZE / 2)
 function beach(t, terr) {
   const s = t.sections.LOGS
   if (!s) return null
@@ -1802,10 +1848,11 @@ function beach(t, terr) {
   for (let i = 0, o = s.off + 4; i < n; i++, o += 8) {
     const x = dv.getInt16(o, true) * t.k, y = dv.getInt16(o + 2, true) * t.k, a = (dv.getUint8(o + 4) / 256) * Math.PI * 2
     const len = dv.getUint8(o + 5) / 10, dia = dv.getUint8(o + 6) / 100, kind = dv.getUint8(o + 7), ex = (Math.cos(a) * len) / 2, ey = (Math.sin(a) * len) / 2
-    const h0 = heightAt(terr, x - ex, y - ey), h1 = heightAt(terr, x + ex, y + ey)
+    const h0 = heightAt(terr, x - ex, y - ey, true), h1 = heightAt(terr, x + ex, y + ey, true) // (a log lies on the sand at a wall's foot)
     d.set([x, Math.max(0, kind < 16 ? (h0 + h1) / 2 : heightAt(terr, x, y)), -y, a, len, dia, kind, kind < 16 ? h1 - h0 : 0], i * 8)
     if (kind < 16) solid.push([x, y, a, len / 2, dia / 2])
     else if (kind === 16) solid.push([x, y, a, 1.1, 1.1])
+    else if (KIT_HALF[kind]) solid.push([x, y, a, ...KIT_HALF[kind]])
   }
   return n ? { d, solid } : null
 }

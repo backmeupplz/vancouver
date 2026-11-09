@@ -5,7 +5,7 @@ import * as THREE from 'three'
 import { FAMILY, night } from './materials.js'
 import { kit, kitMaterial } from './kit.js'
 import { FORMS, ASPECT } from './treeforms.js'
-import { sampleGrid } from './util.js'
+import { sampleGrid, wallHeight } from './util.js'
 
 const SIZES = [1024, 4096]
 const ij = (level, i, j) => (level * 4096 + i + 2048) * 4096 + j + 2048 // a tile's number (|i|, |j| < 2048)
@@ -122,9 +122,26 @@ function beachGeos() {
   n.c(0x2c2e30).box(-4.5, 4.5, 1.5, 2.37, -0.015, 0.015)
   n.c(0xf4f2ee).box(-4.5, 4.5, 2.37, 2.43, -0.02, 0.02)
   const net = n.geometry(true)
-  for (const g of [log, roots, tower, net]) g.userData.shared = true
-  return { log, roots, tower, net }
+  // the rest of a day at the beach (tools/seawall.py amenities: OSM's, facing +x): a picnic table, a bin, a
+  // concession stand (white board walls, a teal roof and a striped awning over its counter on +x), a washroom block
+  // (concrete, a flat roof over its doors), a drinking fountain
+  const wood = 0x9a7656, p = kit(THREE).c(wood)
+  p.box(-0.9, 0.9, 0.72, 0.78, -0.4, 0.4).box(-0.9, 0.9, 0.42, 0.47, 0.55, 0.85).box(-0.9, 0.9, 0.42, 0.47, -0.85, -0.55)
+  for (const x of [-0.7, 0.7]) p.c(0x7a5c42).rod([x, 0, -0.75], [x, 0.75, 0.05], 0.05).rod([x, 0, 0.75], [x, 0.75, -0.05], 0.05)
+  const table = p.geometry(true)
+  const bk = kit(THREE).c(0x3d5c48).cyl(0.3, 0.3, 0.95, 8, 3), lid = bk.at(), bin = bk.c(0x2c3a32).cyl(0.33, 0.33, 0.06, 8, 3).move(lid, 0, 0.95, 0).geometry(true)
+  const st = kit(THREE).c(0xefe9dc).box(-1.6, 1.6, 0, 2.7, -2.2, 2.2).c(0x4f8c84).box(-1.9, 1.9, 2.7, 3.0, -2.5, 2.5)
+  st.c(0x3a3c3e).box(1.6, 1.64, 1.0, 2.0, -1.8, 1.8).c(0xd8cdb8).box(1.6, 2.2, 0.95, 1.05, -1.9, 1.9) // the counter's window, the counter
+  for (let i = 0; i < 6; i++) st.c(i % 2 ? 0xf4f2ee : 0x4f8c84).box(1.6, 2.6, 2.3, 2.36, -1.8 + i * 0.6, -1.2 + i * 0.6) // awning stripes
+  const stand = st.geometry(true)
+  const wc = kit(THREE).c(0xbdb6a8).box(-1.8, 1.8, 0, 2.8, -2.8, 2.8).c(0x8c9294).box(-2.2, 2.2, 2.8, 3.05, -3.2, 3.2)
+  wc.c(0x4a5a66).box(1.8, 1.84, 0, 2.1, -2.2, -1.3).box(1.8, 1.84, 0, 2.1, 1.3, 2.2) // the doors
+  const washroom = wc.geometry(true)
+  const fountain = kit(THREE).c(0x6c7c84).cyl(0.14, 0.17, 0.9, 7, 3).c(0x8a9aa2).box(-0.2, 0.2, 0.86, 0.95, -0.2, 0.2).geometry(true)
+  for (const g of [log, roots, tower, net, table, bin, stand, washroom, fountain]) g.userData.shared = true
+  return { log, roots, tower, net, table, bin, stand, washroom, fountain }
 }
+const BEACH_KIT = { 18: 'table', 19: 'bin', 20: 'stand', 21: 'washroom', 22: 'fountain' } // LOGS kinds past the net (tools/seawall.py KIT)
 const DRIFT = [0xb9b5ad, 0xc4c0b8, 0xaaa59c, 0xa89a88, 0xcfcac0, 0x9c968c] // sun-bleached silver-grey, a few browner
 
 export class Tiles {
@@ -534,6 +551,8 @@ export class Tiles {
     const count = (f) => { let m = 0; for (let i = 0; i < n; i++) if (f(B[i * 8 + 6])) m++; return m }
     const im = (geo, m, shadow = true) => { const o = new THREE.InstancedMesh(geo, this.carMat, m); o.castShadow = shadow; o.receiveShadow = true; o.count = 0; return o }
     const logs = im(G.log, count((k) => k < 16)), roots = im(G.roots, count((k) => k < 16 && k & 4), false), tower = im(G.tower, count((k) => k === 16)), net = im(G.net, count((k) => k === 17), false)
+    const kitM = {}
+    for (const [k, name] of Object.entries(BEACH_KIT)) kitM[k] = im(G[name], count((v) => v === +k), name === 'stand' || name === 'washroom')
     for (let i = 0; i < n; i++) {
       const x = B[i * 8], h = B[i * 8 + 1], z = B[i * 8 + 2], a = B[i * 8 + 3], len = B[i * 8 + 4], dia = B[i * 8 + 5], kind = B[i * 8 + 6], rise = B[i * 8 + 7]
       const seed = Math.abs(Math.sin(x * 12.9898 + z * 78.233) * 43758.5453) % 1
@@ -547,12 +566,14 @@ export class Tiles {
           M.compose(p.set(x + (Math.cos(a) * len) / 2, h + rise / 2 + dia * 0.45, z - (Math.sin(a) * len) / 2), q, sc.setScalar(dia * 2.2))
           roots.setMatrixAt(roots.count, M); roots.setColorAt(roots.count++, c.setHex(DRIFT[Math.floor(seed * DRIFT.length)]))
         }
-      } else {
+      } else if (kitM[kind]) {
+        kitM[kind].setMatrixAt(kitM[kind].count++, M.compose(p.set(x, h, z), q, sc.set(1, 1, 1)))
+      } else if (kind === 16 || kind === 17) {
         const o = kind === 16 ? tower : net
         o.setMatrixAt(o.count++, M.compose(p.set(x, h, z), q, sc.set(kind === 17 ? len / 9.5 : 1, 1, 1)))
       }
     }
-    const out = [logs, roots, tower, net].filter((o) => o.count)
+    const out = [logs, roots, tower, net, ...Object.values(kitM)].filter((o) => o.count)
     for (const o of out) { o.matrixAutoUpdate = false; o.computeBoundingSphere() }
     return out
   }
@@ -698,7 +719,7 @@ export class Tiles {
   heightAt(x, y) {
     for (let level = 0; level < 2; level++) {
       const s = SIZES[level], t = this.byIJ.get(ij(level, Math.floor(x / s), Math.floor(y / s)))
-      if (t?.terrain) return sampleGrid(t.terrain.h, t.terrain.n, s, x - t.ox, y - t.oy)
+      if (t?.terrain) { const T = t.terrain, g = sampleGrid(T.h, T.n, s, x - t.ox, y - t.oy); return T.wall ? wallHeight(T.wall, g, x - t.ox, y - t.oy) : g } // (the seawalls' walks: core/util.js)
     }
     const g = this.coarse
     if (!g) return 0

@@ -636,7 +636,7 @@ export default function life(city) {
     for (const [k, t] of tiles) {
       if (sent.has(k) || !t.graph || !(near(t, simA.x, simA.y, simA.r) || near(t, pedA.vx, pedA.vy, pedA.vr))) continue
       sent.add(k)
-      add.push({ key: k, level: t.level, ox: t.ox, oy: t.oy, size: t.level ? 4096 : 1024, terrain: { n: t.terrain.n, h: t.terrain.h },
+      add.push({ key: k, level: t.level, ox: t.ox, oy: t.oy, size: t.level ? 4096 : 1024, terrain: { n: t.terrain.n, h: t.terrain.h, wall: t.terrain.wall },
         pieces: t.graph.pieces.filter((p) => p.kind <= 13), pois: (t.graph.pois || []).filter((q) => q.kind !== 3) })
     }
     for (const k of sent) {

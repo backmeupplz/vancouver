@@ -117,7 +117,28 @@ function tileH(t, x, y) {
   const { n, h } = t.terrain, size = t.size, c = size / (n - 1)
   const fx = Math.min(n - 1.0001, Math.max(0, (x - t.ox) / c)), fy = Math.min(n - 1.0001, Math.max(0, (size - (y - t.oy)) / c))
   const i = fx | 0, j = fy | 0, u = fx - i, v = fy - j
-  return h[j * n + i] * (1 - u) * (1 - v) + h[j * n + i + 1] * u * (1 - v) + h[(j + 1) * n + i] * (1 - u) * v + h[(j + 1) * n + i + 1] * u * v
+  const g = h[j * n + i] * (1 - u) * (1 - v) + h[j * n + i + 1] * u * (1 - v) + h[(j + 1) * n + i] * (1 - u) * v + h[(j + 1) * n + i + 1] * u * v
+  return t.terrain.wall ? wallH(t.terrain.wall, g, x - t.ox, y - t.oy) : g
+}
+// the seawalls' walks over the terrain (core/util.js wallHeight, copied: this classic worker can't import it)
+function wallH(W, g, x, y) {
+  const M = 34, c = Math.max(0, Math.min(M - 1, Math.floor(y / 32) + 1)) * M + Math.max(0, Math.min(M - 1, Math.floor(x / 32) + 1)), P = W.P, N = W.N
+  let d1 = 28, h1 = g, d2 = 28, h2 = g, run = -1, rd = 28, rh = g
+  const done = () => { if (rd < d1) { d2 = d1; h2 = h1; d1 = rd; h1 = rh } else if (rd < d2) { d2 = rd; h2 = rh } }
+  for (let q = W.start[c]; q < W.start[c + 1]; q++) {
+    const i = W.seg[W.idx[q]], r = W.segRun[W.idx[q]]
+    if (r !== run) { done(); run = r; rd = 28; rh = g }
+    const a = i * 7, b = a + 7, ax = P[a], ay = P[a + 1], dx = P[b] - ax, dy = P[b + 1] - ay, L2 = dx * dx + dy * dy || 1e-9
+    const u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2)), dist = Math.hypot(x - ax - dx * u, y - ay - dy * u)
+    if (dist >= rd) continue
+    rd = dist
+    const sd = u <= 0 ? (x - ax) * N[i * 2] + (y - ay) * N[i * 2 + 1] : u >= 1 ? (x - P[b]) * N[i * 2 + 2] + (y - P[b + 1]) * N[i * 2 + 3] : dx * (y - ay) - dy * (x - ax)
+    const d = sd < 0 ? -dist : dist, lerp = (o) => P[a + o] + (P[b + o] - P[a + o]) * u, F = lerp(5)
+    rh = d > -0.2 ? g + (lerp(2) - g) * Math.max(0, Math.min(1, 1 - (d - lerp(4)) / 6)) * F : g + (lerp(3) - g) * Math.max(0, Math.min(1, 1 - (-d - 2) / 8)) * F
+  }
+  done()
+  const t = Math.min(1, (d2 - d1) / 3)
+  return h1 + (h2 - h1) * 0.5 * (1 - t * t * (3 - 2 * t))
 }
 function groundH(x, y) {
   const t = tiles.get(`0/${Math.floor(x / 1024)}_${Math.floor(y / 1024)}`) || tiles.get(`1/${Math.floor(x / 4096)}_${Math.floor(y / 4096)}`)

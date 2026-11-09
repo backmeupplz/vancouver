@@ -389,6 +389,15 @@ export function buildingMaterial(far = false) {
           if (dp > max(0.04, fu * 0.6) && z < 1.12 - fz && abs(z - 0.75) > bar && abs(z - 0.45) > bar) discard;
           style = 0.0; z = 999.0;
         }
+        if (style == 18.0) { // seawall stone (tile-worker.js seawalls): u along, z the height; courses of 0.5 m, blocks of
+          // 1.2 m staggered, each its own tone, and the dark band the tides leave along the foot
+          vec2 g = vec2(u / 1.2 + 0.5 * floor(z / 0.5), z / 0.5), fw = max(fwidth(g), vec2(1e-4)), f = fract(g);
+          float joint = 1.0 - box(f, vec2(0.04), vec2(0.96), fw), detail = clamp(1.6 - 2.5 * max(fw.x, fw.y), 0.0, 1.0);
+          vec3 c = base * (0.88 + 0.22 * hash(floor(g) + seed * 17.0));
+          c = mix(c, c * vec3(0.55, 0.6, 0.55), smoothstep(1.5, 0.9, z));
+          diffuseColor.rgb = mix(mix(base, base * vec3(0.7, 0.74, 0.7), smoothstep(1.5, 0.9, z)), mix(c, base * 0.68, joint), detail);
+          style = 0.0; z = 999.0;
+        }
         vec3 roofGlow = vec3(0.0);
         float doorM = 0.0;
         if (style > 12.5) { // rooftops (tile-worker.js rooftop): 13 pool water, 14 solar panels, 15 a planted roof

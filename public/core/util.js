@@ -30,6 +30,61 @@ export function sampleGrid(h, n, size, x, y) {
   return h[j * n + i] * (1 - u) * (1 - v) + h[j * n + i + 1] * u * (1 - v) + h[(j + 1) * n + i] * (1 - u) * v + h[(j + 1) * n + i + 1] * u * v
 }
 
+// The seawalls over a detail tile (tools/seawall.py, the SEAW section, tile-worker.js terrain()): the ground on top of
+// a wall's walk up to its reach and the water or sand at its foot, the terrain's 8 m grid can't step. P: per point
+// [x, y north (tile-local), top, foot, reach, end weight (0 at a run's ends), rail], 7 floats each; starts: each run's
+// first point, then the total. -> { seg, start, idx } segments in 32 m cells over the tile (tools/seawall.py height())
+const WALL_C = 32, WALL_N = 34, WALL_R = 28 // cell, cells across (one past each edge), the furthest a wall reaches (REACH + 4 + B_IN)
+export function wallGrid(P, starts) {
+  const seg = []
+  for (let r = 0; r < starts.length - 1; r++) for (let i = starts[r]; i < starts[r + 1] - 1; i++) seg.push(i)
+  const lists = Array.from({ length: WALL_N * WALL_N }, () => [])
+  const cell = (v) => Math.max(0, Math.min(WALL_N - 1, Math.floor(v / WALL_C) + 1))
+  seg.forEach((i, k) => {
+    const a = i * 7, b = a + 7
+    for (let u = cell(Math.min(P[a], P[b]) - WALL_R); u <= cell(Math.max(P[a], P[b]) + WALL_R); u++)
+      for (let v = cell(Math.min(P[a + 1], P[b + 1]) - WALL_R); v <= cell(Math.max(P[a + 1], P[b + 1]) + WALL_R); v++) lists[v * WALL_N + u].push(k)
+  })
+  const start = new Int32Array(lists.length + 1)
+  lists.forEach((l, c) => { start[c + 1] = start[c] + l.length })
+  const N = new Float32Array((P.length / 7) * 2) // per point its normal to the walk's side, at a corner between its segments' (tools/seawall.py vnormals)
+  for (let r = 0; r < starts.length - 1; r++) for (let i = starts[r]; i < starts[r + 1] - 1; i++) {
+    const dx = P[i * 7 + 7] - P[i * 7], dy = P[i * 7 + 8] - P[i * 7 + 1], l = Math.hypot(dx, dy) || 1e-9
+    N[i * 2] -= dy / l; N[i * 2 + 1] += dx / l; N[i * 2 + 2] -= dy / l; N[i * 2 + 3] += dx / l
+  }
+  for (let i = 0; i < N.length; i += 2) { const l = Math.hypot(N[i], N[i + 1]) || 1e-9; N[i] /= l; N[i + 1] /= l }
+  const segRun = new Int32Array(seg.length)
+  for (let k = 0, r = 0; k < seg.length; k++) { while (seg[k] >= starts[r + 1]) r++; segRun[k] = r }
+  return { P, N, runs: Int32Array.from(starts), seg: Int32Array.from(seg), segRun, start, idx: Int32Array.from(lists.flat()) }
+}
+// the drawn ground at tile-local (x, y) over the terrain's g there (tools/seawall.py height(), the same numbers): low
+// true for the ground classes at a wall's foot (water, sand) and what lies on them, else the walk's side (to 0.2 m out
+// over the wall's line: tools/tiles.py cuts the ground there, under the face)
+const B_IN = 6, LOW = 2, LOW_B = 8, FADE = 3
+export function wallHeight(W, g, x, y, low) {
+  const c = Math.max(0, Math.min(WALL_N - 1, Math.floor(y / WALL_C) + 1)) * WALL_N + Math.max(0, Math.min(WALL_N - 1, Math.floor(x / WALL_C) + 1))
+  const P = W.P, N = W.N
+  // each run's nearest segment (the cell lists them in run order) -> the two nearest runs, cross-faded where they're
+  // about as near (a run ending by another, two walls at a corner: no step between them)
+  let d1 = WALL_R, h1 = g, d2 = WALL_R, h2 = g, run = -1, rd = WALL_R, rh = g
+  const done = () => { if (rd < d1) { d2 = d1; h2 = h1; d1 = rd; h1 = rh } else if (rd < d2) { d2 = rd; h2 = rh } }
+  for (let q = W.start[c]; q < W.start[c + 1]; q++) {
+    const i = W.seg[W.idx[q]], r = W.segRun[W.idx[q]]
+    if (r !== run) { done(); run = r; rd = WALL_R; rh = g }
+    const a = i * 7, b = a + 7, ax = P[a], ay = P[a + 1], dx = P[b] - ax, dy = P[b + 1] - ay, L2 = dx * dx + dy * dy || 1e-9
+    const u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2)), dist = Math.hypot(x - ax - dx * u, y - ay - dy * u)
+    if (dist >= rd) continue
+    rd = dist // (off a segment's end, the side its corner's normal says)
+    const sd = u <= 0 ? (x - ax) * N[i * 2] + (y - ay) * N[i * 2 + 1] : u >= 1 ? (x - P[b]) * N[i * 2 + 2] + (y - P[b + 1]) * N[i * 2 + 3] : dx * (y - ay) - dy * (x - ax)
+    const d = sd < 0 ? -dist : dist, lerp = (o) => P[a + o] + (P[b + o] - P[a + o]) * u, F = lerp(5)
+    rh = (low ? d >= 0.4 : d > -0.2) ? g + (lerp(2) - g) * Math.max(0, Math.min(1, 1 - (d - lerp(4)) / B_IN)) * F
+      : g + (lerp(3) - g) * Math.max(0, Math.min(1, 1 - (-d - LOW) / LOW_B)) * F
+  }
+  done()
+  const t = Math.min(1, (d2 - d1) / FADE)
+  return h1 + (h2 - h1) * 0.5 * (1 - t * t * (3 - 2 * t))
+}
+
 // a circle (x, y, r) against a box (centre cx, cy, unit forward fx, fy, half length hl and width hw; right is
 // (fy, -fx)): how to push the circle out { x, y } (one reused object: read it before asking again), or null
 const PUSH = { x: 0, y: 0 }

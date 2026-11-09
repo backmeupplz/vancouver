@@ -130,7 +130,7 @@ Object.assign(globalThis, {
 globalThis.document.createElement = () => el()
 const THREE = await import('three')
 const { parse, build } = await import(new URL('core/tile-worker.js', ROOT).href)
-const { clamp, wrap } = await import(new URL('core/util.js', ROOT).href)
+const { clamp, wrap, wallHeight } = await import(new URL('core/util.js', ROOT).href)
 const drivePlugin = (await import(new URL('plugins/drive/index.js', ROOT).href)).default
 
 // ---------------------------------------------------------------- the map: detail tiles as the page has them (tiles.js)
@@ -156,7 +156,7 @@ const city = {
   emit(k, ...a) { for (const f of handlers.get(k) || []) f(...a) },
 }
 const sampleGrid = (h, n, size, x, y) => { const c = size / (n - 1), fx = Math.min(n - 1.0001, Math.max(0, x / c)), fy = Math.min(n - 1.0001, Math.max(0, (size - y) / c)), i = fx | 0, j = fy | 0, u = fx - i, v = fy - j; return h[j * n + i] * (1 - u) * (1 - v) + h[j * n + i + 1] * u * (1 - v) + h[(j + 1) * n + i] * (1 - u) * v + h[(j + 1) * n + i + 1] * u * v }
-function heightAt(x, n) { const t = tiles.get(`${Math.floor(x / 1024)}_${Math.floor(n / 1024)}`); return t ? sampleGrid(t.terrain.h, t.terrain.n, 1024, x - t.ox, n - t.oy) : 0 }
+function heightAt(x, n) { const t = tiles.get(`${Math.floor(x / 1024)}_${Math.floor(n / 1024)}`); if (!t) return 0; const g = sampleGrid(t.terrain.h, t.terrain.n, 1024, x - t.ox, n - t.oy); return t.terrain.wall ? wallHeight(t.terrain.wall, g, x - t.ox, n - t.oy) : g } // (core/tiles.js heightAt)
 function onRoad(x, y) { const t = tiles.get(`${Math.floor(x / 1024)}_${Math.floor(y / 1024)}`), R = t?.carriage; if (!R) return false; const k = Math.floor(y - t.oy) * R.n + Math.floor(x - t.ox); return !!(R.bits[k >> 3] & (1 << (k & 7))) }
 function offRoad(x, y, margin, maxD) {
   const clear = (px, py) => !onRoad(px, py) && !onRoad(px + margin, py) && !onRoad(px - margin, py) && !onRoad(px, py + margin) && !onRoad(px, py - margin)

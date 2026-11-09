@@ -140,6 +140,9 @@ def lidar_sections():
 TREES = city_trees()
 SECTIONS = lidar_sections()
 BEACH = np.load('data/beachlogs.npz') if os.path.exists('data/beachlogs.npz') else None  # tools/beachlogs.py
+import seawall
+WALLS = [(P, top, foot, reach, seawall.ends(P), rail) for P, top, reach, rail, foot in seawall.runs()]  # tools/seawall.py, optional
+KIT = np.load(seawall.OUT)['kit'] if os.path.exists(seawall.OUT) else np.zeros((0, 4))  # the beach things OSM maps (tools/seawall.py amenities)
 print('inputs ready', len(TREES), 'city trees', len(SECTIONS), 'lidar sections', flush=True)
 
 
@@ -457,7 +460,7 @@ def build(ij):
     return ij, 'ok', round(time.time() - t0, 1), n, len(builds), len(trees), f'trunks off streets: {moved} moved, {dropped} dropped', rules
 
 
-BEACH_OFF = ('water', 'pool', 'pier', 'road', 'arterial', 'sidewalk', 'blvd', 'walk', 'cycle', 'parking', 'plaza', 'pitch', 'playground')
+BEACH_OFF = ('water', 'pool', 'pier', 'road', 'arterial', 'sidewalk', 'blvd', 'walk', 'cycle', 'trail', 'parking', 'plaza', 'pitch', 'playground')
 
 
 def beach_bits(X0, Y0, polys, builds):
@@ -468,6 +471,7 @@ def beach_bits(X0, Y0, polys, builds):
     from shapely.strtree import STRtree
     items = [(float(x), float(y), float(a), float(ln), float(d), int(k)) for x, y, a, ln, d, k in BEACH['logs'] if X0 <= x < X0 + L1 and Y0 <= y < Y0 + L1]
     items += [(float(x), float(y), float(a), float(ln), 0.0, 15 + int(k)) for x, y, a, k, ln in BEACH['things'] if X0 <= x < X0 + L1 and Y0 <= y < Y0 + L1]
+    items += [(float(x), float(y), float(a), seawall.KIT_SIZE[int(k)][0], 0.0, int(k)) for x, y, a, k in KIT if X0 <= x < X0 + L1 and Y0 <= y < Y0 + L1]  # (tools/seawall.py amenities)
     if not items: return []
     off = [g for k in BEACH_OFF for g in polys.get(k, [])] + [Polygon(b['ring']) for b in builds if len(b['ring']) >= 3]
     tree = STRtree(off) if off else None
@@ -475,7 +479,7 @@ def beach_bits(X0, Y0, polys, builds):
     for x, y, a, ln, d, k in items:
         if k == 17: continue  # nets stand on their courts (pitches)
         ux, uy = math.cos(a) * ln / 2, math.sin(a) * ln / 2
-        g = LineString([(x - ux, y - uy), (x + ux, y + uy)]) if k < 16 else shapely.Point(x, y).buffer(1.2)
+        g = LineString([(x - ux, y - uy), (x + ux, y + uy)]) if k < 16 else shapely.Point(x, y).buffer(1.2) if k < 18 else seawall.kit_box(x, y, a, k)
         if tree is not None and len(tree.query(g, predicate='intersects')): continue
         out.append((x, y, a, ln, d, k))
     return out + [it for it in items if it[5] == 17]
@@ -2380,6 +2384,12 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
             if not parts: continue
             g = unary_union(parts)
         per[k] = g
+    sw = seawalls_near(tx, ty, size) if detail else []
+    if sw:  # the ground cut along each seawall's line (tools/seawall.py SLIT): the walk's edge on one side, the water or sand at its foot on the other, the face between
+        # (where the page draws the face: tile-worker.js seawalls(), the wall at least 0.3 m over its foot)
+        hi = [F * (top - foot) for P, top, foot, reach, F, rail in sw]
+        slit = unary_union([LineString(P[k:k + 2]).buffer(seawall.SLIT * 0.75, quad_segs=2) for (P, *_), d in zip(sw, hi) for k in range(len(P) - 1) if max(d[k], d[k + 1]) >= 0.3])
+        per = {k: g.difference(slit) for k, g in per.items()}
     per = ground_partition(per, tx, ty, out.k, holes if detail else None)
     for k in GROUND:
         if k not in per: continue
@@ -2485,7 +2495,36 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     lb = [struct.pack('<hhBBBB', *out.q(x, y), int(round(a / (2 * math.pi) * 256)) & 255, int(min(255, round(ln * 10))), int(min(255, round(d * 100))), k)
           for x, y, a, ln, d, k in beach if tx <= x < tx + size and ty <= y < ty + size]
     if lb: out.section('LOGS', struct.pack('<I', len(lb)) + b''.join(lb))
+    if sw: out.section('SEAW', seawall_section(out, sw))
     return runs > 0 or nb > 0 or len(sel) > 0
+
+
+WALL_M = 60  # metres round a detail tile its seawalls are kept to (the page's core/util.js WALL_R, and the ground past its edge)
+
+
+def seawalls_near(x0, y0, size, m=WALL_M):
+    """the pieces of the seawalls (WALLS) within m of a tile: [(points, top, foot, reach, end weight, rail)], each piece
+    a run's points in reach and one more each side (the end weight is the whole run's: a piece's cut is no end)"""
+    out = []
+    for R in WALLS:
+        P = R[0]
+        k = np.flatnonzero((P[:, 0] > x0 - m) & (P[:, 0] < x0 + size + m) & (P[:, 1] > y0 - m) & (P[:, 1] < y0 + size + m))
+        if not len(k): continue
+        for r in np.split(k, np.flatnonzero(np.diff(k) > 1) + 1):
+            s_, e_ = max(0, r[0] - 1), min(len(P), r[-1] + 2)
+            if e_ - s_ >= 2: out.append(tuple(v[s_:e_] for v in R))
+    return out
+
+
+def seawall_section(out, sw):
+    """the SEAW section (the page's tile-worker.js terrain()): per piece its point count, per point x, north (Out.q), top
+    and foot (1/100 m), reach (1/10 m), end weight (1/255), rail (1 a railing on its edge)"""
+    b = bytearray(struct.pack('<I', len(sw)))
+    for P, top, foot, reach, f, rail in sw:
+        b += struct.pack('<I', len(P))
+        for k in range(len(P)):
+            b += struct.pack('<hhhhBBB', *out.q(*P[k]), int(round(top[k] * 100)), int(round(foot[k] * 100)), int(min(255, round(reach[k] * 10))), int(round(f[k] * 255)), int(rail[k]))
+    return bytes(b)
 
 
 # ---------------------------------------------------------------- incremental: a 4 km tile is baked again only when what it reads changed
@@ -2589,7 +2628,7 @@ def db_rows(db, bounds):
 
 CODE = None
 NARROWED = {'data/sea.npz', 'data/mrdem32.npz', 'data/trees.csv', 'data/bf2009.geojson', 'data/decks.pkl', 'data/roofs.npz', 'data/facades.npz',
-            'data/massing22.npz', 'data/massing_lm.npz'}  # cell_key's own take on these: only what the tile reads of them
+            'data/massing22.npz', 'data/massing_lm.npz', 'data/seawalls.npz'}  # cell_key's own take on these: only what the tile reads of them
 
 
 def code_version():
@@ -2623,7 +2662,8 @@ def cell_key(ij):
                   window(MR, MR_X0, MR_Y1, 32, X0, Y0, 3), window(SEA_M, SEA_X0, SEA_Y1, SEA_C, X0, Y0, 8), (SEA_X0, SEA_Y1, SEA_C),
                   [t for t in TREES if X0 - 5 <= t[0] < X0 + L1 + 5 and Y0 - 5 <= t[1] < Y0 + L1 + 5], sections_at(X0, Y0),
                   [db_rows(db, bounds) for db in dbs], canon([(seg[k], desc[k]) for k in np.sort(wt.query(box(*bounds)))] if walls else ()),
-                  canon([(w, DECKS.get(w), APPROACH.get(w), TUNNELS.get(w), w in ROOFS) for w in wids]), sorted(refs & PORTALS))
+                  canon([(w, DECKS.get(w), APPROACH.get(w), TUNNELS.get(w), w in ROOFS) for w in wids]), sorted(refs & PORTALS),
+                  canon(seawalls_near(X0, Y0, L1)), KIT[(KIT[:, 0] >= X0) & (KIT[:, 0] < X0 + L1) & (KIT[:, 1] >= Y0) & (KIT[:, 1] < Y0 + L1)].tobytes())
 
 
 def safe_build(job):

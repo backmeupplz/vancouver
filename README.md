@@ -71,6 +71,15 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    `data/beachlogs.npz`; beyond the photo (the North Shore, White Rock, Crescent Beach...) it lays logs in rows along
    the shore, and adds lifeguard towers on the guarded beaches and nets on the volleyball courts
    (`tools/beachlogs.py preview kits|english|spanish` draws what it found over the photo). Optional to bake.
+   The seawalls are found, not listed (`uv run --with numpy,scipy,shapely,osmium python3 tools/seawall.py` →
+   `data/seawalls.npz`, optional): a stretch of coastline (or a beach's landward edge) is a seawall where a paved walk runs
+   along it within a few metres, the LiDAR ground at the walk stands well over the water or sand and comes up to the
+   edge (Stanley Park, Coal Harbour, English Bay, False Creek, Kits, Canada Place, the North Shore's seawalks...). The
+   walk's height, smoothed along it, is the ground from the edge to the far side of its paths (the walk and its bike lane),
+   the water or sand at its foot flat; the page draws the ground so over the 8 m terrain (`core/util.js wallHeight`, for
+   walkers, people and the drawn ground alike) and a stone face with a coping, and a railing where OSM maps one. The same
+   step puts the picnic tables, bins, fountains, washrooms and concession stands OSM maps by the beaches and walks among
+   the logs.
    Walls follow the real buildings where the data knows them (`tools/facades.py` → `data/facades.npz`, optional): the
    city's property tax report gives every building its year built, which picks 1960s-80s concrete towers with solid
    balcony fronts on their long sides, 1990s green glass with glass balconies all round, window walls after 2005, and

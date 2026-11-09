@@ -450,6 +450,9 @@ def tree_fix(tile):
 
 def _log_box(b):
     x, y, a, ln, d, k = b
+    if k >= 18:  # a picnic table, a bin, a stand, a washroom, a fountain (tools/seawall.py amenities)
+        import seawall
+        return seawall.kit_box(x, y, a, k)
     if k == 16: ln, d = 2.6, 2.6  # a lifeguard tower's footprint
     elif k == 17: d = 0.3  # a volleyball net: its posts and the net between
     c, s_ = np.cos(a), np.sin(a)
@@ -670,6 +673,131 @@ def _ground(ij, d):
     return out
 
 
+# ---------------------------------------------------------------- seawalls (tools/seawall.py): the walk on top, the wall
+# standing on the ground. The page draws the ground on a wall's walk and the water or sand at its foot over the terrain
+# (core/util.js wallHeight = seawall.height()), the stone face between (core/tile-worker.js seawalls())
+SW_STEP = 0.2  # metres a walk near a seawall may rise or drop over 1 m along it more than the LiDAR ground under it does (a step)
+SW_TOP = 0.1  # metres the wall's top (its coping) may sit off the walk beside it
+SW_LIDAR = 1.0  # metres a walk on a seawall may be drawn off the LiDAR ground under it (floating, buried)
+SW_PATHS = {KIND_I[k] for k in ('pedestrian', 'footway', 'cycleway', 'path', 'steps')}
+
+
+def _seawall(ij, d):
+    """a cell's detail tiles with seawalls: {(ti, tj): (parsed tile, pieces)}, and the drawn ground at points (each
+    point on its own tile's terrain and seawalls, as the page draws it) -> f(x, y, low)"""
+    from audit_elev import parse, Ground
+    import seawall
+    i, j = ij
+    tiles, walls = {}, {}
+    for a in range(-1, 5):
+        for b in range(-1, 5):
+            p = f'{d}/0/{4 * i + a}_{4 * j + b}.bin'
+            if os.path.exists(p): tiles[(4 * i + a, 4 * j + b)] = parse(p); walls[(4 * i + a, 4 * j + b)] = seawall.tile_walls(p)
+    G = Ground(tiles)
+
+    def drawn(x, y, low=None):
+        x, y = np.atleast_1d(np.asarray(x, float)), np.atleast_1d(np.asarray(y, float))
+        out = G(x, y)
+        ti, tj = np.floor(x / L0).astype(int), np.floor(y / L0).astype(int)
+        for key in set(zip(ti.tolist(), tj.tolist())):
+            if walls.get(key):
+                m = (ti == key[0]) & (tj == key[1])
+                out[m] = seawall.height(walls[key], out[m], x[m], y[m], None if low is None else np.broadcast_to(low, x.shape)[m])
+        return out
+    own = {k: v for k, v in walls.items() if 4 * i <= k[0] < 4 * i + 4 and 4 * j <= k[1] < 4 * j + 4 and v}
+    drawn.terrain = G
+    return tiles, own, drawn
+
+
+def _wall_frames(P):
+    t = np.gradient(P, axis=0); t /= np.maximum(np.hypot(t[:, 0], t[:, 1]), 1e-9)[:, None]
+    return np.stack([-t[:, 1], t[:, 0]], 1)  # the walk's side
+
+
+def seawall_walk_check(ij, d):
+    """the paths near a seawall (on its walk, blending off it) have no step: none rises or drops more than SW_STEP over
+    a metre along it as drawn beyond what the LiDAR ground under it does, so a walker walks it end to end (where the
+    wall changes the ground: the terrain's own slopes past its ends are the terrain's)"""
+    from shapely.geometry import LineString, Point
+    tiles, own, drawn = _seawall(ij, d)
+    out = []
+    for key, pieces in own.items():
+        near = shapely.unary_union([LineString(P).buffer(float(reach.max()) + 6) for P, top, reach, *_ in pieces])
+        for L in tiles[key][4]:
+            if L['kind'] not in SW_PATHS or L['z'] is not None or len(L['pts']) < 2: continue
+            Q = np.array(densify([tuple(p) for p in L['pts']], 1.0), float)
+            Q = Q[shapely.contains_xy(near, Q[:, 0], Q[:, 1])]
+            if len(Q) < 2: continue
+            h = drawn(Q[:, 0], Q[:, 1]); mine = np.abs(h - drawn.terrain(Q[:, 0], Q[:, 1])) > 0.05
+            from common import hr_lookup
+            lid = hr_lookup(Q[:, 0], Q[:, 1], 1); lid = np.where(np.isfinite(lid), lid, h)
+            s = np.hypot(*np.diff(Q, axis=0).T); dh = (np.abs(np.diff(h)) - np.abs(np.diff(lid))) / np.maximum(s, 0.5)
+            ok = (s < 1.5) & (mine[1:] | mine[:-1])  # (consecutive samples of the walk, not the two sides of a gap where it leaves the wall)
+            if ok.any() and dh[ok].max() > SW_STEP:
+                k = int(np.argmax(np.where(ok, dh, 0)))
+                out.append(dict(kind='seawall-walk', x=round(Q[k, 0], 1), y=round(Q[k, 1], 1), score=round(float(dh[k]), 2), hash=view_hash(Q[k, 0], Q[k, 1], h[k])))
+    return out
+
+
+def seawall_wall_check(ij, d):
+    """a seawall stands on the ground: its top (the coping) on the walk beside it, not over it or under it, and the walk
+    on the LiDAR ground (within SW_LIDAR, a few metres in from the edge): the wall neither floats nor is buried"""
+    from common import hr_lookup
+    tiles, own, drawn = _seawall(ij, d)
+    out = []
+    for key, pieces in own.items():
+        ox, oy = tiles[key][0], tiles[key][1]
+        for P, top, reach, rail, foot, F in pieces:
+            m = (P[:, 0] >= ox) & (P[:, 0] < ox + L0) & (P[:, 1] >= oy) & (P[:, 1] < oy + L0) & (F > 0.5)  # (where the wall stands: not its ends, where it blends into the ground)
+            if not m.any(): continue
+            n = _wall_frames(P)[m]; P_ = P[m]
+            edge = drawn(P_[:, 0], P_[:, 1], False); walk = drawn(P_[:, 0] + n[:, 0], P_[:, 1] + n[:, 1])
+            k = int(np.argmax(np.abs(edge - walk)))
+            if abs(edge[k] - walk[k]) > SW_TOP:
+                out.append(dict(kind='seawall-top', x=round(P_[k, 0], 1), y=round(P_[k, 1], 1), score=round(float(abs(edge[k] - walk[k])), 2), hash=view_hash(P_[k, 0], P_[k, 1], walk[k])))
+            o = np.minimum(reach[m], 4.0)[:, None] * n
+            Q = P_ + o; lid = hr_lookup(Q[:, 0], Q[:, 1], 1); dz = np.where(np.isfinite(lid), drawn(Q[:, 0], Q[:, 1]) - lid, 0)
+            k = int(np.argmax(np.abs(dz)))
+            if abs(dz[k]) > SW_LIDAR:
+                out.append(dict(kind='seawall-lidar', x=round(Q[k, 0], 1), y=round(Q[k, 1], 1), score=round(float(abs(dz[k])), 2), hash=view_hash(Q[k, 0], Q[k, 1], lid[k])))
+    return out
+
+
+def seawall_path_check(ij, d):
+    """the paths on a seawall's walk (within its reach) on the LiDAR ground under them (within SW_LIDAR): the walk's top
+    is the ground the walkers and the paths stand on, not a shelf over it"""
+    from common import hr_lookup
+    from shapely.geometry import LineString
+    tiles, own, drawn = _seawall(ij, d)
+    out = []
+    for key, pieces in own.items():
+        zone = shapely.unary_union([LineString(P).buffer(float(np.median(reach)), single_sided=True) for P, top, reach, *_ in pieces])
+        for L in tiles[key][4]:
+            if L['kind'] not in SW_PATHS or L['z'] is not None or len(L['pts']) < 2: continue
+            Q = np.array(densify([tuple(p) for p in L['pts']], 2.0), float)
+            Q = Q[shapely.contains_xy(zone, Q[:, 0], Q[:, 1])]
+            if not len(Q): continue
+            lid = hr_lookup(Q[:, 0], Q[:, 1], 1); dz = np.where(np.isfinite(lid), drawn(Q[:, 0], Q[:, 1]) - lid, 0)
+            k = int(np.argmax(np.abs(dz)))
+            if abs(dz[k]) > SW_LIDAR:
+                out.append(dict(kind='seawall-path', x=round(Q[k, 0], 1), y=round(Q[k, 1], 1), score=round(float(abs(dz[k])), 2), hash=view_hash(Q[k, 0], Q[k, 1], lid[k])))
+    return out
+
+
+def seawall_selftest():
+    """a wall along a straight shore: the walk's height on top to the edge, the sea at the foot, no step along the walk"""
+    import seawall
+    P = np.c_[np.arange(0, 201, 2.0), np.zeros(101)]
+    R = [(P, np.full(101, 4.0), np.full(101, 8.0), np.zeros(101, bool), np.zeros(101))]
+    x = np.arange(0, 201, 1.0)
+    for y in (1.0, 5.0, 12.0):  # along the walk, past it, and over the blend: no step anywhere
+        h = seawall.height(R, np.full(len(x), 2.0), x, np.full(len(x), y))
+        assert np.abs(np.diff(h)).max() <= SW_STEP + 1e-9, y
+    edge = seawall.height(R, [2.0], [100.0], [0.0], [False])[0]; walk = seawall.height(R, [2.0], [100.0], [1.0])[0]
+    assert abs(edge - walk) <= SW_TOP and seawall.height(R, [1.0], [100.0], [-1.0], [True])[0] == 0.0
+    print('seawall rules selftest ok')
+
+
 ELEV = {'road-grade': 'grade', 'road-untagged': 'untagged', 'road-under': 'under', 'deck-clash': 'clash', 'deck-step': 'step',
         'deck-buried': 'buried', 'tunnel': 'tunnel'}  # ('steep' is the tile rule deck-steep)
 elev_rule = lambda kind: lambda ij, d: [f for f in _cell(ij, d, 'elev') if f['kind'] == kind]
@@ -772,6 +900,9 @@ RULES = [
     Rule('ground-seam', lambda ij, d: [f for f in _cell(ij, d, 'ground') if f['kind'] == 'seam'], 'tools/tiles.py margins()', 'baked'),
     Rule('ground-overlap', lambda ij, d: [f for f in _cell(ij, d, 'ground') if f['kind'] == 'ground-overlap'], 'tools/tiles.py', 'baked'),
     *[Rule(n, drawn_rule(n), f, 'baked') for n, f in DRAWN.items()],  # tools/drawn_check.mjs
+    Rule('seawall-walk', seawall_walk_check, 'tools/seawall.py (smooth_top, B_IN, B_END)', 'baked'),
+    Rule('seawall-wall', seawall_wall_check, 'tools/seawall.py; core/util.js wallHeight', 'baked'),
+    Rule('seawall-path', seawall_path_check, 'tools/seawall.py detect()', 'baked'),
 ]
 
 
@@ -825,6 +956,7 @@ def selftest():
     r = apply_rules(t)  # a slice over the next house's pitched roof (not stood on its ridge: cut back); a hut wholly on a street (not lifted: gone)
     assert not r['bldg-overlap'][1] and not r['bldg-road'][1] and not r['bldg-air'][1] and max(b['ring'][0][0] for b in t['builds']) < 40, t['builds']
     deck_selftest()
+    seawall_selftest()
     print('geom_rules selftest ok')
 
 

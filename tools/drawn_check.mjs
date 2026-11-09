@@ -24,7 +24,7 @@ const ROOT = new URL('../public/', import.meta.url)
 const W = await import(new URL('core/tile-worker.js', ROOT).href)
 const { parse, readLines, terrain, roads, pois, build, carEnds, crosswalks, eachPoly } = W
 const onCarriage = W.onCarriage || ((c) => c), roadMask = W.roadMask || (() => null) // (an older tile-worker.js: measuring before a change)
-const { sampleGrid, inPoly } = await import(new URL('core/util.js', ROOT).href)
+const { sampleGrid, inPoly, wallHeight } = await import(new URL('core/util.js', ROOT).href)
 const [DIR, ...CELLS] = process.argv.slice(2)
 const TOL = { paint: 0.15, lane: 0.3, deck: 0.15, plinth: 1.2 }
 const CARR = new Set([25, 29, 30]) // cycle, road, arterial (tile-worker.js roadMask)
@@ -46,7 +46,9 @@ function tile(k) {
 const keyOf = (x, y) => `${Math.floor(x / 1024)}_${Math.floor(y / 1024)}`
 function ground(x, y) { // the drawn ground (terrain + 0.02): the tile the point is in
   const T = tile(keyOf(x, y))
-  return T ? sampleGrid(T.terr.h, T.terr.n, 1024, x - T.ox, y - T.oy) + 0.02 : null
+  if (!T) return null
+  const g = sampleGrid(T.terr.h, T.terr.n, 1024, x - T.ox, y - T.oy)
+  return (T.terr.wall ? wallHeight(T.terr.wall, g, x - T.ox, y - T.oy) : g) + 0.02 // (on a seawall's walk: core/util.js)
 }
 // deck strips of loaded tiles by 8 m cell: [x0, y0, z0, x1, y1, z1, x2, y2, z2, kind]
 const C = 8, grid = new Map(), gridded = new Set()
@@ -193,10 +195,18 @@ function check(cell) {
       }
       const nearOpen = (x, y) => open.some(([x0, y0, x1, y1, r]) => { const dx = x1 - x0, dy = y1 - y0, f = Math.max(0, Math.min(1, ((x - x0) * dx + (y - y0) * dy) / (dx * dx + dy * dy || 1))); return Math.hypot(x - x0 - dx * f, y - y0 - dy * f) < r })
       const rim = (v) => v < 0.05 || v > 1023.95
+      const WL = T.terr.wall, nearWall = (x, y) => { // a seawall's line: the walk's ground steps down to the water there, its face drawn over the step
+        if (!WL) return false
+        for (let r = 0; r < WL.runs.length - 1; r++) for (let i = WL.runs[r]; i < WL.runs[r + 1] - 1; i++) {
+          const a = i * 7, b = a + 7, dx = WL.P[b] - WL.P[a], dy = WL.P[b + 1] - WL.P[a + 1], f = Math.max(0, Math.min(1, ((x - WL.P[a]) * dx + (y - WL.P[a + 1]) * dy) / (dx * dx + dy * dy || 1)))
+          if (Math.hypot(x - WL.P[a] - dx * f, y - WL.P[a + 1] - dy * f) < 2) return true
+        }
+        return false
+      }
       for (const [c, a, b, o] of cnt.values()) {
         if (c !== 1) continue
         const ax = P[a * 3], ay = -P[a * 3 + 2], bx = P[b * 3], by = -P[b * 3 + 2], L = Math.hypot(bx - ax, by - ay)
-        if (L < 0.02 || (rim(ax) && rim(bx) && Math.abs(ax - bx) < 0.1) || (rim(ay) && rim(by) && Math.abs(ay - by) < 0.1) || nearOpen((ax + bx) / 2, (ay + by) / 2)) continue
+        if (L < 0.02 || (rim(ax) && rim(bx) && Math.abs(ax - bx) < 0.1) || (rim(ay) && rim(by) && Math.abs(ay - by) < 0.1) || nearOpen((ax + bx) / 2, (ay + by) / 2) || nearWall((ax + bx) / 2, (ay + by) / 2)) continue
         let nx = -(by - ay) / L, ny = (bx - ax) / L
         if (nx * (P[o * 3] - ax) + ny * (-P[o * 3 + 2] - ay) > 0) { nx = -nx; ny = -ny } // (out, away from its triangle)
         for (const f of [0.25, 0.5, 0.75]) {
@@ -294,7 +304,7 @@ function check(cell) {
     const k = `${ci * 4 + a}_${cj * 4 + b}`, T = tile(k)
     if (!T) continue
     const pieces = T.lines.filter((L) => L.kind <= 13).map((L) => { const pts = new Float32Array(L.pts.length); for (let q = 0; q < pts.length; q += 2) { pts[q] = L.pts[q] + T.ox; pts[q + 1] = L.pts[q + 1] + T.oy } return { ...L, pts, tunnel: L.tunnel ? 1 : 0 } })
-    add_.push({ key: `0/${k}`, level: 0, ox: T.ox, oy: T.oy, size: 1024, terrain: { n: T.terr.n, h: T.terr.h }, pieces, pois: [] })
+    add_.push({ key: `0/${k}`, level: 0, ox: T.ox, oy: T.oy, size: 1024, terrain: { n: T.terr.n, h: T.terr.h, wall: T.terr.wall }, pieces, pois: [] })
   }
   ctx.onmessage({ data: { type: 'tiles', add: add_, drop: [] } })
   ctx.onmessage({ data: { type: 'area', area: { x: X0 + 2048, y: Y0 + 2048, r: 3600, vx: X0 + 2048, vy: Y0 + 2048, vr: 300 } } })
