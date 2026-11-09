@@ -76,30 +76,74 @@ function build(t, level) {
   out.ground = ground(t, terr, level)
   const lines = readLines(t)
   const ps = pois(t)
-  const rd = roads(t, terr, lines, level, ps)
+  const carriage = level === 0 ? roadMask(t) : null
+  const rd = roads(t, terr, lines, level, ps, carriage)
   out.roads = rd.surf; out.paint = rd.paint
   out.graph = graph(t, lines)
   out.graph.pois = ps
-  const carriage = level === 0 ? roadMask(t) : null
   const b = buildings(t, terr, level, lines, carriage)
   out.buildings = b.walls; out.balconies = b.balconies; out.ao = b.ao
+  const tr = trees(t, terr)
   if (level === 0) {
-    out.water = water(t); out.carriage = carriage; out.boats = boats(t, terr); out.lights = lights(t, terr, lines, ps, b)
+    const S = solids(t, b.footprints, tr) // what stands on the ground: nothing placed inside another
+    out.water = water(t); out.carriage = carriage; out.boats = boats(t, terr); out.lights = lights(t, terr, lines, ps, b, carriage, S)
     out.signs = signs(t, b.fronts)
-    out.parked = parked(t, terr, lines, ps, b.footprints)
+    out.parked = parked(t, terr, lines, ps, b.footprints, S)
     out.footprints = withCars(b.footprints, out.parked.lot, t)
     out.beach = beach(t, terr)
     if (out.beach) out.footprints = withBoxes(out.footprints, out.beach.solid, t)
   }
-  out.trees = trees(t, terr)
+  out.trees = tr
   return out
+}
+
+// The things standing on a detail tile's ground (tile-local): the buildings' footprints and the trees' trunks, then the
+// lamp poles and parked cars as they are placed, each kept out of the others. free(x, y, r): a disc of radius r there
+// clear of them all; freeBox(x, y, angle, half length, half width): a box (a car) clear of them all
+function solids(t, fp, tr) {
+  const G = 8, grid = new Map(), cell = (x, y) => Math.floor(x / G) * 4096 + Math.floor(y / G)
+  const put = (x0, y0, x1, y1, v) => { for (let i = Math.floor(x0 / G); i <= Math.floor(x1 / G); i++) for (let j = Math.floor(y0 / G); j <= Math.floor(y1 / G); j++) { const k = i * 4096 + j; let l = grid.get(k); if (!l) grid.set(k, (l = [])); l.push(v) } }
+  const near = (x0, y0, x1, y1, fn) => { const seen = new Set(); for (let i = Math.floor(x0 / G); i <= Math.floor(x1 / G); i++) for (let j = Math.floor(y0 / G); j <= Math.floor(y1 / G); j++) for (const v of grid.get(i * 4096 + j) || []) if (!seen.has(v)) { seen.add(v); if (fn(v)) return true } return false }
+  if (fp) for (let r = 0; r < fp.start.length - 1; r++) {
+    const ring = []
+    for (let q = fp.start[r]; q < fp.start[r + 1]; q += 2) ring.push([fp.pts[q] - t.ox, fp.pts[q + 1] - t.oy])
+    const [x0, y0, x1, y1] = bbox(ring)
+    put(x0, y0, x1, y1, { ring })
+  }
+  const P = tr?.pos
+  for (let i = 0; P && i < P.length; i += 3) put(P[i], -P[i + 2], P[i], -P[i + 2], { disc: [P[i], -P[i + 2], 0.25] })
+  const corners = (x, y, a, l, w) => { const fx = Math.cos(a), fy = Math.sin(a); return [[0, 0], [1, 1], [-1, 1], [-1, -1], [1, -1], [1, 0], [-1, 0], [0, 1], [0, -1]].map(([p, q]) => [x + fx * p * l + fy * q * w, y + fy * p * l - fx * q * w]) }
+  const inBox = ([x, y, a, l, w], px, py, m = 0) => { const fx = Math.cos(a), fy = Math.sin(a), dx = px - x, dy = py - y; return Math.abs(dx * fx + dy * fy) < l + m && Math.abs(dx * fy - dy * fx) < w + m }
+  return {
+    free: (x, y, r) => !near(x - r - 1, y - r - 1, x + r + 1, y + r + 1, (v) => v.ring ? inPoly(x, y, v.ring) : v.disc ? Math.hypot(v.disc[0] - x, v.disc[1] - y) < v.disc[2] + r : inBox(v.box, x, y, r)),
+    freeBox: (x, y, a, l, w) => {
+      const cs = corners(x, y, a, l, w), b = [x, y, a, l, w]
+      return !near(x - l - 1, y - l - 1, x + l + 1, y + l + 1, (v) => v.ring ? cs.some(([px, py]) => inPoly(px, py, v.ring)) || v.ring.some(([px, py]) => inBox(b, px, py))
+        : v.disc ? inBox(b, v.disc[0], v.disc[1], v.disc[2]) : cs.some(([px, py]) => inBox(v.box, px, py)) || corners(...v.box).some(([px, py]) => inBox(b, px, py)))
+    },
+    addDisc: (x, y, r) => put(x - r, y - r, x + r, y + r, { disc: [x, y, r] }),
+    addBox: (x, y, a, l, w) => put(x - l, y - l, x + l, y + l, { box: [x, y, a, l, w] }),
+  }
 }
 
 function terrain(t) {
   const s = t.sections.TERR, n = t.dv.getUint16(s.off, true)
   const h = new Float32Array(n * n)
   for (let i = 0; i < n * n; i++) h[i] = t.dv.getInt16(s.off + 2 + i * 2, true) / 10
-  return { n, h, size: t.size } // row 0 = north
+  const out = { n, h, size: t.size } // row 0 = north
+  const m = t.sections.TERM // the next tiles' terrain, M rows round this one (tools/tiles.py margins()): out.ext, the grid with them
+  if (m && t.dv.getUint16(m.off, true) === n) {
+    const M = t.dv.getUint16(m.off + 2, true), N = n + 2 * M, e = new Float32Array(N * N), c = t.size / (n - 1)
+    let o = m.off + 4
+    const rd = () => { const v = t.dv.getInt16(o, true) / 10; o += 2; return v }
+    for (let j = 0; j < M; j++) for (let i = 0; i < N; i++) e[j * N + i] = rd()
+    for (let j = N - M; j < N; j++) for (let i = 0; i < N; i++) e[j * N + i] = rd()
+    for (let j = M; j < N - M; j++) for (let i = 0; i < M; i++) e[j * N + i] = rd()
+    for (let j = M; j < N - M; j++) for (let i = N - M; i < N; i++) e[j * N + i] = rd()
+    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) e[(j + M) * N + i + M] = h[j * n + i]
+    out.ext = { n: N, h: e, size: t.size + 2 * M * c, off: M * c }
+  }
+  return out
 }
 // surface normals from the terrain's slope (cheaper than averaging faces, and the same across tile edges)
 function normals(terr, pos) {
@@ -114,6 +158,15 @@ function normals(terr, pos) {
   return n
 }
 const heightAt = (terr, x, y) => sampleGrid(terr.h, terr.n, terr.size, x, y) // tile-local metres, y north
+// the ground at tile-local (x, y) on past the tile's edge (a decal, a building reaching into the next tile): the next
+// tiles' terrain (terr.ext, tools/tiles.py margins()), else carried on on the slope at the edge
+function groundOut(terr, x, y) {
+  const e = terr.ext
+  if (e) return sampleGrid(e.h, e.n, e.size, x + e.off, y + e.off)
+  const S = terr.size, cx = Math.min(S, Math.max(0, x)), cy = Math.min(S, Math.max(0, y)), h = heightAt(terr, cx, cy)
+  const gx = cx === x ? 0 : (h - heightAt(terr, cx - Math.sign(x - cx) * 4, cy)) / 4, gy = cy === y ? 0 : (h - heightAt(terr, cx, cy - Math.sign(y - cy) * 4)) / 4
+  return h + gx * Math.abs(x - cx) + gy * Math.abs(y - cy)
+}
 
 // ground: polygons per class, triangulated here and draped over the terrain (long edges split on slopes). Detail
 // tiles carry two sets of triangles over one set of vertices: `index` follows the terrain to 5 cm (street level, close
@@ -125,7 +178,7 @@ function ground(t, terr, level) {
   const dv = t.dv
   let o = s.off
   const runs = dv.getUint16(o, true); o += 2
-  const pos = [], cls = [], idx = [], coarse = level === 0 ? [] : null
+  const pos = [], cls = [], idx = Object.assign([], { rim: [] }), coarse = level === 0 ? Object.assign([], { rim: [] }) : null
   const seen = new Map() // shared vertices: one per (point, class), so each tile uploads about a third as much
   const vert = (x, y, c, lift) => {
     const key = Math.round(x * 50) * 1e7 + Math.round(y * 50) + c * 1e14
@@ -151,20 +204,22 @@ function ground(t, terr, level) {
     return false
   }
   // one triangle into `out`, split first along the longest edge that bends
-  const emit = (out, tol, c, lift, ax, ay, bx, by, cx, cy, depth) => {
+  // fl: which of its edges (1 ab, 2 bc, 4 ca) lie on its polygon's border: those triangles are listed in out.rim
+  const emit = (out, tol, c, lift, ax, ay, bx, by, cx, cy, depth, fl) => {
     if (depth < 20) {
       const ab = bends(ax, ay, bx, by, c, tol) ? Math.hypot(bx - ax, by - ay) : 0, bc = bends(bx, by, cx, cy, c, tol) ? Math.hypot(cx - bx, cy - by) : 0
       const ca = bends(cx, cy, ax, ay, c, tol) ? Math.hypot(ax - cx, ay - cy) : 0, m = Math.max(ab, bc, ca), d = depth + 1
       if (m > 0) {
-        if (m === ab) { const mx = (ax + bx) / 2, my = (ay + by) / 2; emit(out, tol, c, lift, ax, ay, mx, my, cx, cy, d); emit(out, tol, c, lift, mx, my, bx, by, cx, cy, d) }
-        else if (m === bc) { const mx = (bx + cx) / 2, my = (by + cy) / 2; emit(out, tol, c, lift, ax, ay, bx, by, mx, my, d); emit(out, tol, c, lift, ax, ay, mx, my, cx, cy, d) }
-        else { const mx = (cx + ax) / 2, my = (cy + ay) / 2; emit(out, tol, c, lift, ax, ay, bx, by, mx, my, d); emit(out, tol, c, lift, mx, my, bx, by, cx, cy, d) }
+        if (m === ab) { const mx = (ax + bx) / 2, my = (ay + by) / 2; emit(out, tol, c, lift, ax, ay, mx, my, cx, cy, d, fl & 5); emit(out, tol, c, lift, mx, my, bx, by, cx, cy, d, fl & 3) }
+        else if (m === bc) { const mx = (bx + cx) / 2, my = (by + cy) / 2; emit(out, tol, c, lift, ax, ay, bx, by, mx, my, d, fl & 3); emit(out, tol, c, lift, ax, ay, mx, my, cx, cy, d, fl & 6) }
+        else { const mx = (cx + ax) / 2, my = (cy + ay) / 2; emit(out, tol, c, lift, ax, ay, bx, by, mx, my, d, fl & 5); emit(out, tol, c, lift, mx, my, bx, by, cx, cy, d, fl & 6) }
         return
       }
     }
     const va = vert(ax, ay, c, lift), vb = vert(bx, by, c, lift), vc = vert(cx, cy, c, lift)
     // face up: earcut keeps the ring's winding; pick the order whose normal points +y
     const cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    if (fl) out.rim.push(out.length, cross > 0 ? fl : ((fl & 4) >> 2) | (fl & 2) | ((fl & 1) << 2)) // (its border edges in the order kept)
     if (cross > 0) out.push(va, vb, vc); else out.push(va, vc, vb)
   }
   const polys = [] // [class, rings], read first: their borders are welded together before they're triangulated
@@ -187,12 +242,67 @@ function ground(t, terr, level) {
       for (const i of ring) flat.push(W.xy[i * 2], W.xy[i * 2 + 1])
     }
     const tri = flat.length ? earcut(flat, holes) : []
+    const st = [0, ...holes, flat.length / 2], ringEdge = (i, j) => { // along one ring: consecutive points, or with only
+      // points in a straight line between them (earcut leaves those out: the next polygon's corner welded onto this border)
+      const r = st.findIndex((v) => v > i), r0 = st[r - 1], n = st[r] - r0
+      if (j < r0 || j >= st[r]) return false
+      const on = (k, l) => { // the points after k up to l along the ring, all on segment k-l?
+        const ax = flat[k * 2], ay = flat[k * 2 + 1], dx = flat[l * 2] - ax, dy = flat[l * 2 + 1] - ay, L = Math.hypot(dx, dy) || 1
+        for (let m = r0 + ((k - r0 + 1) % n), c = 0; m !== l; m = r0 + ((m - r0 + 1) % n), c++) if (c > 64 || Math.abs((flat[m * 2] - ax) * dy - (flat[m * 2 + 1] - ay) * dx) / L > 0.01) return false
+        return true
+      }
+      return on(i, j) || on(j, i)
+    }
     for (let i = 0; i < tri.length; i += 3) {
       const a = tri[i] * 2, b = tri[i + 1] * 2, d = tri[i + 2] * 2
-      emit(idx, GROUND_TOL[level], c, lift, flat[a], flat[a + 1], flat[b], flat[b + 1], flat[d], flat[d + 1], 0)
-      if (coarse) emit(coarse, GROUND_COARSE, c, lift, flat[a], flat[a + 1], flat[b], flat[b + 1], flat[d], flat[d + 1], 0)
+      const fl = (ringEdge(tri[i], tri[i + 1]) ? 1 : 0) | (ringEdge(tri[i + 1], tri[i + 2]) ? 2 : 0) | (ringEdge(tri[i + 2], tri[i]) ? 4 : 0)
+      emit(idx, GROUND_TOL[level], c, lift, flat[a], flat[a + 1], flat[b], flat[b + 1], flat[d], flat[d + 1], 0, fl)
+      if (coarse) emit(coarse, GROUND_COARSE, c, lift, flat[a], flat[a + 1], flat[b], flat[b + 1], flat[d], flat[d + 1], 0, fl)
     }
   }
+  // T-junctions: a border edge one triangle has with another's corner on it (the two sides split it differently: one
+  // halved where the ground bends under its own edge, the next polygon's border there a little different) opens a
+  // hairline the base map shows through; the triangle is split at those corners
+  const fixT = (out) => {
+    const grid = new Map(), G = 2
+    const cellsOn = (ax, ay, bx, by, fn) => { // the G cells segment a-b passes through (a grid walk), key i * 65536 + j
+      let i = Math.floor(ax / G), j = Math.floor(ay / G)
+      const i1 = Math.floor(bx / G), j1 = Math.floor(by / G), dx = bx - ax, dy = by - ay, si = Math.sign(dx), sj = Math.sign(dy)
+      const ti = dx ? G / Math.abs(dx) : Infinity, tj = dy ? G / Math.abs(dy) : Infinity
+      let ni = dx ? ((si > 0 ? (i + 1) * G - ax : ax - i * G) / Math.abs(dx)) : Infinity, nj = dy ? ((sj > 0 ? (j + 1) * G - ay : ay - j * G) / Math.abs(dy)) : Infinity
+      fn(i * 65536 + j)
+      for (let n = 0; n < 4096 && (i !== i1 || j !== j1); n++) { if (ni < nj) { i += si; ni += ti } else { j += sj; nj += tj } fn(i * 65536 + j) }
+    }
+    const mark = new Uint8Array(pos.length / 3)
+    for (let r = 0; r < out.rim.length; r += 2) for (let e = 0; e < 3; e++) { const v = out[out.rim[r] + e]; if (mark[v]) continue; mark[v] = 1; const k = Math.floor(pos[v * 3] / G) * 65536 + Math.floor(-pos[v * 3 + 2] / G); let l = grid.get(k); if (!l) grid.set(k, (l = [])); l.push(v) }
+    const add = []
+    for (let r = 0; r < out.rim.length; r += 2) {
+      const q = out.rim[r], fl = out.rim[r + 1], loop = [], cc = cls[out[q]], lift = cc * GROUND_LIFT + 0.02
+      for (let e = 0; e < 3; e++) {
+        const a = out[q + e], b = out[q + (e + 1) % 3], ax = pos[a * 3], ay = -pos[a * 3 + 2], bx = pos[b * 3], by = -pos[b * 3 + 2], L2 = (bx - ax) ** 2 + (by - ay) ** 2
+        loop.push(a)
+        if (L2 < 0.01 || !(fl & (1 << e))) continue // (an edge inside its polygon: its neighbour there has the same points)
+        let on = null, seen = null; const L = Math.sqrt(L2)
+        const vs = []; cellsOn(ax, ay, bx, by, (k) => { const l = grid.get(k); if (l) for (const v of l) vs.push(v) })
+        for (const v of vs) {
+          const vx = pos[v * 3], vy = -pos[v * 3 + 2], f = ((vx - ax) * (bx - ax) + (vy - ay) * (by - ay)) / L2
+          if (f <= 1e-3 || f >= 1 - 1e-3 || Math.abs((vx - ax) * (by - ay) - (vy - ay) * (bx - ax)) / L >= 0.03) continue
+          const k = Math.round(vx * 50) * 65536 + Math.round(vy * 50)
+          if (!on) { on = []; seen = new Set() }
+          if (!seen.has(k)) { seen.add(k); on.push([f, vx, vy]) }
+        }
+        if (!on) continue
+        on.sort((u, w) => u[0] - w[0])
+        for (const [, x, y] of on) loop.push(vert(x, y, cc, lift))
+      }
+      if (loop.length === 3) continue
+      const gx = (pos[out[q] * 3] + pos[out[q + 1] * 3] + pos[out[q + 2] * 3]) / 3, gy = -(pos[out[q] * 3 + 2] + pos[out[q + 1] * 3 + 2] + pos[out[q + 2] * 3 + 2]) / 3, g = vert(gx, gy, cc, lift)
+      out[q] = loop[0]; out[q + 1] = loop[1]; out[q + 2] = g
+      for (let j = 1; j < loop.length; j++) add.push(loop[j], loop[(j + 1) % loop.length], g)
+    }
+    for (const v of add) out.push(v)
+  }
+  fixT(idx); if (coarse) fixT(coarse)
   const nv = pos.length / 3
   if (!nv) return null
   const P = new Float32Array(pos), I = nv > 65535 ? Uint32Array : Uint16Array
@@ -345,16 +455,18 @@ function readLines(t) {
 // carriageways on top, so a big road's sidewalk never covers a side street. Markings are drawn by the shader
 // from per-vertex (along, across) coordinates, measured from the edge of the junction box (setback()): lane lines
 // fade out before it, the stop line stands behind the crosswalk.
-function roads(t, terr, lines, level, ps) {
+function roads(t, terr, lines, level, ps, R) {
   // Road surfaces, sidewalks and paths are part of the ground (baked as non-overlapping polygons). Here: bridge
   // decks (full surfaces, raised on their LiDAR heights) and, as thin decals on the ground, the paint: lane lines,
   // stop lines, the crosswalks OpenStreetMap maps (crosswalks()), and rails.
   const deg = new Map()
   for (const L of lines) for (const n of [L.a, L.b]) deg.set(n, (deg.get(n) || 0) + 1)
   const mk = () => ({ P: [], A: [], B: [], I: [], nv: 0 })
-  const surf = mk(), paint = mk()
+  const surf = Object.assign(mk(), { runs: [] }), paint = mk()
   // jA, jB: how far from each end the junction box there reaches (null: no junction, no stop line)
-  const strip = (T, pts, zs, half, lift, kind, extra, w, jA, jB) => {
+  const ext = terr.ext, decalH = (x, y) => groundOut(terr, x, y)
+  const strip = (T, pts, zs, half, lift, kind, extra, w, jA, jB, mitre = null) => {
+    if (T === surf) T.runs.push({ i0: T.I.length, i1: T.I.length, kind }) // (unstack(): which triangles are whose)
     const xs = [], ys = [], zz = []
     for (let i = 0; i < pts.length / 2 - 1; i++) {
       const x0 = pts[i * 2], y0 = pts[i * 2 + 1], x1 = pts[i * 2 + 2], y1 = pts[i * 2 + 3]
@@ -369,39 +481,95 @@ function roads(t, terr, lines, level, ps) {
     xs.push(pts[last * 2]); ys.push(pts[last * 2 + 1]); zz.push(zs ? zs[last] : null)
     const m = xs.length
     if (m < 2) return
+    const S = terr.size, edgeAt = (x, y) => Math.abs(x) < 0.05 ? [0, 0] : Math.abs(x - S) < 0.05 ? [0, S] : Math.abs(y) < 0.05 ? [1, 0] : Math.abs(y - S) < 0.05 ? [1, S] : null
+    const edges = [edgeAt(xs[0], ys[0]), edgeAt(xs[m - 1], ys[m - 1])]
+    if (zs) for (const [i, j, e] of [[0, 1, 0], [m - 1, m - 2, 1]]) { // a deck's ends 5 cm on, under the next deck's (no hairline where two meet at a slant)
+      if (mitre?.[e]) continue // (one row with the next deck's there)
+      const dx = xs[i] - xs[j], dy = ys[i] - ys[j], l = Math.hypot(dx, dy)
+      if (l > 0.2) { xs[i] += (dx / l) * 0.05; ys[i] += (dy / l) * 0.05 }
+    }
     let s = 0
     const cum = [0]
     for (let i = 1; i < m; i++) { s += Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]); cum.push(s) }
     const len = s
-    for (let i = 0; i < m; i++) {
-      const p = Math.max(0, i - 1), q = Math.min(m - 1, i + 1)
-      let tx = xs[q] - xs[p], ty = ys[q] - ys[p]; const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl
-      let nx = -ty, ny = tx, k = 1
-      if (i > 0 && i < m - 1) {
-        let ax = xs[i] - xs[i - 1], ay = ys[i] - ys[i - 1]; const al = Math.hypot(ax, ay) || 1; ax /= al; ay /= al
-        k = 1 / Math.max(0.5, Math.abs(-ay * nx + ax * ny))
+    let rows = 0
+    const row = (i, lx, ly, rx, ry) => { // one row across: its left and right points
+      const e = i === 0 ? edges[0] : i === m - 1 ? edges[1] : null
+      if (e) { // on the tile's edge: both points slid along the strip onto it
+        const j = i ? i - 1 : 1, dx = xs[i] - xs[j], dy = ys[i] - ys[j], d = e[0] ? dy : dx, l = Math.hypot(dx, dy) || 1
+        if (Math.abs(d / l) > 0.2) {
+          const slide = (px, py) => { const u = Math.max(-3 * half, Math.min(3 * half, (e[1] - (e[0] ? py : px)) / (d / l))); return [px + (dx / l) * u, py + (dy / l) * u] };
+          [lx, ly] = slide(lx, ly); [rx, ry] = slide(rx, ry)
+        }
       }
-      for (const side of [-1, 1]) {
-        const px = xs[i] + nx * half * k * side, py = ys[i] + ny * half * k * side
-        const y = zz[i] ?? heightAt(terr, px, py) // decals follow the ground under each edge, not the centre line
+      for (const [side, px, py] of [[-1, rx, ry], [1, lx, ly]]) {
+        const y = zz[i] ?? decalH(px, py) // decals follow the ground under each edge, not the centre line
         T.P.push(px, y + lift, -py)
         T.A.push(cum[i], side * half, w, kind)
         T.B.push(extra, jA == null ? 999 : cum[i] - jA, jB == null ? 999 : len - cum[i] - jB, len)
       }
-      if (i) { const b = T.nv + (i - 1) * 2; T.I.push(b, b + 2, b + 1, b + 1, b + 2, b + 3) }
+      if (rows) { const b = T.nv + (rows - 1) * 2; T.I.push(b, b + 2, b + 1, b + 1, b + 2, b + 3) }
+      rows++
     }
-    T.nv += m * 2
+    for (let i = 0; i < m; i++) {
+      const p = Math.max(0, i - 1), q = Math.min(m - 1, i + 1), cx = xs[i], cy = ys[i]
+      let tx = xs[q] - xs[p], ty = ys[q] - ys[p]; const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl
+      let nx = -ty, ny = tx, k = 1
+      const mt = i === 0 ? mitre?.[0] : i === m - 1 ? mitre?.[1] : null
+      if (mt) [nx, ny, k] = mt
+      else if (i > 0 && i < m - 1) {
+        const la = Math.hypot(cx - xs[i - 1], cy - ys[i - 1]) || 1, lb = Math.hypot(xs[i + 1] - cx, ys[i + 1] - cy) || 1
+        const ax = (cx - xs[i - 1]) / la, ay = (cy - ys[i - 1]) / la, bx = (xs[i + 1] - cx) / lb, by = (ys[i + 1] - cy) / lb
+        const turn = Math.atan2(ax * by - ay * bx, ax * bx + ay * by)
+        if (Math.abs(turn) > 0.6) { // a sharp corner (a ramp's hairpin): the outer edge round it, the inner one mitred
+          const sin = Math.sign(turn), a0 = Math.atan2(ax, -ay), R = Math.ceil(Math.abs(turn) / 0.35) + 1, back = half * Math.tan(Math.abs(turn) / 2)
+          const mx = -ay + -by, my = ax + bx, ml = Math.hypot(mx, my), d = half / Math.max(1e-3, Math.cos(turn / 2))
+          const inner = back <= Math.min(la, lb) && ml > 1e-6 ? [cx + (mx / ml) * d * sin, cy + (my / ml) * d * sin] : null
+          for (let r = 0; r < R; r++) {
+            const a = a0 + (turn * r) / (R - 1), ux = Math.cos(a), uy = Math.sin(a)
+            const out = [cx - ux * half * sin, cy - uy * half * sin], inn = inner || [cx + ux * half * sin, cy + uy * half * sin] // (folded: faces away, not drawn)
+            if (sin > 0) row(i, ...inn, ...out); else row(i, ...out, ...inn)
+          }
+          continue
+        }
+        k = 1 / Math.max(0.5, Math.abs(-ay * nx + ax * ny))
+      }
+      row(i, cx + nx * half * k, cy + ny * half * k, cx - nx * half * k, cy - ny * half * k)
+    }
+    T.nv += rows * 2
+    if (T === surf) T.runs.at(-1).i1 = T.I.length
   }
   const len = (L) => { let s = 0; for (let i = 0; i < L.pts.length / 2 - 1; i++) s += Math.hypot(L.pts[i * 2 + 2] - L.pts[i * 2], L.pts[i * 2 + 3] - L.pts[i * 2 + 1]); return s }
-  const order = [...lines].sort((p, q) => q.kind - p.kind)
+  const order = [...lines].sort((p, q) => q.kind - p.kind), caps = new Map()
+  const deckEnds = new Map() // node -> [[piece, end index, unit direction away from the node]] of the decks (not rail) there
+  for (const L of lines) if (L.z && L.kind <= K.track && !L.tunnel) {
+    const P = L.pts, n = P.length / 2
+    for (const [e, f, id] of [[0, 1, L.a], [n - 1, n - 2, L.b]]) { const dx = P[f * 2] - P[e * 2], dy = P[f * 2 + 1] - P[e * 2 + 1], dl = Math.hypot(dx, dy) || 1; let a = deckEnds.get(id); if (!a) deckEnds.set(id, (a = [])); a.push([L, e, dx / dl, dy / dl]) }
+  }
+  const mitreAt = (L, id, start) => { // the shared row's (normal, scale) at L's end at node id, or null
+    const a = deckEnds.get(id)
+    if (!a || a.length !== 2) return null
+    const [p, q] = a[0][0] === L ? a : [a[1], a[0]], ax = p[2], ay = p[3], bx = q[2], by = q[3]
+    if (ax * -bx + ay * -by < Math.cos(0.6)) return null // (a sharp turn: square ends, the plate between)
+    let tx = ax - bx, ty = ay - by; const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl
+    if (!start) { tx = -tx; ty = -ty }
+    const own = start ? [ax, ay] : [-ax, -ay] // L's way along at that end
+    return [-ty, tx, 1 / Math.max(0.5, tx * own[0] + ty * own[1])]
+  }
   const ends = level === 0 ? carEnds(lines) : null
   const box = (L, e) => setback(ends, L, e)
   for (const L of order) {
     const ja = (deg.get(L.a) || 0) >= 3, jb = (deg.get(L.b) || 0) >= 3
     if (L.z) { // bridges: the whole surface, raised
       if (L.kind > K.track && L.kind !== K.rail && L.kind !== K.lightrail) continue
+      const lift = 0.36 + (18 - L.kind) * 0.004 + (L.kind >= K.pedestrian ? 0.05 : 0), P = L.pts, n = P.length / 2 // (a foot or cycle deck mapped across a road deck's edge lies 5 cm over it, not in it)
+      for (const [e, f, id] of L.kind <= K.track ? [[0, 1, L.a], [n - 1, n - 2, L.b]] : []) { // its square end at node id: (x, y, height, direction out of the node, half width)
+        const dx = P[f * 2] - P[e * 2], dy = P[f * 2 + 1] - P[e * 2 + 1], dl = Math.hypot(dx, dy) || 1
+        let c = caps.get(id); if (!c) caps.set(id, (c = []))
+        c.push({ x: P[e * 2], y: P[e * 2 + 1], h: L.z[e] + lift, a: Math.atan2(dy / dl, dx / dl), half: L.w / 2, kind: L.kind, mitred: !!mitreAt(L, id, e === 0) })
+      }
       if (L.band) { const bl = L.kind === K.residential || L.kind === K.tertiary ? 0 : 0, walk = 2.0; strip(surf, L.pts, L.z, L.w / 2 + walk, 0.3, 100, bl * 256 + walk * 16, L.w, null, null) }
-      strip(surf, L.pts, L.z, L.w / 2, 0.36 + (18 - L.kind) * 0.004, L.kind, L.lanes + (L.oneway ? 32 : 0), L.w, ja ? 0 : null, jb ? 0 : null)
+      strip(surf, L.pts, L.z, L.w / 2, lift, L.kind, L.lanes + (L.oneway ? 32 : 0), L.w, ja ? 0 : null, jb ? 0 : null, [mitreAt(L, L.a, true), mitreAt(L, L.b, false)])
       continue
     }
     if (level !== 0) continue // the overview shows surfaces only
@@ -412,10 +580,48 @@ function roads(t, terr, lines, level, ps) {
       strip(paint, L.pts, null, 1.3, 0.05, L.kind, 0, L.w, null, null)
     }
   }
-  if (ends) for (const c of crosswalks(lines, ends, ps, t.ox, t.oy)) { // kerb to kerb, square across the carriageway
+  for (const c of caps.values()) { // between one deck's end and the next round the node, where they open apart: a fan of plain deck
+    if (c.length < 2 || c.every((q) => q.mitred)) continue // (two decks going on from each other share their end row)
+    c.sort((p, q) => p.a - q.a)
+    const h = c.reduce((s, q) => s + q.h, 0) / c.length, X = c[0].x, Y = c[0].y
+    for (let i = 0; i < c.length; i++) {
+      const p = c[i], q = c[(i + 1) % c.length], gap = ((q.a - p.a + 4 * Math.PI) % (2 * Math.PI)) - Math.PI // p's left edge round to q's right one
+      if (gap <= 0.01 || gap >= Math.PI - 0.01) continue // (they overlap there, or face each other: nothing open)
+      const k = Math.ceil(gap / 0.35), v = surf.nv
+      for (let s = 0; s <= k; s++) {
+        const f = s / k, a = p.a + Math.PI / 2 + gap * f, r = p.half + (q.half - p.half) * f, hh = p.h + (q.h - p.h) * f
+        surf.P.push(X + Math.cos(a) * r, hh, -(Y + Math.sin(a) * r)); surf.A.push(0, 0, 999, p.kind); surf.B.push(0, 0, 0, 1)
+      }
+      surf.P.push(X, h, -Y); surf.A.push(0, 0, 999, p.kind); surf.B.push(0, 0, 0, 1)
+      for (let s = 0; s < k; s++) surf.I.push(v + k + 1, v + s, v + s + 1)
+      surf.nv += k + 2
+    }
+  }
+  if (ends) for (const c of onCarriage(crosswalks(lines, ends, ps, t.ox, t.oy), R)) { // kerb to kerb, square across the carriageway
     const nx = -c.ty * c.w / 2, ny = c.tx * c.w / 2
     strip(paint, [c.x - nx, c.y - ny, c.x + nx, c.y + ny], null, CW / 2, 0.06, 102, c.lines, CW, null, null)
   }
+  unstack(surf)
+  // the decks drawn here by 4 m cell: no decal under one (within 2.5 m) or over it
+  const dg = new Map()
+  for (let q = 0; q < surf.I.length; q += 3) {
+    const v = [surf.I[q], surf.I[q + 1], surf.I[q + 2]].map((i) => [surf.P[i * 3], -surf.P[i * 3 + 2], surf.P[i * 3 + 1]])
+    for (let u = Math.floor(Math.min(v[0][0], v[1][0], v[2][0]) / 4); u <= Math.floor(Math.max(v[0][0], v[1][0], v[2][0]) / 4); u++)
+      for (let w = Math.floor(Math.min(v[0][1], v[1][1], v[2][1]) / 4); w <= Math.floor(Math.max(v[0][1], v[1][1], v[2][1]) / 4); w++) { const k = u * 65536 + w; let l = dg.get(k); if (!l) dg.set(k, (l = [])); l.push(v) }
+  }
+  const underDeck = (x, y, z) => {
+    for (const [a, b, c] of dg.get(Math.floor(x / 4) * 65536 + Math.floor(y / 4)) || []) {
+      const d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1])
+      if (!d) continue
+      const l1 = ((b[1] - c[1]) * (x - c[0]) + (c[0] - b[0]) * (y - c[1])) / d, l2 = ((c[1] - a[1]) * (x - c[0]) + (a[0] - c[0]) * (y - c[1])) / d, l3 = 1 - l1 - l2
+      if (l1 < -1e-6 || l2 < -1e-6 || l3 < -1e-6) continue
+      const top = l1 * a[2] + l2 * b[2] + l3 * c[2]
+      if (top > z - 0.3 && top < z + 2.5) return true
+    }
+    return false
+  }
+  const M = ext ? ext.off - 0.1 : 2, S = terr.size // past the next tiles' terrain this tile has (a piece reaching far out: the bake cuts them at the edges) there is no ground to lay paint on
+  refine(paint, decalH, (x, y, z) => x < -M || y < -M || x > S + M || y > S + M || underDeck(x, y, z))
   const pack = (T) => {
     if (!T.nv) return null
     const PP = new Float32Array(T.P)
@@ -424,7 +630,166 @@ function roads(t, terr, lines, level, ps) {
   return { surf: pack(surf), paint: pack(paint) }
 }
 
+// Decals split where the ground bends under them, as the ground's own triangles are (ground(): an edge is halved
+// while the ground along it strays more than 5 cm from the straight line between its ends), so they lie on it: a wide
+// road's stripe across a camber, a crosswalk over a crown. Each point keeps its lift over the ground (heightAt: h).
+// Deck strips drawn over each other within 30 cm (two ways mapped across each other, a footway beside a road deck, two
+// pieces meeting at a slant) flicker where they overlap: the roads first, then the rest by kind (the sidewalk bands
+// among themselves), each strip's triangles left out where one already drawn covers them, split to 30 cm along its edge
+function unstack(T) {
+  const P = T.P, A = T.A, B = T.B, runs = T.runs
+  const layer = (r) => r.kind >= 100 ? 1 : 0, grid = [new Map(), new Map()], G = 2
+  const inside = (t, x, y, h) => { // is (x, y) on accepted triangle t, within 30 cm of its height?
+    const [ax, ay, ah, bx, by, bh, cx, cy, ch] = t, d = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+    if (!d) return false
+    const l1 = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / d, l2 = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / d, l3 = 1 - l1 - l2
+    return l1 >= -1e-6 && l2 >= -1e-6 && l3 >= -1e-6 && Math.abs(l1 * ah + l2 * bh + l3 * ch - h) < 0.3
+  }
+  const near = (g, x0, y0, x1, y1, h0, h1) => { // the accepted triangles whose box meets this one's (and its heights, 30 cm on)
+    const out = new Set()
+    for (let u = Math.floor(x0 / G); u <= Math.floor(x1 / G); u++) for (let w = Math.floor(y0 / G); w <= Math.floor(y1 / G); w++) for (const t of g.get(u * 65536 + w) || [])
+      if (t[9] <= x1 && t[11] >= x0 && t[10] <= y1 && t[12] >= y0 && Math.min(t[2], t[5], t[8]) < h1 + 0.3 && Math.max(t[2], t[5], t[8]) > h0 - 0.3) out.add(t)
+    return [...out]
+  }
+  const v3 = (v) => [P[v * 3], -P[v * 3 + 2], P[v * 3 + 1]]
+  const lerp = (a, b, f) => { const m = P.length / 3; for (let c = 0; c < 3; c++) P.push(P[a * 3 + c] + (P[b * 3 + c] - P[a * 3 + c]) * f); for (let c = 0; c < 4; c++) { A.push(A[a * 4 + c] + (A[b * 4 + c] - A[a * 4 + c]) * f); B.push(B[a * 4 + c] + (B[b * 4 + c] - B[a * 4 + c]) * f) } return m }
+  const cut = (poly, f) => { // the part of a convex polygon (vertex ids) where f(v) <= 0, new vertices on its edges
+    const out = []
+    for (let i = 0; i < poly.length; i++) {
+      const u = poly[i], w = poly[(i + 1) % poly.length], fu = f(u), fw = f(w)
+      if (fu <= 1e-6) out.push(u)
+      if ((fu < -1e-6 && fw > 1e-6) || (fu > 1e-6 && fw < -1e-6)) out.push(lerp(u, w, fu / (fu - fw)))
+    }
+    return out
+  }
+  const sep = (P1, P2) => { // a separating axis among convex P1's edges (apart, or touching along it)
+    const n = P1.length, mx = P1.reduce((s, p) => s + p[0], 0) / n, my = P1.reduce((s, p) => s + p[1], 0) / n
+    for (let i = 0; i < n; i++) {
+      const [x0, y0] = P1[i], [x1, y1] = P1[(i + 1) % n], nx = y0 - y1, ny = x1 - x0, side = Math.sign(nx * (mx - x0) + ny * (my - y0)), nl = Math.hypot(nx, ny) || 1
+      if (nl > 1e-9 && P2.every(([x, y]) => side * (nx * (x - x0) + ny * (y - y0)) / nl < 1e-3)) return true
+    }
+    return false
+  }
+  const area2 = (poly) => { let s = 0; for (let i = 0; i < poly.length; i++) { const a = poly[i], b = poly[(i + 1) % poly.length]; s += P[a * 3] * -P[b * 3 + 2] - P[b * 3] * -P[a * 3 + 2] } return Math.abs(s) }
+  const out = []
+  for (const r of [...runs].sort((p, q) => layer(p) - layer(q) || p.kind - q.kind)) {
+    const g = grid[layer(r)], keep = []
+    const tri = (a, b, c) => {
+      const [pa, pb, pc] = [v3(a), v3(b), v3(c)], me = [pa, pb, pc]
+      const cand = near(g, Math.min(pa[0], pb[0], pc[0]), Math.min(pa[1], pb[1], pc[1]), Math.max(pa[0], pb[0], pc[0]), Math.max(pa[1], pb[1], pc[1]), Math.min(pa[2], pb[2], pc[2]), Math.max(pa[2], pb[2], pc[2]))
+        .filter((t) => { const T3 = [[t[0], t[1]], [t[3], t[4]], [t[6], t[7]]]; return !sep(me, T3) && !sep(T3, me) }) // (those it really overlaps)
+      if (!cand.length) return keep.push(a, b, c)
+      // what is left of it off them: convex pieces of [vertex ids], cut by each one's edges in turn
+      let polys = [[a, b, c]]
+      for (const t of cand) {
+        const T3 = [[t[0], t[1]], [t[3], t[4]], [t[6], t[7]]], next = []
+        for (let poly of polys) {
+          const pv = poly.map((v) => [P[v * 3], -P[v * 3 + 2]])
+          if (sep(pv, T3) || sep(T3, pv)) { next.push(poly); continue } // (a piece clear of it)
+          const pieces = []
+          let inner = poly
+          for (let i = 0; i < 3 && inner.length >= 3; i++) {
+            const [x0, y0] = T3[i], [x1, y1] = T3[(i + 1) % 3], [x2, y2] = T3[(i + 2) % 3], nx = y0 - y1, ny = x1 - x0, sd = Math.sign(nx * (x2 - x0) + ny * (y2 - y0)) || 1
+            const f = (v) => sd * (nx * (P[v * 3] - x0) + ny * (-P[v * 3 + 2] - y0)) // > 0: on its side of this edge
+            const outside = cut(inner, f) // (off this edge of it; the rest goes on to the next edge)
+            if (outside.length >= 3 && area2(outside) > 1e-4) pieces.push(outside) // (not a sliver of nothing)
+            inner = cut(inner, (v) => -f(v))
+          }
+          // where they overlap: the same surface (within 30 cm) only; one passing over or under the other stays whole
+          const d = (t[4] - t[7]) * (t[0] - t[6]) + (t[6] - t[3]) * (t[1] - t[7]), hAt = (x, y) => { const l1 = ((t[4] - t[7]) * (x - t[6]) + (t[6] - t[3]) * (y - t[7])) / d, l2 = ((t[7] - t[1]) * (x - t[6]) + (t[0] - t[6]) * (y - t[7])) / d; return l1 * t[2] + l2 * t[5] + (1 - l1 - l2) * t[8] }
+          if (inner.length >= 3 && d && inner.some((v) => Math.abs(hAt(P[v * 3], -P[v * 3 + 2]) - P[v * 3 + 1]) < 0.3)) next.push(...pieces)
+          else next.push(poly)
+        }
+        polys = next
+      }
+      for (const poly of polys) for (let i = 1; i < poly.length - 1; i++) keep.push(poly[0], poly[i], poly[i + 1])
+    }
+    for (let i = r.i0; i < r.i1; i += 3) tri(T.I[i], T.I[i + 1], T.I[i + 2])
+    for (let i = 0; i < keep.length; i += 3) {
+      const t = [...v3(keep[i]), ...v3(keep[i + 1]), ...v3(keep[i + 2])]
+      t.push(Math.min(t[0], t[3], t[6]), Math.min(t[1], t[4], t[7]), Math.max(t[0], t[3], t[6]), Math.max(t[1], t[4], t[7])) // (its box: 9..12)
+      for (let u = Math.floor(Math.min(t[0], t[3], t[6]) / G); u <= Math.floor(Math.max(t[0], t[3], t[6]) / G); u++)
+        for (let w = Math.floor(Math.min(t[1], t[4], t[7]) / G); w <= Math.floor(Math.max(t[1], t[4], t[7]) / G); w++) { const k = u * 65536 + w; let l = g.get(k); if (!l) g.set(k, (l = [])); l.push(t) }
+      out.push(keep[i], keep[i + 1], keep[i + 2])
+    }
+  }
+  const inRun = new Uint8Array(T.I.length); for (const r of runs) inRun.fill(1, r.i0, r.i1)
+  for (let i = 0; i < T.I.length; i += 3) if (!inRun[i]) out.push(T.I[i], T.I[i + 1], T.I[i + 2]) // (the plates between deck ends)
+  T.I = out; T.nv = P.length / 3
+}
+
+// hidden(x, y, z): a decal point a deck covers (paint under a deck, or poking through its end): dropped, split to 0.75 m
+// along the deck's edge first
+function refine(T, h, hidden, tol = 0.05) {
+  const P = T.P, A = T.A, B = T.B, lift = []
+  for (let v = 0; v < T.nv; v++) lift.push(P[v * 3 + 1] - h(P[v * 3], -P[v * 3 + 2]))
+  const mids = new Map()
+  const bends = (a, b) => {
+    const ax = P[a * 3], ay = -P[a * 3 + 2], bx = P[b * 3], by = -P[b * 3 + 2], L = Math.hypot(bx - ax, by - ay)
+    if (L < 0.3) return 0
+    const ha = h(ax, ay), hb = h(bx, by), k = Math.max(2, Math.ceil(L / 2))
+    for (let i = 1; i < k; i++) { const f = i / k; if (Math.abs(h(ax + (bx - ax) * f, ay + (by - ay) * f) - ha - (hb - ha) * f) > tol) return L }
+    return 0
+  }
+  const mid = (a, b) => {
+    const key = a < b ? a * 4194304 + b : b * 4194304 + a
+    let m = mids.get(key)
+    if (m !== undefined) return m
+    m = P.length / 3; mids.set(key, m)
+    const x = (P[a * 3] + P[b * 3]) / 2, y = -(P[a * 3 + 2] + P[b * 3 + 2]) / 2, l = (lift[a] + lift[b]) / 2
+    P.push(x, h(x, y) + l, -y); lift.push(l)
+    for (let c = 0; c < 4; c++) { A.push((A[a * 4 + c] + A[b * 4 + c]) / 2); B.push((B[a * 4 + c] + B[b * 4 + c]) / 2) }
+    return m
+  }
+  const d2 = (p, q) => (P[p * 3] - P[q * 3]) ** 2 + (P[p * 3 + 2] - P[q * 3 + 2]) ** 2
+  const at = (w) => { let x = 0, y = 0, z = 0; for (const [v, f] of w) { x += P[v * 3] * f; y -= P[v * 3 + 2] * f; z += P[v * 3 + 1] * f } return hidden(x, y, z) }
+  const out = [], tri = (a, b, c, d) => {
+    const hid = [[[a, 1]], [[b, 1]], [[c, 1]], [[a, 0.5], [b, 0.5]], [[b, 0.5], [c, 0.5]], [[c, 0.5], [a, 0.5]], [[a, 1 / 3], [b, 1 / 3], [c, 1 / 3]]].map(at)
+    if (hid.some(Boolean)) {
+      const ab = d2(a, b), bc = d2(b, c), ca = d2(c, a), m = Math.max(ab, bc, ca)
+      if (hid.every(Boolean) || m < 0.56 || d > 24) return
+      if (m === ab) { const q = mid(a, b); tri(a, q, c, d + 1); tri(q, b, c, d + 1) }
+      else if (m === bc) { const q = mid(b, c); tri(a, b, q, d + 1); tri(a, q, c, d + 1) }
+      else { const q = mid(c, a); tri(a, b, q, d + 1); tri(q, b, c, d + 1) }
+      return
+    }
+    if (d < 16) {
+      let ab = bends(a, b), bc = bends(b, c), ca = bends(c, a), m = Math.max(ab, bc, ca)
+      if (!m) { // straight edges round a hump or a hollow (a crown, the twist of a slope): its longest edge (the hairline
+        // this opens to the next triangle is under 5 cm, inside the decal)
+        const x = (P[a * 3] + P[b * 3] + P[c * 3]) / 3, y = -(P[a * 3 + 2] + P[b * 3 + 2] + P[c * 3 + 2]) / 3
+        if (Math.abs(h(x, y) + (lift[a] + lift[b] + lift[c]) / 3 - (P[a * 3 + 1] + P[b * 3 + 1] + P[c * 3 + 1]) / 3) > tol) {
+          ab = d2(a, b); bc = d2(b, c); ca = d2(c, a); m = Math.max(ab, bc, ca)
+        }
+      }
+      if (m > 0) {
+        if (m === ab) { const q = mid(a, b); tri(a, q, c, d + 1); tri(q, b, c, d + 1) }
+        else if (m === bc) { const q = mid(b, c); tri(a, b, q, d + 1); tri(a, q, c, d + 1) }
+        else { const q = mid(c, a); tri(a, b, q, d + 1); tri(q, b, c, d + 1) }
+        return
+      }
+    }
+    out.push(a, b, c)
+  }
+  for (let i = 0; i < T.I.length; i += 3) tri(T.I[i], T.I[i + 1], T.I[i + 2], 0)
+  T.I = out; T.nv = P.length / 3
+}
+
 // ---------------------------------------------------------------- crosswalks
+// the crosswalks whose middle and both ends lie on the carriageway as drawn (R: roadMask; null keeps them all): one
+// placed outside a junction box that falls off it (a short leg, a bend: along() goes on straight) goes where it was
+// mapped, else it is left out
+function onCarriage(cws, R) {
+  if (!R) return cws
+  const on = (x, y) => [[0, 0], [0.5, 0], [-0.5, 0], [0, 0.5], [0, -0.5]].every(([a, b]) => onMask(R, x + a, y + b))
+  const fits = (c, w) => [-1, 0, 1].every((s) => on(c.x - c.ty * (w / 2 - 0.75) * s, c.y + c.tx * (w / 2 - 0.75) * s))
+  const out = []
+  for (const c of cws) {
+    if (fits(c, c.w)) out.push(c)
+    else if (c.jct && c.hit && fits(c.hit, c.w)) out.push({ ...c, ...c.hit, jct: false })
+  }
+  return out
+}
 // One per crossing leg, square across the carriageway it crosses and kerb to kerb as drawn, from OpenStreetMap's
 // crossing ways (footway / cycleway=crossing, often split in two at the road) and its marked crossing nodes (POIs 7:
 // bars, 8: two lines), which often map the same crossing twice. Near a junction it stands just outside the junction
@@ -527,7 +892,7 @@ function crosswalks(lines, ends, ps, ox, oy) {
   const add = (g, cx, cy, ls, node) => { // hits g at one spot (the road's pieces meet there): the one placed best
     let h = null, p = null
     for (const o of g) { const q = place(o, cx - o.x, cy - o.y); if (!p || (q.jct ? 10 : 0) + q.side > (p.jct ? 10 : 0) + p.side) { h = o; p = q } }
-    const c = { x: p.x, y: p.y, tx: p.tx, ty: p.ty, w: h.L.w, lines: ls, node, jct: p.jct }
+    const c = { x: p.x, y: p.y, tx: p.tx, ty: p.ty, w: h.L.w, lines: ls, node, jct: p.jct, hit: { x: h.x, y: h.y, tx: h.tx, ty: h.ty } }
     const o = out.find((o) => Math.hypot(o.x - c.x, o.y - c.y) < 3.5 && Math.abs(o.tx * c.tx + o.ty * c.ty) > 0.8)
     if (!o) return out.push(c)
     if (c.jct && !o.jct) Object.assign(o, { x: c.x, y: c.y, tx: c.tx, ty: c.ty, w: c.w, jct: true })
@@ -782,7 +1147,7 @@ function skirt(B, pts, terr) { // on the drawn ground both sides (a plinth carri
   const out = offset(pts, SKIRT), n = pts.length
   for (let i = 0; i < n; i++) {
     const j = (i + 1) % n, v = B.P.length / 3
-    for (const [q, t] of [[pts[i], 0], [pts[j], 0], [out[j], 1], [out[i], 1]]) { B.P.push(q[0], heightAt(terr, q[0], q[1]) + 0.06, -q[1]); B.T.push(t) }
+    for (const [q, t] of [[pts[i], 0], [pts[j], 0], [out[j], 1], [out[i], 1]]) { B.P.push(q[0], groundOut(terr, q[0], q[1]) + 0.06, -q[1]); B.T.push(t) }
     B.I.push(v, v + 2, v + 1, v, v + 3, v + 2)
   }
 }
@@ -791,7 +1156,7 @@ function lowest(terr, pts) {
   let lo = Infinity
   for (let i = 0; i < pts.length; i++) {
     const a = pts[i], p = pts[(i + 1) % pts.length], k = Math.ceil(Math.hypot(p[0] - a[0], p[1] - a[1]) / 2)
-    for (let s = 0; s < k; s++) lo = Math.min(lo, heightAt(terr, a[0] + ((p[0] - a[0]) * s) / k, a[1] + ((p[1] - a[1]) * s) / k))
+    for (let s = 0; s < k; s++) lo = Math.min(lo, groundOut(terr, a[0] + ((p[0] - a[0]) * s) / k, a[1] + ((p[1] - a[1]) * s) / k))
   }
   return lo
 }
@@ -827,7 +1192,7 @@ const PARKING = 14, CAR_L = 4.6, CAR_W = 1.9
 // way (plugins/life/worker.js parkSide: keep the two in step), so it passes them instead of through them
 const parkSide = (kind, lanes, w) => (kind === K.residential || kind === K.living || kind === K.tertiary && lanes <= 2) && w - 2 * CAR_W >= 2.1 * Math.max(2, lanes) ? CAR_W : 0
 const rnd01 = (x, y) => { const v = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453; return v - Math.floor(v) }
-function parked(t, terr, lines, ps, fp) {
+function parked(t, terr, lines, ps, fp, S) {
   const size = t.size, lot = [], kerb = []
   const G = 16, grid = new Map(), gk = (i, j) => i * 4096 + j // building footprints by cell, for "under a building"
   if (fp) for (let r = 0; r < fp.start.length - 1; r++) {
@@ -838,7 +1203,8 @@ function parked(t, terr, lines, ps, fp) {
   }
   const built = (x, y) => grid.get(gk(Math.floor(x / G), Math.floor(y / G)))?.some((r) => inPoly(x, y, r))
   const inside = (x, y) => x >= 0 && y >= 0 && x < size && y < size
-  const car = (out, x, y, ex, ey) => out.push(x, heightAt(terr, x, y), -y, Math.atan2(ey, ex), rnd01(y, x))
+  const room = (x, y, ex, ey) => !S || S.freeBox(x, y, Math.atan2(ey, ex), CAR_L / 2, CAR_W / 2) // (clear of the buildings, trunks, poles, the cars already parked)
+  const car = (out, x, y, ex, ey) => { out.push(x, heightAt(terr, x, y), -y, Math.atan2(ey, ex), rnd01(y, x)); S?.addBox(x, y, Math.atan2(ey, ex), CAR_L / 2, CAR_W / 2) }
   eachPoly(t, new Set([PARKING]), (flat, holes) => {
     const rings = []
     for (let k = 0; k <= holes.length; k++) { const a = k ? holes[k - 1] : 0, b = k < holes.length ? holes[k] : flat.length / 2, r = []; for (let i = a; i < b; i++) r.push([flat[i * 2], flat[i * 2 + 1]]); rings.push(r) }
@@ -852,7 +1218,7 @@ function parked(t, terr, lines, ps, fp) {
         const x = cx + ca * u - sa * v, y = cy + sa * u + ca * v
         if (!inside(x, y) || rnd01(x, y) > 0.72) continue
         const fx = -sa * face, fy = ca * face, ok = [[1, 1], [1, -1], [-1, 1], [-1, -1]].every(([p, q]) => on(x + fx * p * CAR_L / 2 + fy * q * CAR_W / 2, y + fy * p * CAR_L / 2 - fx * q * CAR_W / 2))
-        if (ok && !built(x, y)) car(lot, x, y, fx, fy)
+        if (ok && !built(x, y) && room(x, y, fx, fy)) car(lot, x, y, fx, fy)
       }
     }
   })
@@ -876,8 +1242,8 @@ function parked(t, terr, lines, ps, fp) {
         const f = s - run
         for (const side of [-1, 1]) { // right of a → b (side -1) faces a → b; the left side the other way, unless one-way
           const x = x0 + ex * f - ey * off * side, y = y0 + ey * f + ex * off * side
-          if (!inside(x, y) || rnd01(x, y) > 0.5 || nearStop(x, y) || built(x, y)) continue
           const d = side < 0 || L.oneway ? 1 : -1
+          if (!inside(x, y) || rnd01(x, y) > 0.5 || nearStop(x, y) || built(x, y) || !room(x, y, ex * d, ey * d)) continue
           car(kerb, x, y, ex * d, ey * d)
         }
       }
@@ -895,7 +1261,16 @@ function parked(t, terr, lines, ps, fp) {
 // -> { pos: tile-local x, height, z, brightness per light, lamps first; lamps: how many }
 const ARM = 1.8 // a single-arm street light's reach over the road (its pool and head are there)
 const LAMP = [[1, 18], [1, 18], [1, 18], [0.85, 20], [0.85, 22], [0.75, 34], null, [0.75, 34], [0.7, 24]] // brightness, step by kind (to pedestrian)
-function lights(t, terr, lines, ps, b) {
+// a pole's foot off the carriageways (R: roadMask, 1 m; the cells round it too): where it is, else the nearest spot
+// within 4 m that is, else null (a lamp on a street's far kerb, a mapped lamp on a junction's corner)
+function offRoad(R, x, y, ok = () => true) { // (ok: and wherever else it may stand)
+  const on = (x, y) => { if (R) for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) if (onMask(R, x + a, y + b)) return true; return !ok(x, y) }
+  if (!on(x, y)) return [x, y]
+  for (let r = 1; r <= 4; r++) for (let k = 0; k < 16; k++) { const px = x + r * Math.cos(k * Math.PI / 8), py = y + r * Math.sin(k * Math.PI / 8); if (!on(px, py)) return [px, py] }
+  return null
+}
+function lights(t, terr, lines, ps, b, R, S) {
+  const clear = (x, y) => !S || S.free(x, y, 0.3) // (off the buildings, the trunks, the poles already up)
   const size = t.size, G = 25, gn = Math.ceil(size / G), built = new Uint8Array(gn * gn), mapped = new Map()
   const cell = (x, y) => Math.floor(y / G) * gn + Math.floor(x / G)
   const fpp = b.footprints?.pts
@@ -904,12 +1279,12 @@ function lights(t, terr, lines, ps, b) {
   const key = (x, y) => Math.floor(x / 14) * 100003 + Math.floor(y / 14)
   const pos = []
   const poles = [] // tile-local x, ground, z, the arm's heading (about +y from +x; NaN: a post-top lamp)
-  for (const p of ps) if (p.kind === 3) { const x = p.x - t.ox, y = p.y - t.oy; if (x < 0 || y < 0 || x >= size || y >= size) continue; const g = heightAt(terr, x, y); pos.push(x, g, -y, 0.8); poles.push(x, g, -y, NaN); mapped.set(key(x, y), 1) }
+  for (const p of ps) if (p.kind === 3) { const f = offRoad(R, p.x - t.ox, p.y - t.oy, clear); if (!f) continue; const [x, y] = f; if (x < 0 || y < 0 || x >= size || y >= size) continue; const g = heightAt(terr, x, y); pos.push(x, g, -y, 0.8); poles.push(x, g, -y, NaN); mapped.set(key(x, y), 1); S?.addDisc(x, y, 0.15) }
   const taken = (x, y) => { for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) if (mapped.has(key(x + di * 14, y + dj * 14))) return true; return false }
   for (const L of lines) {
     const lit = LAMP[L.kind]
     if (!lit || L.layer < 0 || L.crossing) continue
-    const P = L.pts, off = L.w / 2 + 1.2, big = L.kind <= K.primary, [bright, step] = lit
+    const P = L.pts, big = L.kind <= K.primary, [bright, step] = lit
     let s = L.a % step, k = 0, run = 0 // the same lamps whichever tile draws the street
     for (let i = 0; i < P.length / 2 - 1; i++) {
       const x0 = P[i * 2], y0 = P[i * 2 + 1], x1 = P[i * 2 + 2], y1 = P[i * 2 + 3], len = Math.hypot(x1 - x0, y1 - y0)
@@ -917,10 +1292,14 @@ function lights(t, terr, lines, ps, b) {
       const ex = (x1 - x0) / len, ey = (y1 - y0) / len
       for (; s < run + len; s += step, k++) {
         const f = (s - run) / len, side = k & 1 ? 1 : -1
-        const x = x0 + (x1 - x0) * f - ey * off * side, y = y0 + (y1 - y0) * f + ex * off * side
+        const cx = x0 + (x1 - x0) * f, cy = y0 + (y1 - y0) * f, up = L.z && L.z[i] + (L.z[i + 1] - L.z[i]) * f - heightAt(terr, cx, cy) > 1
+        const off = L.w / 2 + (up && !L.band ? -0.4 : 1.2) // (up on a deck: on it, by its railing)
+        const f_ = up ? [cx - ey * off * side, cy + ex * off * side] : offRoad(R, cx - ey * off * side, cy + ex * off * side, clear)
+        if (!f_) continue
+        const [x, y] = f_
         if (x < 0 || y < 0 || x >= size || y >= size || taken(x, y) || (!big && !near(x, y))) continue
-        const z = L.z ? L.z[i] + (L.z[i + 1] - L.z[i]) * f : heightAt(terr, x, y), ax = ey * side, ay = -ex * side // the arm reaches over the kerb lane
-        pos.push(x + ax * ARM, z, -(y + ay * ARM), bright); poles.push(x, z, -y, Math.atan2(ay, ax))
+        const z = up ? L.z[i] + (L.z[i + 1] - L.z[i]) * f : heightAt(terr, x, y), ax = ey * side, ay = -ex * side // the arm reaches over the kerb lane
+        pos.push(x + ax * ARM, z, -(y + ay * ARM), bright); poles.push(x, z, -y, Math.atan2(ay, ax)); if (!up) S?.addDisc(x, y, 0.15)
       }
       run += len
     }
@@ -1315,4 +1694,4 @@ function trees(t, terr) {
   return { pos, info }
 }
 
-export { parse, build, readLines, pois, carEnds, crosswalks, terrain, roads } // for tools/crosswalk_check.mjs, tools/drive_check.mjs, tools/deck_check.mjs
+export { parse, build, readLines, pois, carEnds, crosswalks, onCarriage, roadMask, terrain, roads, eachPoly } // for tools/crosswalk_check.mjs, drive_check.mjs, deck_check.mjs, drawn_check.mjs

@@ -1,0 +1,266 @@
+// node tools/drawn_check.mjs <tiles dir> <i_j> [...]: the geometry rules (tools/geom_rules.py) over what the page draws
+// from baked tiles, built by the page's own code (core/tile-worker.js, plugins/life/worker.js) for the detail tiles of
+// these 4 km cells (their neighbours loaded too). Prints one JSON line per cell: {cell, issues: [{rule, x, y, h, v, what}]}
+//   paint-ground  a ground decal (lane lines, stop lines, crosswalks, rails) off the ground (the terrain grid the drawn ground
+//                 follows to 5 cm, heightAt) by more than TOL
+//   paint-deck    a ground decal within 2.5 m under a deck's top, or over it (seen through or over the deck)
+//   deck-gap      a drivable deck piece with no deck drawn under its lanes
+//   deck-overlap  another deck strip drawn within 3 m over or under a drivable deck's lanes, off by more than 0.15 m
+//   lane-surface  a traffic lane or junction path (where the cars drive) off the surface drawn under it (deck or ground)
+//   crosswalk     a crosswalk (crosswalks()) whose middle or ends are off its carriageway
+//   pole          a street lamp's pole on a carriageway or cycle track, or off the ground with no deck under it
+//   ground-crack  a slit in the drawn ground inside the tile (but round a tunnel's open box): beside an edge no other
+//                 triangle shares, 2 cm out, no ground, or ground more than 1 cm higher or lower (a T-junction's step)
+//   object        things inside each other: parked cars, lamp poles, tree trunks, beach logs and the buildings' footprints
+//   deck-zfight   two deck strips drawn over each other within 3 cm (they flicker)
+import fs from 'node:fs'
+import zlib from 'node:zlib'
+import vm from 'node:vm'
+
+const ROOT = new URL('../public/', import.meta.url)
+const W = await import(new URL('core/tile-worker.js', ROOT).href)
+const { parse, readLines, terrain, roads, pois, build, carEnds, crosswalks, eachPoly } = W
+const onCarriage = W.onCarriage || ((c) => c), roadMask = W.roadMask || (() => null) // (an older tile-worker.js: measuring before a change)
+const { sampleGrid, inPoly } = await import(new URL('core/util.js', ROOT).href)
+const [DIR, ...CELLS] = process.argv.slice(2)
+const TOL = { paint: 0.15, lane: 0.3, deck: 0.15 }
+const CARR = new Set([25, 29, 30]) // cycle, road, arterial (tile-worker.js roadMask)
+const LIFT = (kind) => 0.36 + (18 - kind) * 0.004 // tile-worker.js roads(): a deck strip over its z
+
+const cache = new Map()
+function tile(k) {
+  if (cache.has(k)) return cache.get(k)
+  const f = `${DIR}/0/${k}.bin`
+  let T = null
+  if (fs.existsSync(f)) {
+    const r = fs.readFileSync(f), b = r[0] === 0x1f ? zlib.gunzipSync(r) : r
+    const t = parse(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)), terr = terrain(t), lines = readLines(t)
+    T = { t, terr, lines, ox: t.ox, oy: t.oy, surf: roads(t, terr, lines, 0, pois(t)).surf }
+  }
+  cache.set(k, T)
+  return T
+}
+const keyOf = (x, y) => `${Math.floor(x / 1024)}_${Math.floor(y / 1024)}`
+function ground(x, y) { // the drawn ground (terrain + 0.02): the tile the point is in
+  const T = tile(keyOf(x, y))
+  return T ? sampleGrid(T.terr.h, T.terr.n, 1024, x - T.ox, y - T.oy) + 0.02 : null
+}
+// deck strips of loaded tiles by 8 m cell: [x0, y0, z0, x1, y1, z1, x2, y2, z2, kind]
+const C = 8, grid = new Map(), gridded = new Set()
+function addSurf(k) {
+  if (gridded.has(k)) return
+  gridded.add(k)
+  const T = tile(k), g = T?.surf
+  if (!g) return
+  const P = g.position, I = g.index, K = g.aRoad
+  for (let q = 0; q < I.length; q += 3) {
+    const a = I[q] * 3, b = I[q + 1] * 3, c = I[q + 2] * 3
+    const Tr = [P[a] + T.ox, -P[a + 2] + T.oy, P[a + 1], P[b] + T.ox, -P[b + 2] + T.oy, P[b + 1], P[c] + T.ox, -P[c + 2] + T.oy, P[c + 1], K[I[q] * 4 + 3]]
+    for (let u = Math.floor(Math.min(Tr[0], Tr[3], Tr[6]) / C); u <= Math.floor(Math.max(Tr[0], Tr[3], Tr[6]) / C); u++)
+      for (let v = Math.floor(Math.min(Tr[1], Tr[4], Tr[7]) / C); v <= Math.floor(Math.max(Tr[1], Tr[4], Tr[7]) / C); v++) {
+        const key = u * 65536 + v; let l = grid.get(key); if (!l) grid.set(key, (l = [])); l.push(Tr)
+      }
+  }
+}
+function decks(x, y) { // [[height, kind]] of the deck strips drawn over (x, y)
+  const out = []
+  for (const T of grid.get(Math.floor(x / C) * 65536 + Math.floor(y / C)) || []) {
+    const d = (T[4] - T[7]) * (T[0] - T[6]) + (T[6] - T[3]) * (T[1] - T[7])
+    if (!d) continue
+    const l1 = ((T[4] - T[7]) * (x - T[6]) + (T[6] - T[3]) * (y - T[7])) / d, l2 = ((T[7] - T[1]) * (x - T[6]) + (T[0] - T[6]) * (y - T[7])) / d, l3 = 1 - l1 - l2
+    if (l1 >= -1e-6 && l2 >= -1e-6 && l3 >= -1e-6) out.push([l1 * T[2] + l2 * T[5] + l3 * T[8], T[9]])
+  }
+  return out
+}
+
+function check(cell) {
+  const [ci, cj] = cell.split('_').map(Number), X0 = ci * 4096, Y0 = cj * 4096
+  const own = [], issues = []
+  const inCell = (x, y) => x >= X0 && x < X0 + 4096 && y >= Y0 && y < Y0 + 4096
+  const add = (rule, x, y, h, v, what) => issues.push({ rule, x: +x.toFixed(1), y: +y.toFixed(1), h: +h.toFixed(1), v: +v.toFixed(2), what })
+  for (let a = -1; a <= 4; a++) for (let b = -1; b <= 4; b++) { const k = `${ci * 4 + a}_${cj * 4 + b}`; if (tile(k)) { addSurf(k); if (a >= 0 && a < 4 && b >= 0 && b < 4) own.push(k) } }
+  for (const k of own) {
+    const T = tile(k), out = build(T.t, 0) // what the page draws of it
+    // ---- paint on the ground: each decal triangle at its corners, edge middles and centre
+    const g = out.paint
+    if (g) {
+      const P = g.position, I = g.index
+      for (let q = 0; q < I.length; q += 3) {
+        const v = [I[q] * 3, I[q + 1] * 3, I[q + 2] * 3].map((a) => [P[a] + T.ox, -P[a + 2] + T.oy, P[a + 1]])
+        const pts = [...v, ...[[0, 1], [1, 2], [2, 0]].map(([i, j]) => v[i].map((c, n) => (c + v[j][n]) / 2)), v[0].map((c, n) => (c + v[1][n] + v[2][n]) / 3)]
+        let worst = null
+        for (const [x, y, h] of pts) {
+          const gr = ground(x, y)
+          if (gr == null) continue
+          const dk = decks(x, y).filter(([d]) => d > h - 0.3 && d < h + 2.5)
+          if (dk.length) { if (!worst || worst[0] !== 'paint-deck') worst = ['paint-deck', x, y, h, Math.max(...dk.map(([d]) => d)) - h, 'under a deck']; continue }
+          const off = h - 0.03 - gr // (decals 5 cm over the terrain, the ground 2 cm)
+          if (Math.abs(off) > TOL.paint && (!worst || Math.abs(off) > worst[4])) worst = ['paint-ground', x, y, h, Math.abs(off), `${off.toFixed(2)} m off the ground`]
+        }
+        if (worst) add(...worst)
+      }
+    }
+    // ---- decks: drawn under every drivable deck's lanes, at its profile
+    for (const L of T.lines) {
+      if (!L.drive || L.kind > 7 || !L.z || L.tunnel) continue
+      const P = L.pts, n = P.length / 2
+      for (let i = 0; i < n - 1; i++) {
+        const x0 = P[i * 2] + T.ox, y0 = P[i * 2 + 1] + T.oy, x1 = P[i * 2 + 2] + T.ox, y1 = P[i * 2 + 3] + T.oy, l = Math.hypot(x1 - x0, y1 - y0)
+        if (!l) continue
+        const nx = -(y1 - y0) / l, ny = (x1 - x0) / l
+        for (let s = i ? 0 : 2; s < l; s += 4) {
+          const f = s / l, cx = x0 + (x1 - x0) * f, cy = y0 + (y1 - y0) * f, E = L.z[i] + (L.z[i + 1] - L.z[i]) * f + LIFT(L.kind)
+          for (const o of [-0.35, 0, 0.35]) {
+            const x = cx + nx * o * L.w, y = cy + ny * o * L.w
+            const s1 = decks(x, y).filter(([h, kd]) => kd < 100 && Math.abs(h - E) < 3)
+            if (!s1.length) { add('deck-gap', x, y, E, 3, `no deck drawn (kind ${L.kind} ${L.a}-${L.b})`); continue }
+            const off = s1.reduce((m, [h]) => (Math.abs(h - E) > Math.abs(m) ? h - E : m), 0)
+            if (Math.abs(off) > TOL.deck) add('deck-overlap', x, y, E, Math.abs(off), `another deck ${off.toFixed(2)} m over/under ${L.a}-${L.b}`)
+          }
+        }
+      }
+    }
+    // ---- crosswalks on their carriageway, lamp poles off it
+    const carr = []
+    eachPoly(T.t, CARR, (flat, holes) => {
+      const ring = (a, b) => { const r = []; for (let i = a; i < b; i += 2) r.push([flat[i], flat[i + 1]]); return r }
+      const st = [0, ...holes.map((h) => h * 2), flat.length], rings = st.slice(0, -1).map((a, i) => ring(a, st[i + 1]))
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+      for (const [x, y] of rings[0]) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y) }
+      carr.push({ rings, bb: [x0, y0, x1, y1] })
+    })
+    const onCarr = (x, y) => carr.some(({ rings, bb }) => x >= bb[0] && y >= bb[1] && x <= bb[2] && y <= bb[3] && inPoly(x, y, rings[0]) && !rings.slice(1).some((r) => inPoly(x, y, r)))
+    const lines = T.lines, ps = pois(T.t)
+    for (const c of onCarriage(crosswalks(lines, carEnds(lines), ps, T.ox, T.oy), roadMask(T.t))) { // (as roads() draws them)
+      const half = c.w / 2 - 0.75
+      for (const s of [-1, 0, 1]) {
+        const x = c.x - c.ty * half * s, y = c.y + c.tx * half * s
+        if (x < 0 || y < 0 || x >= 1024 || y >= 1024) continue // (the next tile's ground)
+        if (!onCarr(x, y)) { add('crosswalk', x + T.ox, y + T.oy, ground(x + T.ox, y + T.oy) ?? 0, 1, `crosswalk ${s ? 'end' : 'middle'} off the carriageway`); break }
+      }
+    }
+    const pl = out.lights?.poles
+    // ---- the ground: every triangle edge shared, but on the tile's edge and round a tunnel's open box
+    const gr = out.ground
+    if (gr) {
+      const P = gr.position, I = gr.index, cnt = new Map(), key = (a) => Math.round(P[a * 3] * 50) * 65536 + Math.round(-P[a * 3 + 2] * 50)
+      const tg = new Map(), TG = 4 // the triangles by 4 m cell
+      for (let q = 0; q < I.length; q += 3) {
+        for (const [a, b, o] of [[I[q], I[q + 1], I[q + 2]], [I[q + 1], I[q + 2], I[q]], [I[q + 2], I[q], I[q + 1]]]) {
+          const ka = key(a), kb = key(b), k = ka < kb ? `${ka},${kb}` : `${kb},${ka}`
+          const c = cnt.get(k); if (c) c[0]++; else cnt.set(k, [1, a, b, o])
+        }
+        const xs = [I[q], I[q + 1], I[q + 2]].map((v) => P[v * 3]), ys = [I[q], I[q + 1], I[q + 2]].map((v) => -P[v * 3 + 2])
+        for (let u = Math.floor(Math.min(...xs) / TG); u <= Math.floor(Math.max(...xs) / TG); u++) for (let v = Math.floor(Math.min(...ys) / TG); v <= Math.floor(Math.max(...ys) / TG); v++) { const k = u * 65536 + v; let l = tg.get(k); if (!l) tg.set(k, (l = [])); l.push(q) }
+      }
+      const cover = (x, y) => { // the ground's heights over (x, y)
+        const hs = []
+        for (const q of tg.get(Math.floor(x / TG) * 65536 + Math.floor(y / TG)) || []) {
+          const v = [I[q], I[q + 1], I[q + 2]].map((i) => [P[i * 3], -P[i * 3 + 2], P[i * 3 + 1]])
+          const d = (v[1][1] - v[2][1]) * (v[0][0] - v[2][0]) + (v[2][0] - v[1][0]) * (v[0][1] - v[2][1]); if (!d) continue
+          const l1 = ((v[1][1] - v[2][1]) * (x - v[2][0]) + (v[2][0] - v[1][0]) * (y - v[2][1])) / d, l2 = ((v[2][1] - v[0][1]) * (x - v[2][0]) + (v[0][0] - v[2][0]) * (y - v[2][1])) / d, l3 = 1 - l1 - l2
+          if (l1 >= -1e-6 && l2 >= -1e-6 && l3 >= -1e-6) hs.push(l1 * v[0][2] + l2 * v[1][2] + l3 * v[2][2])
+        }
+        return hs
+      }
+      const open = [] // tunnel pieces' open stretches: [x0, y0, x1, y1, reach]
+      for (const L of T.lines) if (L.tube) for (let i = 0; i < L.pts.length / 2 - 1; i++) if (L.tube[i] || L.tube[i + 1]) open.push([L.pts[i * 2], L.pts[i * 2 + 1], L.pts[i * 2 + 2], L.pts[i * 2 + 3], L.w / 2 + 3])
+      const nearOpen = (x, y) => open.some(([x0, y0, x1, y1, r]) => { const dx = x1 - x0, dy = y1 - y0, f = Math.max(0, Math.min(1, ((x - x0) * dx + (y - y0) * dy) / (dx * dx + dy * dy || 1))); return Math.hypot(x - x0 - dx * f, y - y0 - dy * f) < r })
+      const rim = (v) => v < 0.05 || v > 1023.95
+      for (const [c, a, b, o] of cnt.values()) {
+        if (c !== 1) continue
+        const ax = P[a * 3], ay = -P[a * 3 + 2], bx = P[b * 3], by = -P[b * 3 + 2], L = Math.hypot(bx - ax, by - ay)
+        if (L < 0.02 || (rim(ax) && rim(bx) && Math.abs(ax - bx) < 0.1) || (rim(ay) && rim(by) && Math.abs(ay - by) < 0.1) || nearOpen((ax + bx) / 2, (ay + by) / 2)) continue
+        let nx = -(by - ay) / L, ny = (bx - ax) / L
+        if (nx * (P[o * 3] - ax) + ny * (-P[o * 3 + 2] - ay) > 0) { nx = -nx; ny = -ny } // (out, away from its triangle)
+        for (const f of [0.25, 0.5, 0.75]) {
+          const x = ax + (bx - ax) * f + nx * 0.02, y = ay + (by - ay) * f + ny * 0.02, ox = P[o * 3], oy = -P[o * 3 + 2], dd = (by - oy) * (ax - ox) + (ox - bx) * (ay - oy)
+          const l1 = ((by - oy) * (x - ox) + (ox - bx) * (y - oy)) / dd, l2 = ((oy - ay) * (x - ox) + (ax - ox) * (y - oy)) / dd, h = l1 * P[a * 3 + 1] + l2 * P[b * 3 + 1] + (1 - l1 - l2) * P[o * 3 + 1] // (its own plane carried 2 cm on)
+          if (x < 0 || y < 0 || x > 1024 || y > 1024) continue
+          const hs = cover(x, y)
+          if (!hs.length || hs.every((g) => Math.abs(g - h) > 0.02)) { add('ground-crack', x + T.ox, y + T.oy, h, hs.length ? Math.min(...hs.map((g) => Math.abs(g - h))) : 1, hs.length ? 'a step between ground triangles' : 'a gap in the ground'); break }
+        }
+      }
+    }
+    // ---- objects inside each other (tile-local): boxes [x, y, angle, half length, half width, what], discs [x, y, r, what]
+    const boxes = [], discs = [], fpRings = []
+    const fp = out.footprints, nCars = (out.parked.lot?.length || 0) / 5, nLogs = out.beach?.solid.length || 0
+    if (fp) for (let r = 0; r < fp.start.length - 1 - nCars - nLogs; r++) { const ring = []; for (let q = fp.start[r]; q < fp.start[r + 1]; q += 2) ring.push([fp.pts[q] - T.ox, fp.pts[q + 1] - T.oy]); fpRings.push(ring) }
+    for (const k of ['lot', 'kerb']) { const c = out.parked[k]; for (let i = 0; c && i < c.length; i += 5) boxes.push([c[i], -c[i + 2], c[i + 3], 2.3, 0.95, 'parked car']) }
+    for (const [x, y, a, l, w] of out.beach?.solid || []) boxes.push([x, y, a, l, w, 'beach log'])
+    if (pl) for (let i = 0; i < pl.length; i += 4) if (pl[i + 1] - ground(pl[i] + T.ox, -pl[i + 2] + T.oy) < 1) discs.push([pl[i], -pl[i + 2], 0.15, 'lamp pole']) // (on the ground: one up on a deck is the pole rule's)
+    const tr = out.trees?.pos
+    if (tr) for (let i = 0; i < tr.length; i += 3) discs.push([tr[i], -tr[i + 2], 0.25, 'tree trunk'])
+    const corners = (b) => { const fx = Math.cos(b[2]), fy = Math.sin(b[2]); return [[1, 1], [-1, 1], [-1, -1], [1, -1]].map(([p, q]) => [b[0] + fx * p * b[3] + fy * q * b[4], b[1] + fy * p * b[3] - fx * q * b[4]]) }
+    const inBox = (b, x, y, m = 0) => { const fx = Math.cos(b[2]), fy = Math.sin(b[2]), dx = x - b[0], dy = y - b[1]; return Math.abs(dx * fx + dy * fy) < b[3] + m && Math.abs(dx * fy - dy * fx) < b[4] + m }
+    const G2 = 24, og = new Map(), put = (x, y, v) => { const k = Math.floor(x / G2) * 4096 + Math.floor(y / G2); let l = og.get(k); if (!l) og.set(k, (l = [])); l.push(v) }
+    const near = (x, y, fn) => { for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) for (const v of og.get((Math.floor(x / G2) + i) * 4096 + Math.floor(y / G2) + j) || []) fn(v) }
+    fpRings.forEach((r) => { const [x0, y0, x1, y1] = r.reduce(([a, b, c, d], [x, y]) => [Math.min(a, x), Math.min(b, y), Math.max(c, x), Math.max(d, y)], [1e9, 1e9, -1e9, -1e9]); for (let i = Math.floor(x0 / G2); i <= Math.floor(x1 / G2); i++) for (let j = Math.floor(y0 / G2); j <= Math.floor(y1 / G2); j++) { const k = i * 4096 + j; let l = og.get(k); if (!l) og.set(k, (l = [])); l.push({ ring: r }) } })
+    boxes.forEach((b) => put(b[0], b[1], { box: b })); discs.forEach((d) => put(d[0], d[1], { disc: d }))
+    const hit = new Set(), report = (x, y, what) => { const k = `${Math.round(x * 2)},${Math.round(y * 2)},${what}`; if (!hit.has(k)) { hit.add(k); add('object', x + T.ox, y + T.oy, ground(x + T.ox, y + T.oy) ?? 0, 1, what) } }
+    for (const b of boxes) {
+      const cs = corners(b)
+      near(b[0], b[1], (o) => {
+        if (o.ring) { if (cs.some(([x, y]) => inPoly(x, y, o.ring)) || o.ring.some(([x, y]) => inBox(b, x, y))) report(b[0], b[1], `${b[5]} in a building`) }
+        else if (o.box && o.box !== b && o.box[0] + o.box[1] * 1e-3 < b[0] + b[1] * 1e-3) { if (cs.some(([x, y]) => inBox(o.box, x, y)) || corners(o.box).some(([x, y]) => inBox(b, x, y))) report(b[0], b[1], `${b[5]} on a ${o.box[5]}`) }
+        else if (o.disc && inBox(b, o.disc[0], o.disc[1], o.disc[2])) report(o.disc[0], o.disc[1], `${o.disc[3]} in a ${b[5]}`)
+      })
+    }
+    for (const d of discs) {
+      if (d[3] !== 'lamp pole') continue // (trees: the bake's own; checked against the buildings there)
+      near(d[0], d[1], (o) => {
+        if (o.ring && inPoly(d[0], d[1], o.ring)) report(d[0], d[1], 'lamp pole in a building')
+        else if (o.disc && o.disc !== d && Math.hypot(o.disc[0] - d[0], o.disc[1] - d[1]) < d[2] + o.disc[2]) report(d[0], d[1], `lamp pole in a ${o.disc[3]}`)
+      })
+    }
+    // ---- deck strips over each other within 3 cm: they flicker
+    for (const L of T.lines) {
+      if (!L.z || L.tunnel || L.kind > 13) continue
+      const P = L.pts
+      for (let i = 0; i < P.length / 2 - 1; i++) {
+        const x0 = P[i * 2] + T.ox, y0 = P[i * 2 + 1] + T.oy, x1 = P[i * 2 + 2] + T.ox, y1 = P[i * 2 + 3] + T.oy, l = Math.hypot(x1 - x0, y1 - y0)
+        for (let s = 0; s < l; s += 2) {
+          const hs = decks(x0 + (x1 - x0) * s / l, y0 + (y1 - y0) * s / l).filter(([, k]) => k < 100).map(([h]) => h).sort((a, b) => a - b)
+          for (let q = 1; q < hs.length; q++) if (hs[q] - hs[q - 1] > 0.001 && hs[q] - hs[q - 1] < 0.03) { add('deck-zfight', x0 + (x1 - x0) * s / l, y0 + (y1 - y0) * s / l, hs[q], hs[q] - hs[q - 1], `two deck strips ${(hs[q] - hs[q - 1]).toFixed(3)} m apart`); break }
+        }
+      }
+    }
+    if (pl) for (let i = 0; i < pl.length; i += 4) { // on the ground off the carriageways, or on a deck
+      const x = pl[i], y = -pl[i + 2], h = pl[i + 1], g = ground(x + T.ox, y + T.oy)
+      if (Math.abs(h - (g - 0.02)) < 0.3) { if (onCarr(x, y)) add('pole', x + T.ox, y + T.oy, h, 1, 'lamp pole on a carriageway') }
+      else if (!decks(x + T.ox, y + T.oy).some(([d]) => Math.abs(d - h - 0.36) < 0.5)) add('pole', x + T.ox, y + T.oy, h, Math.abs(h - g), `lamp pole ${(h - g).toFixed(1)} m off the ground, no deck under it`)
+    }
+  }
+  // ---- traffic: the life worker's lanes and junction paths over this cell, on the drawn surface
+  const src = fs.readFileSync(new URL('plugins/life/worker.js', ROOT), 'utf8')
+  const ctx = vm.createContext({ postMessage() {}, performance, console, Math })
+  vm.runInContext(src, ctx)
+  const add_ = []
+  for (let a = -1; a <= 4; a++) for (let b = -1; b <= 4; b++) {
+    const k = `${ci * 4 + a}_${cj * 4 + b}`, T = tile(k)
+    if (!T) continue
+    const pieces = T.lines.filter((L) => L.kind <= 13).map((L) => { const pts = new Float32Array(L.pts.length); for (let q = 0; q < pts.length; q += 2) { pts[q] = L.pts[q] + T.ox; pts[q + 1] = L.pts[q + 1] + T.oy } return { ...L, pts, tunnel: L.tunnel ? 1 : 0 } })
+    add_.push({ key: `0/${k}`, level: 0, ox: T.ox, oy: T.oy, size: 1024, terrain: { n: T.terr.n, h: T.terr.h }, pieces, pois: [] })
+  }
+  ctx.onmessage({ data: { type: 'tiles', add: add_, drop: [] } })
+  ctx.onmessage({ data: { type: 'area', area: { x: X0 + 2048, y: Y0 + 2048, r: 3600, vx: X0 + 2048, vy: Y0 + 2048, vr: 300 } } })
+  const net = vm.runInContext('(() => { const g = buildCars(); let r; while (!(r = g.next()).done); return r.value })()', ctx)
+  for (const g of [...net.lanes, ...[...net.nodes.values()].flatMap((n) => n.conns)]) {
+    if (g.p?.tunnel || g.from?.p?.tunnel || g.to?.p?.tunnel) continue
+    let worst = null
+    for (let s = 0; s <= g.len; s += 2) {
+      const o = vm.runInContext('(g, s) => at(g, s, {})', ctx)(g, s)
+      if (!inCell(o.x, o.y)) continue
+      const hs = decks(o.x, o.y).map(([q]) => q), gr = ground(o.x, o.y)
+      if (gr != null) hs.push(gr)
+      if (!hs.length) continue
+      const near = hs.reduce((b, q) => (Math.abs(o.h - 0.2 - q) < Math.abs(o.h - 0.2 - b) ? q : b))
+      const off = o.h - 0.2 - near
+      if (Math.abs(off) > TOL.lane && (!worst || Math.abs(off) > worst[4])) worst = [o.x, o.y, o.h, off]
+    }
+    if (worst) { const p = g.conn ? g.from.p : g.p; add('lane-surface', worst[0], worst[1], worst[2], Math.abs(worst[3]), `${g.conn ? 'junction path after' : 'lane on'} ${p.z ? 'deck' : 'ground'} piece ${p.a}-${p.b} kind ${p.kind} ${worst[3].toFixed(2)} m off`) }
+  }
+  return issues
+}
+
+for (const cell of CELLS) console.log(JSON.stringify({ cell, issues: check(cell) }))

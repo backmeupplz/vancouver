@@ -172,7 +172,7 @@ def audit(ij):
             if t.get('tunnel') in TUNNEL or t.get('covered') == 'yes' and L['kind'] >= KINDS.index('rail'):
                 add('tunnel', 10 * len(Q), *Q[len(Q) // 2], drawn[len(Q) // 2], L, w, note='tunnel drawn on the surface')
                 continue
-            bad = ok & (np.abs(dev) > 1.5)
+            bad = ok & (np.abs(dev) > 1.5) & np.array([not deck_at(*q) for q in Q])  # (under a bridge the LiDAR's ground is filled in)
             # under a deck: the road below must clear it
             for r0, r1 in runs(bad):
                 if r1 - r0 < 2: continue

@@ -44,9 +44,12 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    drawn ground under the street is the LiDAR's); piers and seawalls in the sea keep their height. SkyTrain guideways
    take the structure the LiDAR sees beside their line where OpenStreetMap draws it a few metres off (at stations),
    long pieces (a bridge's span, one 1.5 km way on the Lions Gate) are cut at the detail tiles' edges so each tile has
-   the part over it, and busways are bus-only streets. `tools/audit_elev.py public/tiles` checks a bake: streets off the ground, decks through
-   buildings, steps at abutments, steep or buried decks, tunnels on the surface or out of the ground (worst first, with
-   view links). `node tools/drive_check.mjs` checks it for driving: the drive plugin's own physics runs headless on the
+   the part over it, and busways are bus-only streets. `tools/geom_rules.py public/tiles` checks a bake against every
+   geometry rule (one registry: buildings on the ground, not in each other, streets through them as passages; decks one
+   surface, no steps, not too steep; paint, traffic lanes and crosswalks on what they are drawn on; poles, trees, beach
+   logs clear of streets, buildings and each other; the ground one layer without seams; and `tools/audit_elev.py`'s
+   streets off the ground, steps at abutments, buried decks, tunnels), each rule's worst with view links; the bake fixes
+   what it can and `tools/bake-all.sh` publishes only with every rule at zero (`FORCE_PUBLISH=1` overrides). `node tools/drive_check.mjs` checks it for driving: the drive plugin's own physics runs headless on the
    tiles with an autopilot driving the 12 m or 18 m bus along every bus route each way and the van along the arterials
    from a grid across the map (`--routes 99,R4`, `--grid 3000`, `--tiles <dir>` for another bake, `--out file.json`),
    and logs every height jump, stuck vehicle, building or railing hit on the road, tilt, drop off a deck, deck through

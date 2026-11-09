@@ -36,10 +36,18 @@ def parse(path):
     return carr, walk, trees
 
 
+def on_streets(path):
+    """the trunks on a carriageway or cycle track: [(x, north)] (tools/geom_rules.py rule 'trunk')"""
+    carr, _, trees = parse(path)
+    if not len(trees) or not carr: return []
+    C = unary_union(carr)
+    shapely.prepare(C)
+    return [tuple(p) for p in trees[shapely.contains_xy(C, trees[:, 0], trees[:, 1])]]
+
+
 def count(path):
     carr, walk, trees = parse(path)
     if not len(trees): return 0, 0, 0
-    pts = shapely.points(trees)
     C = unary_union(carr) if carr else Polygon()
     W = unary_union(walk).difference(C.buffer(1.2)) if walk else Polygon()
     shapely.prepare(C); shapely.prepare(W)

@@ -17,7 +17,7 @@ from common import digest, file_digest, files_digest, code_key, code_data, cpu_s
 from roofs import roof_lookup, valid_poly
 from facades import facade_lookup, NONE as B_NONE, GLASS as B_GLASS, SOLID as B_SOLID
 from lidar_massing import massing_lookup, walls_near
-from geom_rules import apply_rules, selftest as rules_selftest
+from geom_rules import apply_rules, summary, selftest as rules_selftest
 
 OUT = os.environ.get('OUT', 'public/tiles')
 
@@ -428,8 +428,11 @@ def build(ij):
     ground8 = road_ground(dtm, road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0, own=False), X0, Y0, lines)  # 8 m, fitted to the streets
     # the geometry rules (tools/geom_rules.py): their fixes on this cell's buildings and road pieces, then what is left
     g8 = lambda x, y: ndimage.map_coordinates(ground8, [(Y0 + L1 - np.asarray(y)) / 8, (np.asarray(x) - X0) / 8], order=1, mode='nearest')
-    rules = apply_rules(dict(builds=builds, lines=lines, ground=g8, decks=[(np.asarray(L['pts'], float), np.asarray(L['z']), L['w']) for L in lines if L['z'] and not L.get('tube')]))
-    rules = {k: (n, len(left)) for k, (n, left) in rules.items()}
+    # the pieces of the next cells that meet this cell's at its seams (a deck ending at the seam, the street going on)
+    seam = {n for L in lines for n in (L['a'], L['b'])}
+    nxt = [L for a in (-1, 0, 1) for b in (-1, 0, 1) if a or b for L in road_pieces(feat.get('lines', []), dsm, dtm, X0 + a * L1, Y0 + b * L1) if L['a'] in seam or L['b'] in seam]
+    rules = apply_rules(dict(cell=(X0, Y0), next=nxt, builds=builds, lines=lines, ground=g8, trees=trees, beach=beach, carr=polys.get('road', []) + polys.get('arterial', []) + polys.get('cycle', []), decks=[(np.asarray(L['pts'], float), np.asarray(L['z']), L['w']) for L in lines if L['z'] and not L.get('tube')]))
+    rules = {k: dict(fixed=n, **summary(left)) for k, (n, left) in rules.items()}
     for a in range(4):
         for b in range(4):
             tx, ty = X0 + a * L0, Y0 + b * L0
@@ -540,6 +543,18 @@ def road_ground(dtm, pieces, X0, Y0, decks=()):
         near = np.isfinite(dist); f = dist[near] / 12
         want[near] = E[n_[near], 2] * (1 - f) + want[near] * f
         S[near, 2] *= 3  # held to it harder than the LiDAR elsewhere
+    # under a deck: the street 3 m under its underside (tools/audit_elev.py 'under'; the LiDAR has no ground under a
+    # bridge, its ground there is filled in from round it): a street drawn up into the deck is cut down, up to 3 m
+    dk = [(shapely.LineString(L['pts']), L) for L in decks if L['z'] and not L.get('tube') and len(L['pts']) > 1]
+    if dk:
+        from shapely.strtree import STRtree
+        tree = STRtree([g.buffer(L['w'] / 2 + 0.6, cap_style='flat') for g, L in dk]); pts = shapely.points(S[:, :2])
+        for si, q in zip(*tree.query(pts, predicate='intersects')):
+            g, L = dk[q]; f = g.project(pts[si])
+            if min(f, g.length - f) < 12: continue  # (at its ends it comes down to the street)
+            P_ = np.array(L['pts'], float); s_ = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P_, axis=0).T))])
+            under = float(np.interp(f, s_, L['z'])) - (1.6 if KI[L['kind']] <= KI['tertiary'] else 0.9) - 3.0
+            if under < want[si] < under + 3.0: want[si] = under; S[si, 2] *= 3
     k = S[:, 2:3]  # how much each counts: the streets, rail a little (a cut's floor where it shares a cell with the street above)
     fx, fy = (S[:, 0] - X0) / 8, (Y0 + L1 - S[:, 1]) / 8
     i, j = np.clip(np.floor(fx).astype(int), 0, 511), np.clip(np.floor(fy).astype(int), 0, 511)
@@ -1018,7 +1033,7 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
         info = dict(t=t, btype=btype, a=a, shop=shop, lv=lv, ind=ind is not None and shapely.contains_xy(ind, c[0], c[1]), zone=zone(c),
                     fac=fac, year=start_year(t) or fac.get('year') or None, ring=r)
         gid = rnd.randrange(1, 1 << 30)
-        parts = [dict(ring=r, h=cap, mn=0, roof=0, ridge=0, pitch=0, units=None)] if cap else None  # under its parts
+        parts = [dict(ring=r, h=cap, mn=0, roof=0, ridge=0, pitch=0, units=None, cap=True)] if cap else None  # under its parts
         ms = massing_lookup(r) if not mn and not cap else None  # tools/lidar_massing.py: the 2022 LiDAR's own massing, where it has one
         if ms and not parts and not (tag_h and abs(tag_h - max(p['ridge'] or p['h'] for p in ms)) > max(6, 0.3 * tag_h)):
             parts = [dict(p, pitch=0, m22=True) for p in ms]
@@ -1429,6 +1444,7 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
         if t.get('tunnel') in TUNNEL and wid not in TUNNELS: continue
         if t.get('tunnel') == 'building_passage' and (t.get('bridge') not in (None, 'no') or on_level(t)): continue  # a skywalk through a building
         if t.get('covered') == 'yes' and k in ('rail', 'lightrail') and not t.get('tunnel') or t.get('area') == 'yes': continue
+        if k in FOOT and hidden_walk(coords, t): continue
         new = sorted((e[2] for e in APPROACH.get(wid, ()) if e[2]), key=lambda n: n[:2], reverse=True)
         if new:  # an approach touches down between two nodes: a node there
             coords, refs = list(coords), list(refs)
@@ -1475,6 +1491,20 @@ def road_pieces(items, dsm, dtm, X0, Y0, own=True):
     return out
 
 
+def hidden_walk(coords, t):
+    """a walkway OpenStreetMap layers off the ground without a bridge or a tunnel tag, where the LiDAR has a structure
+    over the ground along it: up on a podium or a skywalk (layer >= 1, 3.5 to 15 m up along half of it), or under a
+    building or a plaza (layer < 0, more than 4 m over it along 70%). Drawn on the ground it would run through or under
+    the thing it is on or in: not drawn (tools/audit_elev.py 'untagged', 'tunnel')"""
+    lay = hnum(t.get('layer')) or 0
+    if not lay or t.get('bridge') not in (None, 'no') or t.get('tunnel') not in (None, 'no'): return False
+    Q = np.array(densify([tuple(p) for p in coords], 4.0))
+    if len(Q) * 4 < (20 if lay > 0 else 40): return False
+    up = hr_lookup(Q[:, 0], Q[:, 1], 0) - hr_lookup(Q[:, 0], Q[:, 1], 1)
+    with np.errstate(invalid='ignore'):
+        return bool(((up > 3.5) & (up < 15)).mean() > 0.5) if lay > 0 else bool((up > 4).mean() > 0.7)
+
+
 LONG = 500  # metres: a piece longer than this is cut at the detail tiles' edges, as is one reaching out of its tile
 
 
@@ -1484,6 +1514,12 @@ def reaches_out(pts, m=2.0):
     mid = pts[len(pts) // 2]
     x0, y0 = math.floor(mid[0] / L0) * L0, math.floor(mid[1] / L0) * L0
     return any(x < x0 - m or x > x0 + L0 + m or y < y0 - m or y > y0 + L0 + m for x, y in pts)
+
+
+def halfway(pts):
+    """the point half way along a polyline (the tile a piece cut at the tiles' edges lies in: the mean of its ends can be
+    on the edge, or in the next tile when it leaves and comes back)"""
+    return tuple(shapely.LineString(pts).interpolate(0.5, normalized=True).coords[0]) if len(pts) > 1 else tuple(pts[0])
 
 
 def split_long(d, key):
@@ -1504,7 +1540,7 @@ def split_long(d, key):
     out, ends = [], [0] + cuts + [len(P) - 1]
     for c, (i, j) in enumerate(zip(ends, ends[1:])):
         pts = P[i:j + 1]
-        out.append({**d, 'pts': pts, 'z': Z[i:j + 1] if Z else None, 'tube': T[i:j + 1] if T else None, 'own': ((pts[0][0] + pts[-1][0]) / 2, (pts[0][1] + pts[-1][1]) / 2),
+        out.append({**d, 'pts': pts, 'z': Z[i:j + 1] if Z else None, 'tube': T[i:j + 1] if T else None, 'own': halfway(pts),
                     'a': d['a'] if c == 0 else (3 << 51) + key * 64 + c - 1, 'b': d['b'] if j == len(P) - 1 else (3 << 51) + key * 64 + c})
     return out
 
@@ -2170,6 +2206,70 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
 
 
 # ---------------------------------------------------------------- incremental: a 4 km tile is baked again only when what it reads changed
+MARGIN = 2  # 8 m rows of the next detail tiles' terrain kept round each one (section TERM): paint reaching past a tile's edge lies on them
+
+
+def margins(procs):
+    """after each bake, over every detail tile (a neighbour rebaked changes it): the edge rows two tiles share made one
+    (the 4 km cells' road-fitted grids are each held to their own LiDAR at their edges, sampled half a pixel apart: a
+    step of up to a metre along every cell seam), and each tile's ring of its neighbours' terrain (TERM: n, MARGIN,
+    then the rows over it, under it, the columns left and right of it, int16 decimetres like TERR): the page drapes a
+    decal reaching into the next tile on that tile's own ground (held at the edge, it floated or sank on a slope)
+    -> how many tiles changed"""
+    files = sorted(f for f in os.listdir(f'{OUT}/0') if f.endswith('.bin'))
+    with Pool(procs) as p: H = dict(zip([tuple(map(int, f[:-4].split('_'))) for f in files], p.map(_terr, files, 32)))
+    n = next(iter(H.values())).shape[0]
+    S = {k: v.astype(np.int32) for k, v in H.items()}
+    # shared edges: the mean of the tiles' own (a corner: of the up to four there)
+    F = {k: v.astype(np.int32).copy() for k, v in H.items()}
+    for (i, j), v in S.items():
+        E = S.get((i + 1, j))
+        if E is not None: F[(i, j)][:, -1] = F[(i + 1, j)][:, 0] = np.round((v[:, -1] + E[:, 0]) / 2)
+        N = S.get((i, j + 1))
+        if N is not None: F[(i, j)][0, :] = F[(i, j + 1)][-1, :] = np.round((v[0, :] + N[-1, :]) / 2)
+    for (i, j) in S:  # the corner nodes, over all the tiles that have one
+        c = [(k, r, q) for k, r, q in (((i, j), 0, -1), ((i + 1, j), 0, 0), ((i, j + 1), -1, -1), ((i + 1, j + 1), -1, 0)) if k in S]
+        if len(c) > 1:
+            m = np.round(np.mean([S[k][r, q] for k, r, q in c]))
+            for k, r, q in c: F[k][r, q] = m
+    M = MARGIN
+    jobs = []
+    for (i, j), own in F.items():
+        E = np.pad(own, M, mode='edge')  # (no neighbour: the edge carried on)
+        mid, lo, hi, first, last = slice(M, M + n), slice(0, M), slice(M + n, M + n + M), slice(1, 1 + M), slice(n - 1 - M, n - 1)
+        for (a, b), rows, cols, sr, sc in (((1, 0), mid, hi, slice(None), first), ((-1, 0), mid, lo, slice(None), last), ((0, 1), lo, mid, last, slice(None)),
+                                           ((0, -1), hi, mid, first, slice(None)), ((1, 1), lo, hi, last, first), ((-1, 1), lo, lo, last, last),
+                                           ((1, -1), hi, hi, first, first), ((-1, -1), hi, lo, first, last)):
+            if (i + a, j + b) in F: E[rows, cols] = F[(i + a, j + b)][sr, sc]
+        ring = struct.pack('<HH', n, M) + np.concatenate([E[:M].ravel(), E[-M:].ravel(), E[M:-M, :M].ravel(), E[M:-M, -M:].ravel()]).astype('<i2').tobytes()
+        jobs.append(('%d_%d.bin' % (i, j), own.astype('<i2').tobytes(), ring))
+    with Pool(procs) as p: return sum(p.imap_unordered(_margin, jobs, 32))
+
+
+def _terr(f):
+    b = gzip.decompress(open(f'{OUT}/0/{f}', 'rb').read())
+    o = 20
+    while o < len(b):
+        tag, n = b[o:o + 4], struct.unpack_from('<I', b, o + 4)[0]
+        if tag == b'TERR': m = struct.unpack_from('<H', b, o + 8)[0]; return np.frombuffer(b, '<i2', m * m, o + 10).reshape(m, m).copy()
+        o += 8 + n
+
+
+def _margin(job):
+    """a tile's terrain with its shared edges and its TERM ring, written if they changed it"""
+    f, terr, ring = job
+    path = f'{OUT}/0/{f}'
+    b = gzip.decompress(open(path, 'rb').read())
+    o, keep = 20, bytearray(b[:20])
+    while o < len(b):
+        n = struct.unpack_from('<I', b, o + 4)[0]
+        if b[o:o + 4] == b'TERR': keep += b[o:o + 10] + terr
+        elif b[o:o + 4] != b'TERM': keep += b[o:o + 8 + n]
+        o += 8 + n
+    keep += b'TERM' + struct.pack('<I', len(ring)) + ring
+    return int(write_if_changed(path, gzip.compress(bytes(keep), 7, mtime=0)))
+
+
 def canon(o):
     """o with its numpy arrays as bytes: a repr that is the whole value"""
     if isinstance(o, np.ndarray): return o.shape, o.dtype.str, o.tobytes()
@@ -2360,11 +2460,12 @@ if __name__ == '__main__':
         for r in p.imap_unordered(safe_build, jobs):
             n[r[1]] += 1
             if r[1] == 'ok':
-                man.setdefault('issues', {})['%d_%d' % r[0]] = {k: v[1] for k, v in r[-2].items() if v[1]}  # what each rule left in the cell (not blocking yet)
-                for k, v in r[-2].items(): rules[k] = [a + b for a, b in zip(rules.get(k, [0, 0]), v)]
+                man.setdefault('issues', {})['%d_%d' % r[0]] = r[-2]  # what each rule fixed and left in the cell (tools/geom_rules.py gates on it)
+                for k, v in r[-2].items(): rules[k] = [a + b for a, b in zip(rules.get(k, [0, 0, 0]), (v['fixed'], v['left'], v['allowed']))]
             if r[1] != 'FAILED': cells['%d_%d' % r[0]] = r[-1]; save_manifest(OUT, man)
-            if r[1] != 'same': print(r[:-1] if r[1] != 'FAILED' else r, round(time.time() - t0), 's', flush=True)
+            if r[1] != 'same': print((*r[:-2], {k: (v['fixed'], v['left'], v['allowed']) for k, v in r[-2].items()}) if r[1] == 'ok' else r, round(time.time() - t0), 's', flush=True)
     print(n, 'in', round(time.time() - t0), 's', flush=True)
-    if rules: print('geometry rules (fixed, left):', rules, flush=True)
+    if rules: print('geometry rules (fixed, left, allowed):', rules, flush=True)
+    if n['ok']: print('terrain margins:', margins(procs), 'tiles changed', flush=True)
     write_index(OUT)
 

@@ -36,8 +36,10 @@ services:
       PROCS: ${PROCS:-10}
       FRESH: ${FRESH:-0}
       FORCE: ${FORCE:-0}
+      FORCE_PUBLISH: ${FORCE_PUBLISH:-0} # publish even with geometry defects left (tools/geom_rules.py --gate)
     volumes:
       - ./tools:/w/tools:ro
+      - ./public:/w/public:ro # the page's code: the geometry rules build what it draws (tools/drawn_check.mjs)
       - ./data:/w/data
       - ./public/tiles:/tiles
       - bake-out:/w/out

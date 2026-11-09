@@ -126,12 +126,25 @@ function centre(p) {
   if (p._c) return p._c
   const pts = p.pts, n = pts.length >> 1, zs = p.z
   const X = [], Y = [], H = []
+  const hw = p.w / 2
+  const bends = (x0, y0, x1, y1) => { // does the ground stray from a straight line here, along the centre or a kerb?
+    const l = Math.hypot(x1 - x0, y1 - y0) || 1, nx = -(y1 - y0) / l, ny = (x1 - x0) / l
+    for (const o of [-hw, 0, hw]) {
+      const ax = x0 + nx * o, ay = y0 + ny * o, bx = x1 + nx * o, by = y1 + ny * o
+      if (Math.abs(groundH((ax + bx) / 2, (ay + by) / 2) - (groundH(ax, ay) + groundH(bx, by)) / 2) > 0.04) return true
+    }
+    return false
+  }
+  const ground = (x0, y0, x1, y1, d) => { // points from (x0, y0) up to (not including) (x1, y1), halved while the ground bends
+    if (d < 6 && Math.hypot(x1 - x0, y1 - y0) > 0.6 && bends(x0, y0, x1, y1)) { const mx = (x0 + x1) / 2, my = (y0 + y1) / 2; ground(x0, y0, mx, my, d + 1); ground(mx, my, x1, y1, d + 1) }
+    else { X.push(x0); Y.push(y0); H.push(groundH(x0, y0)) }
+  }
   for (let i = 0; i < n - 1; i++) {
     const x0 = pts[i * 2], y0 = pts[i * 2 + 1], x1 = pts[i * 2 + 2], y1 = pts[i * 2 + 3]
     const m = zs ? 1 : Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 8))
     for (let k = 0; k < m; k++) {
-      const f = k / m, x = x0 + (x1 - x0) * f, y = y0 + (y1 - y0) * f
-      X.push(x); Y.push(y); H.push(zs ? zs[i] + (zs[i + 1] - zs[i]) * f : groundH(x, y))
+      const f = k / m, g = (k + 1) / m, x = x0 + (x1 - x0) * f, y = y0 + (y1 - y0) * f
+      if (zs) { X.push(x); Y.push(y); H.push(zs[i] + (zs[i + 1] - zs[i]) * f) } else ground(x, y, x0 + (x1 - x0) * g, y0 + (y1 - y0) * g, 0)
     }
   }
   const x = pts[n * 2 - 2], y = pts[n * 2 - 1]
@@ -203,18 +216,23 @@ function* buildCars() {
   const nodes = new Map()
   const node = (id, x, y) => {
     let n = nodes.get(id)
-    if (!n) nodes.set(id, (n = { id, x, y, deg: 0, best: 9, half: 0, ins: [], outs: [], conns: [], ctl: null }))
+    if (!n) nodes.set(id, (n = { id, x, y, deg: 0, best: 9, half: 0, deck: true, ins: [], outs: [], conns: [], ctl: null }))
     return n
   }
   for (const p of pieces) {
     if (due()) yield
     const c = centre(p), m = c.x.length - 1
     p.na = node(p.a, c.x[0], c.y[0]); p.nb = node(p.b, c.x[m], c.y[m])
-    for (const n of [p.na, p.nb]) { n.deg++; n.best = Math.min(n.best, p.kind); n.half = Math.max(n.half, p.w / 2) }
+    for (const n of [p.na, p.nb]) { n.deg++; n.best = Math.min(n.best, p.kind); n.half = Math.max(n.half, p.w / 2); n.deck = n.deck && !!p.z }
+  }
+  deckGrid = grid(16)
+  for (const p of pieces) if (p.z && !p.tunnel) for (let i = 0; i < p.pts.length / 2 - 1; i++) {
+    const P = p.pts, k = Math.ceil(Math.hypot(P[i * 2 + 2] - P[i * 2], P[i * 2 + 3] - P[i * 2 + 1]) / 12)
+    for (let s = 0; s <= k; s++) deckGrid.add(P[i * 2] + (P[i * 2 + 2] - P[i * 2]) * s / k, P[i * 2 + 1] + (P[i * 2 + 3] - P[i * 2 + 1]) * s / k, [p, i])
   }
   const cws = new Map()
   const cw = (n, p) => { const k = n.id + ':' + p.key; let o = cws.get(k); if (!o) cws.set(k, (o = { n: 0 })); return o }
-  const cutAt = (n) => n.deg >= 3 ? Math.max(8.4, n.half + 1.2) : n.deg === 2 ? 2.5 : 0
+  const cutAt = (n) => n.deg >= 3 && !n.deck ? Math.max(8.4, n.half + 1.2) : n.deg >= 2 ? 2.5 : 0 // (decks only: a ramp leaving, no box)
   const lanes = []
   for (const p of pieces) {
     if (due()) yield
@@ -297,7 +315,19 @@ function* buildCars() {
         use = opts.filter((a) => a.M.p === o.M.p && a.M.dir === o.M.dir && a.M.li === Math.min(L.li, a.M.n - 1))
         for (const a of use) a.ends = a.type === 'S' && L.li > a.M.li
       }
-      for (const { M, type, ends } of use) { const c = connector(L, M, type, nd, ends); L.outs.push(c); nd.conns.push(c) }
+      const plan = () => use.map(({ M, type, ends }) => {
+        let path = junctionPath(L, M, nd)
+        if (!path.ok) { // across a gap between decks: the nearest lane of that road it can reach on a deck
+          const alt = M.sib.filter((S) => S !== M).sort((a, b) => Math.abs(a.li - M.li) - Math.abs(b.li - M.li)).map((S) => [S, junctionPath(L, S, nd)]).find(([, q]) => q.ok)
+          if (alt) [M, path] = alt
+        }
+        return { M, type, ends, path }
+      })
+      let ways = plan()
+      // none: an outer lane of a wide deck that narrows into ramps here (past its end, beside theirs, is air): it leaves
+      // its lane earlier, over the wide deck
+      for (let k = 0; k < 4 && ways.some((w) => !w.path.ok) && L.len > 12; k++) { Object.assign(L, cut(L, 0, 4)); ways = plan() }
+      for (const { M, type, ends, path } of ways) { const c = connector(L, M, type, nd, ends, path); L.outs.push(c); nd.conns.push(c) }
     }
   }
   // who crosses whose path, and who gives way: inside each junction, and across the junctions of one crossing (both
@@ -343,10 +373,27 @@ function* buildCars() {
 const prio = (c, best) => (c.type === 'S' ? 2 : c.type === 'R' ? 1 : 0) + (c.from.cls === best ? 3 : 0) - (c.ends ? 4 : 0)
 
 const MOVE = { L: 1 | 2 | 32, S: 2 | 4 | 8 | 64, R: 8 | 16 } // turn lane bits: left, slight left, through, slight right, right, u-turn, merge
-function connector(L, M, type, nd, ends) {
+let deckGrid = null // the deck pieces' segments by 16 m cell (buildCars()): what the junction paths to and from a deck drive on
+// the lane height over the deck drawn at (x, y) nearest h (lanes ride 0.17 m over a deck strip), or null where none is
+function deckUnder(x, y, h) {
+  let best = null, bd = 3
+  deckGrid?.near(x, y, ([p, i]) => {
+    const P = p.pts, x0 = P[i * 2], y0 = P[i * 2 + 1], dx = P[i * 2 + 2] - x0, dy = P[i * 2 + 3] - y0, l2 = dx * dx + dy * dy || 1
+    const f0 = ((x - x0) * dx + (y - y0) * dy) / l2, f = Math.max(0, Math.min(1, f0))
+    const over = 0.05 / Math.sqrt(l2) // (the drawn deck goes on 5 cm past its end)
+    if ((i === 0 && f0 < -over) || (i === p.pts.length / 2 - 2 && f0 > 1 + over)) return // past the deck's square end
+    if (Math.hypot(x - x0 - dx * f, y - y0 - dy * f) > p.w / 2) return
+    const z = p.z[i] + (p.z[i + 1] - p.z[i]) * f + 0.53 + (18 - p.kind) * 0.004
+    if (Math.abs(z - h) < bd) { bd = Math.abs(z - h); best = z }
+  })
+  return best
+}
+// the path from lane L's end to lane M's start through a junction: { X, Y, H, ok } (ok: a deck or the ground under it all
+// the way, not the gap between two ramps' decks leaving apart)
+function junctionPath(L, M, nd) {
   const e = L.x.length - 1, x0 = L.x[e], y0 = L.y[e], h0 = L.h[e], x3 = M.x[0], y3 = M.y[0], h3 = M.h[0]
   const a0 = endHeading(L), a3 = startHeading(M), d = Math.hypot(x3 - x0, y3 - y0), k = d * 0.42
-  const n = Math.max(2, Math.min(12, Math.ceil(d / 2))), X = new Float32Array(n + 1), Y = new Float32Array(n + 1), H = new Float32Array(n + 1)
+  const n = Math.max(2, Math.min(40, Math.ceil(d / 1.5))), X = new Float32Array(n + 1), Y = new Float32Array(n + 1), H = new Float32Array(n + 1)
   for (let i = 0; i <= n; i++) {
     const s = i / n, u = 1 - s, b0 = u * u * u, b1 = 3 * u * u * s, b2 = 3 * u * s * s, b3 = s * s * s
     X[i] = b0 * x0 + b1 * (x0 + Math.cos(a0) * k) + b2 * (x3 - Math.cos(a3) * k) + b3 * x3
@@ -357,6 +404,17 @@ function connector(L, M, type, nd, ends) {
     const g0 = groundH(x0, y0), g3 = groundH(x3, y3)
     for (let i = 1; i < n; i++) H[i] += groundH(X[i], Y[i]) - (g0 + ((g3 - g0) * i) / n)
   }
+  let ok = true
+  if (L.p.z || M.p.z) for (let i = 1; i < n; i++) { // to or from a deck: on the deck under the point nearest the line's height, else the ground
+    const d = deckUnder(X[i], Y[i], H[i])
+    if (d != null) H[i] = d
+    else if (!L.p.z || !M.p.z) H[i] = groundH(X[i], Y[i]) + 0.18 + (18 - M.p.kind) * 0.004
+    else ok = false // (deck to deck over no deck: a gap between two ramps leaving apart)
+  }
+  return { X, Y, H, ok }
+}
+function connector(L, M, type, nd, ends, path = junctionPath(L, M, nd)) {
+  const { X, Y, H } = path
   // mv: the way on (which road, which way); ends: this lane ends here and merges into the next lane over
   const c = Object.assign(poly(X, Y, H), { conn: true, node: nd, from: L, to: M, type, cars: [], conflicts: [], yields: [], reserved: 0, group: 0,
     mv: M.p.key + ':' + M.dir, ends,

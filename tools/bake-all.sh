@@ -23,8 +23,14 @@ python3 tools/sea.py
 [ -f data/facades.npz ] || echo "no data/facades.npz (tools/facades.py): walls keep their palettes and the page's own rules"
 OUT=out python3 tools/tiles.py "$P"   # also caches data/mrdem32.npz, which heights.py needs
 OUT=out python3 tools/heights.py      # writes out/index.json, last
+# the gate: every geometry rule (tools/geom_rules.py: the bake's own, the old audits, what the page draws) at zero, or
+# nothing is published (the offenders printed, with view hashes); FORCE_PUBLISH=1 publishes anyway
+if ! python3 tools/geom_rules.py out "$P" --gate; then
+  [ "${FORCE_PUBLISH:-0}" = 1 ] || { echo "not published: geometry defects left (FORCE_PUBLISH=1 to publish anyway)"; exit 1; }
+  echo "FORCE_PUBLISH=1: publishing with geometry defects left"
+fi
 # swap in: new tiles first, then the index that points browsers at them, then drop tiles no longer baked
-X="--exclude index.json --exclude manifest.json --exclude *.key --exclude *.tmp"
+X="--exclude index.json --exclude manifest.json --exclude rules.json --exclude *.key --exclude *.tmp"
 rsync -a $X out/ /tiles/
 cp out/index.json /tiles/index.json
 rsync -a --delete $X --exclude heights.bin out/0/ /tiles/0/
