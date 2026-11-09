@@ -1117,6 +1117,10 @@ function buildings(t, terr, level, lines, carriage) {
       cx += t.ox; cy += t.oy
       if (MASKS.some((m) => cx >= m.bb[0] && cx <= m.bb[2] && cy >= m.bb[1] && cy <= m.bb[3] && inPoly(cx, cy, m.r))) continue
     }
+    if (detail && mn > 1.5 && h - mn < 0.7 && h < 3.6 && np <= 8) for (const [x, y] of pts) { // a porch roof: posts under its free corners
+      const ix = x * 0.9 + pts.reduce((m, q) => m + q[0], 0) / np * 0.1, iy = y * 0.9 + pts.reduce((m, q) => m + q[1], 0) / np * 0.1
+      if (!grid.get(gk(Math.floor(ix / G), Math.floor(iy / G)))?.some((b) => b !== rec && b.mn < 0.5 && inPoly(ix, iy, b.pts))) post(W, ix, iy, groundOut(terr, ix, iy), base + mn)
+    }
     if (detail && mn < 2.5) { for (const [x, y] of pts) fp.push(x + t.ox, y + t.oy); fpStart.push(fp.length) } // parts you can drive under are left out
     if (!gid) gid = (Math.imul(Math.round(pts[0][0] * 10 + t.ox), 73856093) ^ Math.imul(Math.round(pts[0][1] * 10 + t.oy), 19349663)) >>> 0 || 1
     if (area(pts) < 0) pts.reverse() // counter-clockwise (y north)
@@ -1126,13 +1130,13 @@ function buildings(t, terr, level, lines, carriage) {
     // 7 big box, 8 Vancouver Special, 9 glass condo, 10 window bands; the storefront and the storey height ride along
     // (see materials.js)
     let style = 1
-    if (style0 === 0) style = h < 4 ? -1 : r < 0.5 ? 5 : 1
+    if (style0 === 0) style = h < 2.5 ? -1 : r < 0.5 ? 5 : 1 // (a bungalow's eaves stand under 4 m: windows still)
     else if (style0 === 2) style = 2
     else if (style0 === 6) style = tower ? (r < 0.8 ? 9 : 2) : 2
     else if (style0 === 1) style = tower ? (r < 0.15 ? 2 : r < 0.85 ? 3 : 1) : h > 9 && r < 0.4 ? 3 : 1
     else if (style0 === 8) style = 6
     else if (style0 === 9) style = 7
-    else if (style0 === 11) style = h < 3 ? -1 : 5
+    else if (style0 === 11) style = h < 2.5 ? -1 : 5
     else if (style0 === 12) style = 8
     const front = !!(bits & 1) || (style0 === 4 && !(fl & 32) && h >= 5) // old tiles: commercial = storefront
     if (style0 === 4 && h < 5) style = -1
@@ -1153,27 +1157,39 @@ function buildings(t, terr, level, lines, carriage) {
     if (detail && mn < 0.5 && np <= 120) skirt(AO, pts, terr)
     // a plinth: one base for a footprint on a slope leaves its walls in the air on the downhill side, so a part standing
     // on the ground (no min height) has its walls carried on, windowless, down to the lowest drawn ground along its outline
-    const lo = mn < 0.5 ? lowest(terr, pts) - 0.3 : y0, plinth = lo < y0 - 0.45, plC = shade(wall, 0.82)
+    const lows = mn < 0.5 ? wallLows(terr, pts) : null, lo = lows ? Math.min(...lows) - 0.3 : y0, plinth = lo < y0 - 0.45, plC = shade(wall, 0.82)
     // walls, each by what it faces (after Slop Toronto's footprint edges): on the low and mid-rise walls of brick, siding
     // and punched windows (rows of shops and houses; not glass towers) a wall a neighbour covers for 60% of its height or
     // more, or a sliver, is a windowless party wall; a storefront only where the wall looks onto a street (all of
     // them where the tile can't tell: the overview); the rest keep the building's pattern
     const rowWalls = detail && y1 - y0 < 25 && (style === 1 || style === 5 || style === 8 || style === 10) // brick, siding, punched: not glass towers
     const shopEdges = front && carriage ? pts.map((a, i) => streetSide(a, pts[(i + 1) % np], carriage)) : null
-    if (shopEdges && mn < 2.5 && h >= 4) for (let i = 0; i < np; i++) if (shopEdges[i]) fronts.push(pts[i][0], pts[i][1], pts[(i + 1) % np][0], pts[(i + 1) % np][1], base)
-    let u = 0
+    // the house's front door: on the wall that looks onto the street, nearest it (materials.js draws it in that wall's
+    // middle window bay, on the ground floor)
+    const home = detail && carriage && mn < 0.5 && np <= 60 && h - mn >= 2.5 && (style0 === 0 || style0 >= 11 || style0 === 1 && h < 16)
+    let door = -1
+    if (home) { let best = 99; for (let i = 0; i < np; i++) { const d = streetSide(pts[i], pts[(i + 1) % np], carriage, 24); if (d && d < best) { best = d; door = i } } }
     for (let i = 0; i < np; i++) {
       const a = pts[i], p = pts[(i + 1) % np], len = Math.hypot(p[0] - a[0], p[1] - a[1]) || 1
       const nx = (p[1] - a[1]) / len, nz = (p[0] - a[0]) / len // outward in (x, z=-y)
       const mx = (a[0] + p[0]) / 2, my = (a[1] + p[1]) / 2
-      const party = rowWalls && (len < 2 || covered(rec, mx + nx * 0.8, my - nz * 0.8, mx - nx * 0.8, my + nz * 0.8, y0, y1))
+      const lk = looks && looks[i * 4] & 7, B = bayOf(lk && (style === 1 || style === 2 || style === 10) ? LOOK_STYLE[lk] : style, looks ? looks[i * 4 + 1] : 0)
+      const nb = Math.round(len / B) // whole window bays on each wall: none cut by a corner, none on a sliver
+      const party = nb < 1 || rowWalls && (len < 2 || covered(rec, mx + nx * 0.8, my - nz * 0.8, mx - nx * 0.8, my + nz * 0.8, y0, y1))
       const kind = party ? fq / 64 : shopEdges && !shopEdges[i] && styleW % 1 >= 0.5 ? styleW - 0.5 : styleW
-      const w = (uu, yy) => [kind, uu, yy - base, seed + use]
+      // on a slope a wall whose own ground runs more than 0.45 m under the building's foot goes down to it with its
+      // pattern, its floors counted from there (the shop on the low street, the hill behind): no blank plinth under it
+      const own = lows ? lows[i] - 0.3 : y0, foot = own < y0 - 0.45 ? Math.max(lo, own) : y0
+      const dr = i === door && !party ? 4 : 0, u0 = (dr ? 64 * (1 + (i & 7)) - (nb >> 1) : 1 + ((i * 37) & 63)) * B, us = (nb || 1) * B / len
+      const w = (s, yy) => [kind, u0 + s * us, yy - (foot < y0 ? foot : base), seed + use + dr]
       if (looks && !party) FAC = looks.subarray(i * 4, i * 4 + 4)
-      quad(W, [a[0], y0, -a[1]], [p[0], y0, -p[1]], [p[0], y1, -p[1]], [a[0], y1, -a[1]], wall, [nx, 0, nz], w(u, y0), w(u + len, y0), w(u + len, y1), w(u, y1))
+      quad(W, [a[0], foot, -a[1]], [p[0], foot, -p[1]], [p[0], y1, -p[1]], [a[0], y1, -a[1]], wall, [nx, 0, nz], w(0, foot), w(len, foot), w(len, y1), w(0, y1))
       FAC = NOFAC
-      if (plinth) quad(W, [a[0], lo, -a[1]], [p[0], lo, -p[1]], [p[0], y0, -p[1]], [a[0], y0, -a[1]], plC, [nx, 0, nz], [0, u, 0, seed], [0, u + len, 0, seed], [0, u + len, 0, seed], [0, u, 0, seed])
-      u += len
+      if (shopEdges?.[i] && mn < 2.5 && h >= 4) {
+        fronts.push(a[0], a[1], p[0], p[1], foot) // (the shop signs, on the fascia over the glass)
+        if (!party && len >= 3 && ((seed * 7919) % 1) < 0.6) awnings(W, a, p, len, foot, nx, nz, seed)
+      }
+      if (plinth && foot === y0) quad(W, [a[0], lo, -a[1]], [p[0], lo, -p[1]], [p[0], y0, -p[1]], [a[0], y0, -a[1]], plC, [nx, 0, nz], [0, 0, 0, seed], [0, len, 0, seed], [0, len, 0, seed], [0, 0, 0, seed])
     }
     const flat = !roofShape || !ridge || ridge <= h
     if (flat) {
@@ -1231,22 +1247,61 @@ function skirt(B, pts, terr) { // on the drawn ground both sides (a plinth carri
   }
 }
 // the lowest drawn ground along a ring (tile-local), every 2 m
-function lowest(terr, pts) {
-  let lo = Infinity
-  for (let i = 0; i < pts.length; i++) {
-    const a = pts[i], p = pts[(i + 1) % pts.length], k = Math.ceil(Math.hypot(p[0] - a[0], p[1] - a[1]) / 2)
-    for (let s = 0; s < k; s++) lo = Math.min(lo, groundOut(terr, a[0] + ((p[0] - a[0]) * s) / k, a[1] + ((p[1] - a[1]) * s) / k))
+// a storefront's awnings along the wall a -> p (outward nx, nz in x, z): one a shop (about 7.5 m), sloping 1.3 m out
+// from 3 m up, a valance at the front, each its own canvas colour; seen from under them too
+const AWN = [0x2f5a3c, 0x7a2a2a, 0x1f2e4a, 0x2a2a2a, 0xb0402e, 0x8a6a3a, 0x3a6a7a, 0x5a2a4a].map(lin)
+function awnings(W, a, p, len, foot, nx, nz, seed) {
+  const n = Math.max(1, Math.round(len / 7.5)), ex = (p[0] - a[0]) / len, ey = (p[1] - a[1]) / len, ox = nx * 1.3, oy = -nz * 1.3, pw = ROOFW(seed)
+  const y0 = foot + 3.05, y1 = foot + 2.6, yv = y1 - 0.28
+  for (let k = 0; k < n; k++) {
+    const c = AWN[Math.floor(((seed * 13.7 + k * 0.381) % 1) * AWN.length)], s0 = (k * len) / n + 0.3, s1 = ((k + 1) * len) / n - 0.3
+    const A = [a[0] + ex * s0, a[1] + ey * s0], P = [a[0] + ex * s1, a[1] + ey * s1]
+    const top = [[A[0], y0, -A[1]], [P[0], y0, -P[1]], [P[0] + ox, y1, -(P[1] + oy)], [A[0] + ox, y1, -(A[1] + oy)]]
+    quad(W, ...top, c, [nx * 0.4, 1, nz * 0.4], pw)
+    quad(W, ...top, shade(c, 0.6), [-nx * 0.4, -1, -nz * 0.4], pw) // (its underside)
+    quad(W, top[3], top[2], [P[0] + ox, yv, -(P[1] + oy)], [A[0] + ox, yv, -(A[1] + oy)], shade(c, 0.9), [nx, 0, nz], pw)
   }
-  return lo
+}
+// a porch post (0.2 m square) from the ground at y0 up to y1 at tile-local (x, y north)
+function post(W, x, y, y0, y1) {
+  const r = 0.1, c = lin(0xf2f0ea), pw = ROOFW(0.5), P = (dx, dy, yy) => [x + dx, yy, -(y + dy)]
+  for (const [dx, dy, ex, ey] of [[-r, -r, 1, 0], [r, -r, 0, 1], [r, r, -1, 0], [-r, r, 0, -1]])
+    quad(W, P(dx, dy, y0), P(dx + 2 * r * ex, dy + 2 * r * ey, y0), P(dx + 2 * r * ex, dy + 2 * r * ey, y1), P(dx, dy, y1), c, [ey, 0, ex], pw)
+}
+// the lowest drawn ground along each wall of a counter-clockwise ring, at its foot and 0.6 m out (every 2 m)
+function wallLows(terr, pts) {
+  const n = pts.length
+  return pts.map((a, i) => {
+    const p = pts[(i + 1) % n], l = Math.hypot(p[0] - a[0], p[1] - a[1]) || 1, k = Math.ceil(l / 2), ox = ((p[1] - a[1]) / l) * 0.6, oy = (-(p[0] - a[0]) / l) * 0.6
+    let lo = Infinity
+    for (let s = 0; s <= k; s++) { const x = a[0] + ((p[0] - a[0]) * s) / k, y = a[1] + ((p[1] - a[1]) * s) / k; lo = Math.min(lo, groundOut(terr, x, y), groundOut(terr, x + ox, y + oy)) }
+    return lo
+  })
+}
+// the window bay a facade pattern lays along a wall (materials.js, by the pattern after the wall's LiDAR glazing: LOOK_STYLE;
+// lb: the LiDAR's bay code)
+const LOOK_STYLE = [1, 1, 16, 10, 2, 17, 1, 1]
+function bayOf(style, lb) {
+  const b = lb > 0.5 ? 0.5 + 0.05 * lb : 0
+  if (style === 2) return b ? Math.min(3.2, Math.max(1, b)) : 1.6
+  if (style === 10) return b ? Math.min(3, Math.max(1, b)) : 1.5
+  if (style === 3) return 3.2
+  if (style === 9) return 1.5
+  if (style === 5) return 3.4
+  if (style === 8) return 4.2
+  if (style === 6) return 0.9
+  if (style === 1 || style === 16) return b || 3
+  return 0.5 // (big box, blank walls: no bays to fit)
 }
 const onMask = (R, x, y) => { const i = Math.floor(x), j = Math.floor(y); if (i < 0 || j < 0 || i >= R.n || j >= R.n) return false; const k = j * R.n + i; return !!(R.bits[k >> 3] & (1 << (k & 7))) }
 // does the wall a -> p (a counter-clockwise ring's) look onto a street: 3 m long or more, a carriageway within 18 m straight out
-function streetSide(a, p, R) {
+// (or within `far` m): how far, 0 if not
+function streetSide(a, p, R, far = 18) {
   const len = Math.hypot(p[0] - a[0], p[1] - a[1])
-  if (len < 3) return false
+  if (len < 3) return 0
   const nx = (p[1] - a[1]) / len, ny = -(p[0] - a[0]) / len, mx = (a[0] + p[0]) / 2, my = (a[1] + p[1]) / 2
-  for (let d = 3; d <= 18; d += 3) if (onMask(R, mx + nx * d, my + ny * d)) return true
-  return false
+  for (let d = 3; d <= far; d += 3) if (onMask(R, mx + nx * d, my + ny * d)) return d
+  return 0
 }
 // a storefront's walls that face a street (a carriageway within 18 m straight out): a light every 3.5 m along them,
 // 2.2 m out on the sidewalk
@@ -1603,7 +1658,7 @@ function roof(W, pts, y1, yr, shape, bits, rc, wall, seed) {
     tri(W, at(-L, s * Wd, y1), at(L, s * Wd, y1), at(r, 0, yr), rc, side, pw)
     tri(W, at(-L, s * Wd, y1), at(r, 0, yr), at(-r, 0, yr), rc, side, pw)
     const end = [ax[0] * s, 0, -ax[1] * s]
-    if (gable) tri(W, at(s * hl, Wd, y1), at(s * hl, -Wd, y1), at(s * hl, 0, yr), endC, end, pw)
+    if (gable) { const g = 20 + Math.min(15.9, yr - y1) / 16; tri(W, at(s * hl, Wd, y1), at(s * hl, -Wd, y1), at(s * hl, 0, yr), endC, end, [g, Wd, 0, seed], [g, -Wd, 0, seed], [g, 0, yr - y1, seed]) } // (materials.js: shingles, an attic window)
     else tri(W, at(s * L, Wd, y1), at(s * L, -Wd, y1), at(s * r, 0, yr), rc, [end[0], 1, end[2]], pw)
   }
 }
@@ -1773,4 +1828,4 @@ function trees(t, terr) {
   return { pos, info }
 }
 
-export { parse, build, readLines, pois, carEnds, crosswalks, onCarriage, roadMask, terrain, roads, eachPoly } // for tools/crosswalk_check.mjs, drive_check.mjs, deck_check.mjs, drawn_check.mjs
+export { parse, build, readBuilding, readLines, pois, carEnds, crosswalks, onCarriage, roadMask, terrain, roads, eachPoly } // for tools/crosswalk_check.mjs, drive_check.mjs, deck_check.mjs, drawn_check.mjs

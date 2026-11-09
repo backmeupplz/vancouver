@@ -11,6 +11,8 @@
 //   pole          a street lamp's pole on a carriageway or cycle track, or off the ground with no deck under it
 //   ground-crack  a slit in the drawn ground inside the tile (but round a tunnel's open box): beside an edge no other
 //                 triangle shares, 2 cm out, no ground, or ground more than 1 cm higher or lower (a T-junction's step)
+//   bldg-plinth   a building's windowless plinth (its walls carried down a slope) more than TOL over the ground beside it:
+//                 a blank band under the building that reads as a building in the air from the street
 //   object        things inside each other: parked cars, lamp poles, tree trunks, beach logs and the buildings' footprints
 //   ground-seam   a step over 2 cm between a tile's ground and the next tile's along their shared edge (#557)
 //   deck-zfight   two deck strips drawn over each other within 3 cm (they flicker; not where they only meet along an edge)
@@ -24,7 +26,7 @@ const { parse, readLines, terrain, roads, pois, build, carEnds, crosswalks, each
 const onCarriage = W.onCarriage || ((c) => c), roadMask = W.roadMask || (() => null) // (an older tile-worker.js: measuring before a change)
 const { sampleGrid, inPoly } = await import(new URL('core/util.js', ROOT).href)
 const [DIR, ...CELLS] = process.argv.slice(2)
-const TOL = { paint: 0.15, lane: 0.3, deck: 0.15 }
+const TOL = { paint: 0.15, lane: 0.3, deck: 0.15, plinth: 1.2 }
 const CARR = new Set([25, 29, 30]) // cycle, road, arterial (tile-worker.js roadMask)
 const LIFT = (kind) => 0.36 + (18 - kind) * 0.004 // tile-worker.js roads(): a deck strip over its z
 
@@ -220,6 +222,19 @@ function check(cell) {
         if (d > 0.02 && (!worst || d > worst[1])) worst = [s, d, ha[0]]
       }
       if (worst) add('ground-seam', T.ox + (u ? worst[0] : 1024), T.oy + (u ? 1024 : worst[0]), worst[2], worst[1], `a step in the ground across the tile's ${u ? 'north' : 'east'} edge`)
+      }
+    // ---- a building's windowless plinth (tile-worker.js buildings(): its walls carried down a slope) showing more than
+    // TOL.plinth over the ground just outside it: from the street a blank band under the building, as if it stood in the air
+    const bw = out.buildings
+    if (bw?.position) {
+      const P = bw.position, N = bw.normal, A = bw.aWin, seen = new Set()
+      for (let v = 0; v < P.length / 3; v += 3) {
+        if (Math.abs(N[v * 3 + 1]) > 10 || A[v * 4] !== 0 || A[v * 4 + 2] !== 0) continue // (plinths: no pattern, z 0)
+        const xs = [0, 1, 2].map((k) => P[(v + k) * 3] + T.ox), ys = [0, 1, 2].map((k) => -P[(v + k) * 3 + 2] + T.oy), hs = [0, 1, 2].map((k) => P[(v + k) * 3 + 1])
+        const x = (Math.min(...xs) + Math.max(...xs)) / 2 + (N[v * 3] / 127) * 0.6, y = (Math.min(...ys) + Math.max(...ys)) / 2 - (N[v * 3 + 2] / 127) * 0.6
+        const g = ground(x, y), top = Math.max(...hs), k = `${Math.round(x)},${Math.round(y)}`
+        if (g != null && top - g > TOL.plinth && !seen.has(k)) { seen.add(k); add('bldg-plinth', x, y, g, top - g, `a blank plinth ${(top - g).toFixed(1)} m tall under a building's wall`) }
+      }
     }
     // ---- objects inside each other (tile-local): boxes [x, y, angle, half length, half width, what], discs [x, y, r, what]
     const boxes = [], discs = [], fpRings = []

@@ -26,6 +26,9 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    comes from OSM (material, colours, levels for the window rows, heritage, shops for storefronts) and from the
    neighbourhood: Gastown, Chinatown and Yaletown brick, West End concrete towers, downtown glass condos, Granville
    Island tin sheds, character houses (steep roofs, siding, porches) and Vancouver Specials told apart by their roofs.
+   The page lays each wall's windows out in whole bays (none cut by a corner), gives houses a front door on the wall
+   facing the street, gable ends shingles and an attic window, porch roofs their posts, Specials their front balcony
+   railing and storefronts awnings; on a slope each wall goes down to its own ground (the shop on the low street).
    Under bridges and SkyTrain guideways the LiDAR sees the deck, so it is not used for roofs or trees there.
    Bridge decks are profiled once for the whole map (cached in `data/decks.pkl`): the low LiDAR surface across the
    deck, trusses and stay cables dropped, grades clamped to 7%; sidewalks and cycle decks ride on the road deck beside
