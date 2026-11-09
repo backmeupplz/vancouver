@@ -662,6 +662,7 @@ def massing_lookup(ring):
             if db:  # the part arrays are not per footprint: keep them aside
                 d = np.load(f)
                 db['parts'] = {k: d[k] for k in ('prc', 'pro', 'pfoot', 'ptop', 'proof', 'pridge')}
+                db['parts']['clip'] = f == OUT_LM  # (in parts: tiles.py db_rows keys the tile on the per-footprint fields)
                 _DB.append(db)
     from roofs import valid_poly
     q = valid_poly(tuple(map(tuple, ring)))
@@ -686,13 +687,33 @@ def _lookup(db, q):
     for i in range(int(_DB['po'][h]), int(_DB['po'][h]) + int(_DB['pn'][h])):
         r = [tuple(map(float, p)) for p in P['prc'][P['pro'][i]:P['pro'][i + 1]]]
         if P['proof'][i] == UNIT: units.append((r, float(P['pfoot'][i]), float(P['ptop'][i])))
-        else: out.append(dict(ring=r, mn=float(P['pfoot'][i]), h=float(P['ptop'][i]), roof=int(P['proof'][i]), ridge=float(P['pridge'][i]), units=[]))
+        else:
+            if P['clip']:  # the regional sets: a part kept to its footprint (#554)
+                r = _clip(r, q)
+                if r is None: continue
+            out.append(dict(ring=r, mn=float(P['pfoot'][i]), h=float(P['ptop'][i]), roof=int(P['proof'][i]), ridge=float(P['pridge'][i]), units=[]))
     for r, f, t in units:  # plant: a box on the roof it stands on (tiles.py's units: centre, along, across, height, angle)
         (ax, ay), (bx, by), (cx, cy) = r[0], r[1], r[2]
         mx, my = (ax + cx) / 2, (ay + cy) / 2
         on = [p for p in out if abs(p['h'] - f) < 1.0 and not p['roof'] and shapely.contains_xy(Polygon(p['ring']), mx, my)]
         if on and t - on[0]['h'] > 0.4: on[0]['units'].append((mx, my, min(25.0, math.hypot(bx - ax, by - ay)), min(25.0, math.hypot(cx - bx, cy - by)), min(12.0, t - on[0]['h']), math.atan2(by - ay, bx - ax)))
     return out
+
+
+def _clip(r, q):
+    """a part's ring cut to its footprint q (the largest piece; None under 2 m2 left). The regional sets classify few
+    buildings: the unclassified returns by a footprint stand in, so a tree's crown or a neighbour's eave within REACH
+    of it widened a part past its walls, over the street and the house next door (the City's own overhangs, a lookout
+    or a widening top, are real and keep their outline)"""
+    import shapely
+    from shapely.geometry import Polygon
+    p = Polygon(r)
+    if not p.is_valid: p = p.buffer(0)
+    if q.buffer(0.05).contains(p): return r
+    g = p.intersection(q)
+    g = max(getattr(g, 'geoms', [g]), key=lambda h: h.area if h.geom_type == 'Polygon' else 0)
+    if g.geom_type != 'Polygon' or g.area < 2: return None
+    return [tuple(map(float, c)) for c in shapely.simplify(g, 0.05).exterior.coords[:-1]]
 
 
 _WT = None

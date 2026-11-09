@@ -272,7 +272,8 @@ def overlap_fix(tile):
             if k in drop or q in drop: continue
             lo_, hi_ = (k, q) if B[k]['base'] + (B[k]['mn'] or 0) <= B[q]['base'] + (B[q]['mn'] or 0) else (q, k)
             top = lambda b: b['base'] + max(b['h'], b.get('ridge') or 0)
-            if (B[hi_]['mn'] or 0) >= 0.5 and B[hi_]['base'] + B[hi_]['mn'] > B[lo_]['base'] + (B[lo_]['mn'] or 0) + 0.5 and top(B[hi_]) > top(B[lo_]) + 0.5:
+            flat = (B[lo_].get('ridge') or 0) <= B[lo_]['h'] + 0.5  # (on a pitched roof's ridge it would hang over its slopes: bldg-air takes it back down)
+            if flat and (B[hi_]['mn'] or 0) >= 0.5 and B[hi_]['base'] + B[hi_]['mn'] > B[lo_]['base'] + (B[lo_]['mn'] or 0) + 0.5 and top(B[hi_]) > top(B[lo_]) + 0.5:
                 B[hi_]['mn'] = top(B[lo_]) - B[hi_]['base']  # stacked (a slice mapped from a little below the roof it stands on): on it
                 n += 1; continue
             small, big = (k, q) if P[k].area <= P[q].area else (q, k)
@@ -329,8 +330,8 @@ def through_check(tile):
 
 
 def through_fix(tile):
-    """a passage: the part over the street lifted to PASS over it (gone if that leaves under 1 m of it), the rest of
-    the part round it as it was"""
+    """a passage: the part over the street lifted to PASS over it (gone if that leaves under 1 m of it, or if there is
+    no rest of the part to hang it from), the rest of the part round it as it was"""
     n = 0
     for _ in range(4):
         todo = _through(tile)
@@ -342,10 +343,10 @@ def through_fix(tile):
             b, p = B[k], P[k]
             hole = shapely.union_all([g.buffer(0.3, join_style='mitre') for g, _ in gs]).intersection(p)
             hmax = max(h for _, h in gs)
-            for q in _simple(p.difference(hole)):
-                if q.area >= 1: add.append(_piece(b, q))
+            rest = [q for q in _simple(p.difference(hole)) if q.area >= 1]
+            add += [_piece(b, q) for q in rest]
             mn = hmax + PASS - b['base']
-            if mn < max(b['h'], b.get('ridge') or 0) - 1:
+            if mn < max(b['h'], b.get('ridge') or 0) - 1 and sum(q.area for q in rest) >= 4:  # (all on the street: nothing to hang it from, bldg-air takes it back down)
                 for q in getattr(hole, 'geoms', [hole]):
                     if q.geom_type == 'Polygon' and q.area >= 1: add.append(dict(_piece(b, q), mn=mn, tagmn=False, roof=0 if b.get('roof') else 0))
         B[:] = [b for i, b in enumerate(B) if i not in cut] + add
@@ -818,6 +819,11 @@ def selftest():
     r = apply_rules(t)  # a lane into a building and out the other side: a passage
     assert r['bldg-road'][0] == 1 and not r['bldg-road'][1] and len(t['builds']) == 3 and sorted(round(b['mn'], 2) for b in t['builds']) == [0, 0, 3.52], t['builds']
     assert not r['bldg-air'][1], r['bldg-air']
+    t = dict(builds=[dict(ring=sq(0, 0, 10), base=0.0, mn=0, h=5, ridge=8, gid=1), dict(ring=sq(0, 0, 10), base=0.0, mn=0, h=5, ridge=0, gid=2),
+                     dict(ring=sq(5, 0, 20), base=0.0, mn=5, h=9, ridge=0, gid=2), dict(ring=sq(40, 0, 10), base=0.0, mn=0, h=6, ridge=0, gid=3)], decks=[], ground=flat,
+             lines=[dict(kind='service', pts=[(30, 5), (60, 5)], z=None, a=1, b=2, w=12, drive=True)])
+    r = apply_rules(t)  # a slice over the next house's pitched roof (not stood on its ridge: cut back); a hut wholly on a street (not lifted: gone)
+    assert not r['bldg-overlap'][1] and not r['bldg-road'][1] and not r['bldg-air'][1] and max(b['ring'][0][0] for b in t['builds']) < 40, t['builds']
     deck_selftest()
     print('geom_rules selftest ok')
 
