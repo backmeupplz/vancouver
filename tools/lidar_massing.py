@@ -544,8 +544,8 @@ def save(res, fps, out, t0=None):
 def read_points(path, near=None):
     """a LAZ/COPC/LAS (any point format, any CRS) -> its building and ground points in NAD83(CSRS) UTM 10 (x, y, z, class,
     intensity), the tile's density (pts/m2). Ground is thinned by density. Open sets rarely classify buildings (class 6): then the
-    unclassified points (class 1) that near(x, y) says are by a footprint stand in for them (a tree beside a tower
-    can leak in: ponytail, trees under 10 m are dropped anyway by MIN_TOP)."""
+    unclassified points (class 1) that near(x, y) says are by a footprint stand in for them, less the tree canopy
+    (canopy())."""
     import laspy
     from pyproj import Transformer
     with laspy.open(path) as f:
@@ -562,12 +562,44 @@ def read_points(path, near=None):
             def pick(i): return x[i], y[i], z[i], it[i]
             gnd.append(pick(gi)); bld.append(pick(np.flatnonzero(cl == 6)))
             if near is not None:
-                u = np.flatnonzero(cl == 1); u = u[near(x[u], y[u])]; unc.append(pick(u))
+                u = np.flatnonzero(cl == 1); u = u[near(x[u], y[u])]; unc.append(pick(u) + (np.asarray(c.number_of_returns)[u] > 1,))
     use = bld if sum(len(a[0]) for a in bld) >= 500 else unc  # a classified tile, or an unclassified one
+    if use is unc and unc:
+        x, y, z, it, split = (np.concatenate([a[k] for a in unc]) for k in range(5))
+        keep = ~canopy(x, y, z, split); use = [(x[keep], y[keep], z[keep], it[keep])]
     parts = [(a, 2) for a in gnd] + [(a, 6) for a in use]
     x, y, z, it = (np.concatenate([a[k] for a, _ in parts]) for k in range(4))
     cl = np.concatenate([np.full(len(a[0]), k, np.uint8) for a, k in parts])
     return x, y, z, cl, it, dens
+
+
+def canopy(x, y, z, split):
+    """points (split: the pulse had more than one return) -> the ones to drop as tree canopy, so a house beside or
+    under a tall tree doesn't take its height. Roofs are found rather than trees: 1 m cells whose top returns (the
+    half metre under the cell's highest) are mostly whole pulses (under SPLIT of them split: a crown's leaves and
+    needles let light through to more returns below, a roof doesn't but at its edges), in patches at least OPEN m
+    across. A point stays when it is no more than LIFT over its nearest roof cell, that within REACH_ROOF (eaves,
+    ridges, walls, a tower's glass-railed top floors, the roof under a crown's edge), the rest goes (canopy, a lone
+    tree; rooftop plant and spires over LIFT too: ponytail, a cap from the classified sets only). The roof under a
+    whole crown goes too: a dropout mass() fills when small, or a footprint it no longer masses (tiles.py's own
+    shape). The nearest roof, not the highest near: a tree over a house beside a taller block stays the house's."""
+    from scipy import ndimage
+    if not len(x): return np.zeros(0, bool)
+    i, j = (x - x.min()).astype(int), (y - y.min()).astype(int)
+    nx, ny = i.max() + 1, j.max() + 1
+    k = j * nx + i
+    top = np.full(nx * ny, -np.inf); np.maximum.at(top, k, z)
+    up = z > top[k] - 0.5
+    n = np.bincount(k[up], minlength=nx * ny); sp = np.bincount(k[up], split[up], nx * ny)
+    top = top.reshape(ny, nx)
+    roof = ndimage.binary_opening(((n >= 2) & (sp < SPLIT * n)).reshape(ny, nx), np.ones((OPEN, OPEN)))
+    if not roof.any(): return np.ones(len(x), bool)
+    d, (rj, ri) = ndimage.distance_transform_edt(~roof, return_indices=True)  # each cell's nearest roof cell
+    near = np.where(d <= REACH_ROOF, top[rj, ri], -np.inf)
+    return z > near[j, i] + LIFT
+
+
+SPLIT, OPEN, LIFT, REACH_ROOF = 0.5, 5, 1.0, 8  # share, m, m, m: roof cells, their least width, what may stand over them, how far from them (canopy())
 
 
 def tile(path, out, tmp):
@@ -785,6 +817,15 @@ def check():
     want = int(((las.classification == 6) | (las.classification == 2)).sum())
     assert set(np.unique(c)) <= {2, 6} and want * 0.99 <= len(x) <= want and abs(dens - 0.3) < 0.01 and RES == 1.0, (len(x), want, dens)
     assert abs(x.mean() - 500050) < 2 and abs(y.mean() - 5450050) < 2  # 26910 -> 3157: same frame to a metre
+    # canopy(): a 12 m square flat roof at 6 m (whole pulses) with a 20 m tree beside it, its crown over the roof's corner
+    g = np.mgrid[0:12:0.2, 0:12:0.2].reshape(2, -1).T + 500000
+    tx, ty, tr = rng.uniform(-6, 6, 6000), rng.uniform(-6, 6, 6000), rng.uniform(0, 1, 6000)
+    keep = np.hypot(tx, ty) < 6 * (1 - tr) + 0.5  # a cone, wide at 8 m, its tip at 20 m
+    tree = np.c_[500013 + tx[keep], 500013 + ty[keep], 8 + 12 * tr[keep]]
+    x, y = np.r_[g[:, 0], tree[:, 0]], np.r_[g[:, 1], tree[:, 1]]
+    z = np.r_[6 + rng.normal(0, 0.03, len(g)), tree[:, 2]]
+    drop = canopy(x, y, z, np.r_[np.zeros(len(g), bool), rng.uniform(size=len(tree)) < 0.8])
+    assert drop[:len(g)].mean() < 0.02 and drop[len(g):][tree[:, 2] > 7.5].mean() > 0.95, (drop[:len(g)].mean(), drop[len(g):].mean())
     print('massing check ok')
 
 
