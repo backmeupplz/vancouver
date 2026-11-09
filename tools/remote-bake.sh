@@ -13,7 +13,7 @@ ssh root@148.251.0.158 "set -e
   cd repo && git fetch -q origin && git checkout -q -B bake origin/$BRANCH && cd ..
   docker build -q -t vancouver-bake -f repo/tools/bake.Dockerfile repo/tools >/dev/null
   docker rm -f vancouver-bake >/dev/null 2>&1 || true
-  docker run -d --name vancouver-bake --cpu-shares 64 --blkio-weight 10 \
+  docker run -d --name vancouver-bake --cpu-shares 64 --blkio-weight 10 --memory 24g --memory-swap 24g \
     -e PROCS=${PROCS:-10} -e FRESH=${FRESH:-0} -e FORCE=${FORCE:-0} -e FORCE_PUBLISH=${FORCE_PUBLISH:-0} -e SLOTS=/slots -v /opt/vancouver-bake/slots:/slots \
     -v /opt/vancouver-bake/repo/tools:/w/tools:ro -v /opt/vancouver-bake/repo/public:/w/public:ro -v /opt/vancouver-bake/data:/w/data -v /opt/vancouver-bake/out:/w/out \
     -v /opt/vancouver-bake/cache:/cache -v vancouver-tiles:/tiles \

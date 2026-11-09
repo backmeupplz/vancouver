@@ -614,23 +614,32 @@ def tile(path, out, tmp):
 
 def merge(src='data/massing_lm', out=OUT_LM):
     """every <tile>.npz in src -> one file (a building on two tiles' edges is kept once)"""
-    rings, po, pn, osm, prc, pro, cols, seen = [], [], [], [], [], [0], {k: [] for k in ('pfoot', 'ptop', 'proof', 'pridge')}, set()
-    wseg, wdesc = [], []
+    # streaming: each file's arrays are read once (d[k] decompresses the whole array on every access) and only
+    # the kept buildings' compact numpy slices are held (per-point python lists once grew past 200 GB)
+    rings, po, pn, osm, seen, wseg, wdesc, nparts, npts = [], [], [], [], set(), [], [], 0, 0
+    keys = ('pfoot', 'ptop', 'proof', 'pridge')
+    cols, prcs, pros = {k: [] for k in keys}, [], []
     for f in sorted(glob.glob(f'{src}/*.npz')):
-        d = np.load(f)
-        if 'wseg' in d.files: wseg.append(d['wseg']); wdesc.append(d['wdesc'])  # each wall's look (tools/lidar_walls.py)
+        with np.load(f) as z: d = {k: z[k] for k in z.files}
+        if 'wseg' in d: wseg.append(d['wseg']); wdesc.append(d['wdesc'])  # each wall's look (tools/lidar_walls.py)
+        parts = []  # this file's kept part indices
         for i in range(len(d['osm'])):
             r = d['rc'][d['ro'][i]:d['ro'][i + 1]]
             key = (int(d['osm'][i]), round(float(r[0][0]) * 2), round(float(r[0][1]) * 2))
             if key in seen: continue
-            seen.add(key); rings.append(r); osm.append(key[0]); po.append(len(cols['pfoot'])); pn.append(int(d['pn'][i]))
-            for j in range(int(d['po'][i]), int(d['po'][i]) + int(d['pn'][i])):
-                prc += list(d['prc'][d['pro'][j]:d['pro'][j + 1]]); pro.append(len(prc))
-                for k in cols: cols[k].append(d[k][j])
+            seen.add(key); rings.append(r.copy()); osm.append(key[0]); po.append(nparts); pn.append(int(d['pn'][i]))
+            nparts += int(d['pn'][i]); parts += range(int(d['po'][i]), int(d['po'][i]) + int(d['pn'][i]))
+        if not parts: continue
+        parts = np.array(parts)
+        for k in keys: cols[k].append(d[k][parts])
+        lo, hi = d['pro'][parts], d['pro'][parts + 1]
+        prcs.append(np.concatenate([d['prc'][a:b] for a, b in zip(lo, hi)]).astype(np.float32))
+        pros.append(npts + np.cumsum(hi - lo)); npts += int((hi - lo).sum())
+    cat = lambda v, dt, shp=(0,): np.concatenate(v).astype(dt) if v else np.zeros(shp, dt)
     save_rings(out, rings, po=np.array(po, np.int32), pn=np.array(pn, np.int16), osm=np.array(osm, np.int64),
-               prc=np.array(prc, np.float32).reshape(-1, 2), pro=np.array(pro, np.int32),
+               prc=cat(prcs, np.float32, (0, 2)), pro=np.concatenate([[0]] + pros).astype(np.int32),
                wseg=np.concatenate(wseg) if wseg else np.zeros((0, 6), np.float32), wdesc=np.concatenate(wdesc) if wdesc else np.zeros((0, 4), np.uint8),
-               **{k: np.array(v, np.float32 if k in ('pfoot', 'ptop', 'pridge') else np.uint8) for k, v in cols.items()})
+               **{k: cat(v, np.float32 if k in ('pfoot', 'ptop', 'pridge') else np.uint8) for k, v in cols.items()})
     print(len(rings), 'buildings ->', out, f'{os.path.getsize(out) / 1e6:.1f} MB')
 
 
