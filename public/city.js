@@ -205,7 +205,8 @@ function makeUI() {
       const ic = document.createElement('span'), lb = document.createElement('span')
       ic.className = 'ic'; lb.className = 'lb'
       ic.setAttribute('aria-hidden', 'true')
-      const set = ({ icon: i = icon, label: l = label } = {}) => { icon = i; label = l; ic.textContent = i || ''; lb.textContent = l || '' }
+      const name = label // what the button is, kept when set() swaps the label for a reading (weather: '6°')
+      const set = ({ icon: i = icon, label: l = label } = {}) => { icon = i; label = l; ic.textContent = i || ''; lb.textContent = l || ''; b.dataset.name = l !== name ? name || '' : '' }
       set()
       b.append(ic, lb)
       if (title) b.title = title
