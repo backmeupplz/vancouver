@@ -190,7 +190,7 @@ export default function sail(city) {
     .sl-trim i.ok { background: #7ae292 }
     .sl-trim u { position: absolute; top: -4px; width: 3px; height: 14px; margin-left: -1.5px; border-radius: 2px; background: #fdf6ea; box-shadow: 0 0 0 1px rgba(0,0,0,.35); }
     .sl-btns { right: 12px; top: 12px; display: flex; gap: 6px; }
-    .sl-btns .short { display: none }
+    .sl-btns .short, .sl-btns .mn { display: none }
     .sl-help { left: 50%; bottom: 52px; transform: translateX(-50%); padding: 7px 14px; color: #eef3f6; font-size: 13px; white-space: nowrap; transition: opacity .5s; text-align: center; }
     .sl-help.fade { opacity: 0 }
     .sl-help kbd { font: 600 11px system-ui, sans-serif; padding: 1px 5px; border-radius: 4px; background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.22); }
@@ -234,7 +234,10 @@ export default function sail(city) {
     .compact .sl-btns { right: var(--sr); top: var(--st); flex-direction: column; align-items: flex-end; }
     .compact .sl-btns .opt, .compact .sl-btns .long { display: none } .compact .sl-btns .short { display: inline }
     .compact .sl-btns button { width: 78px; height: 40px; padding: 0; border-radius: 12px; }
-    .compact .sl-tgt { left: var(--sl); top: calc(var(--st) + 74px); transform: none; font-size: 12.5px; }
+    /* phones: the next sight or mark is a line in the readout (hud() moves it in), ? and Goals are in the ⋯ sheet */
+    .sl-read .sl-tgt { position: static; transform: none; margin-top: 4px; padding: 0; gap: 6px; font-size: 12px; background: none; border: 0; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+    .sl-read .sl-tgt .ar { width: 18px; height: 18px; font-size: 10px; }
+    #menu [data-learn] .q, #menu [data-goals] .short { display: none }
     .compact .sl-goals { left: var(--sl); right: var(--sr); width: auto; top: calc(var(--st) + 140px); }
     .compact .sl-learn { left: var(--sl); right: var(--sr); width: auto; top: calc(var(--st) + 140px); bottom: auto; gap: 10px; padding: 10px 12px; }
     .compact .sl-learn svg { width: 112px; height: 112px } .compact .sl-learn ul { font-size: 12px; padding-left: 14px }
@@ -260,7 +263,7 @@ export default function sail(city) {
       <div><div class="sp"><b data-v>0.0</b> kn <span class="sub" data-pos></span></div>
         <div class="sub">wind <b data-w></b> kn <span class="gust" data-gust></span></div>
         <div class="sl-trim" title="Sail trim: the white mark is the best for this wind angle. W trims in, S eases out"><span>sail</span><div class="bar"><i data-sh></i><u data-id></u></div></div></div>`),
-    btns: el('sl sl-btns', '<button class="opt" data-mute title="Sound (M)">Sound on</button><button data-learn title="How to sail (H)" aria-label="How to sail">?</button><button data-goals title="Races and sights (G)"><span class="long">Goals</span><span class="short">Goals</span></button><button data-exit title="Back to the map (Esc)" aria-label="Back to the map"><span class="long">Back to map</span><span class="short">‹ Map</span></button>'),
+    btns: el('sl sl-btns', '<button class="opt" data-mute title="Sound (M)">Sound on</button><button data-learn title="How to sail (H)" aria-label="How to sail"><span class="q">?</span><span class="mn">How to sail</span></button><button data-goals title="Races and sights (G)"><span class="long">Goals</span><span class="short">Goals</span></button><button data-exit title="Back to the map (Esc)" aria-label="Back to the map"><span class="long">Back to map</span><span class="short">‹ Map</span></button>'),
     help: el('sl sl-help card', ''),
     pop: el('sl sl-pop card', ''),
     pick: el('sl sl-pick card', '<span data-pt></span><button data-cancel>Cancel</button>'),
@@ -292,8 +295,10 @@ export default function sail(city) {
   ui.mute.onclick = () => setMuted(!muted)
   ui.mute.textContent = muted ? 'Sound off' : 'Sound on'
   city.ui.inMenu?.(ui.mute) // phones: in the ⋯ sheet
-  q(ui.btns, '[data-goals]').onclick = () => toggleGoals()
-  q(ui.btns, '[data-learn]').onclick = () => (ui.learn.hidden ? showLearn() : hideLearn())
+  const goalsBtn = q(ui.btns, '[data-goals]'), learnBtn = q(ui.btns, '[data-learn]')
+  goalsBtn.onclick = () => { city.ui.closeAll(); toggleGoals() } // (closes the ⋯ sheet they are in on phones)
+  learnBtn.onclick = () => { city.ui.closeAll(); ui.learn.hidden ? showLearn() : hideLearn() }
+  city.ui.inMenu?.(goalsBtn); city.ui.inMenu?.(learnBtn)
   q(ui.learn, '[data-ok]').onclick = () => hideLearn()
   let popT = 0, helpT = 0
   function popup(text) { ui.pop.textContent = text; ui.pop.hidden = false; requestAnimationFrame(() => ui.pop.classList.add('on')); clearTimeout(popT); popT = setTimeout(() => ui.pop.classList.remove('on'), 1600) }
@@ -658,7 +663,7 @@ export default function sail(city) {
         let n = 0
         try { n = +localStorage.getItem('sail.learned') || 0; localStorage.setItem('sail.learned', String(n + 1)) } catch {}
         if (n < 2) showLearn()
-        showHelp(touchy ? `Steer ${kb('left')} ${kb('right')} · help the sail with ${kb('ease')} / ${kb('trim')}` : `${kb('left')} ${kb('right')} steer · ${kb('trim')} ${kb('ease')} trim / ease · <kbd>G</kbd> goals · <kbd>H</kbd> how to · <kbd>Esc</kbd> map`, 9000)
+        showHelp(touchy ? `Steer ${kb('left')} ${kb('right')} · help the sail with ${kb('ease')} / ${kb('trim')}` : `${kb('left')} ${kb('right')} steer · ${kb('trim')} ${kb('ease')} trim / ease · <kbd>G</kbd> goals · <kbd>H</kbd> how to · <kbd>Esc</kbd> map`, city.ui.compact ? 5000 : 9000)
       }
       return
     }
@@ -722,9 +727,9 @@ export default function sail(city) {
       || pick('trim', `The sail is flapping: trim it in ${kb('trim')}`, B.ideal - B.sheet > 0.2 && I.sheet <= 0 && B.twa > 40)
       || pick('run', 'Dead downwind is slow: head up a little onto a broad reach', B.twa > 168 && B.speed > 0.8, 2)
       || pick('gust', 'A dark ruffled patch on the water is a gust: sail into it for speed', nearGust && B.gust < 0.05, 2)
-      || pick('goals', `Want a goal? Open <b>Goals</b>${touchy ? '' : ' (<kbd>G</kbd>)'}: race the buoys or collect the sights`, t - playT > 45 && goals.found === 0 && goals.S.mode !== 'race', 1)
+      || pick('goals', `Want a goal? Open ${city.ui.compact ? '<b>⋯</b> → ' : ''}<b>Goals</b>${touchy ? '' : ' (<kbd>G</kbd>)'}: race the buoys or collect the sights`, t - playT > 45 && goals.found === 0 && goals.S.mode !== 'race', 1)
     if (h) {
-      if (h[0] !== hint.name && t - hint.at > 1.5) { hint.name = h[0]; hint.at = t; hint.shown[h[0]] = (hint.shown[h[0]] || 0) + 1; showHelp(h[1], 0) }
+      if (h[0] !== hint.name && t - hint.at > 1.5) { hint.name = h[0]; hint.at = t; hint.shown[h[0]] = (hint.shown[h[0]] || 0) + 1; showHelp(h[1], city.ui.compact ? 4500 : 0) } // phones: a moment, then out of the way
       hint.quiet = t
     } else if (hint.name && t - hint.quiet > 2.5) { hint.name = ''; ui.help.classList.add('fade') }
   }
@@ -772,6 +777,8 @@ export default function sail(city) {
       ui.tt.textContent = tgt.time != null ? fmtTime(tgt.time) : ''
       ui.tgt.classList.toggle('race', tgt.kind === 'race')
       ui.tgt.hidden = false
+      const home = city.ui.compact ? ui.read.lastElementChild : document.body // phones: a line in the readout
+      if (ui.tgt.parentElement !== home) home.append(ui.tgt)
     } else ui.tgt.hidden = true
     hints(t)
     // the wake and the spray are drawn after the colour grade: grade them by hand (dusk, night, a storm's gloom)

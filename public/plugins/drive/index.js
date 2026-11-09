@@ -559,6 +559,7 @@ export default function drive(city) {
       .compact .dlv-pick button { min-height: 44px; padding: 0 14px; flex: none; }
       .compact .dlv-pop { max-width: calc(100% - 48px); box-sizing: border-box; }
       .compact .dlv-job .aboard { max-width: none }
+      .compact .dlv-help { white-space: normal; width: max-content; max-width: calc(100% - var(--sl) - var(--sr)); box-sizing: border-box; text-align: center; bottom: calc(var(--sb) + 20px); }
       .compact .dlv-photo { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 8px); }
       /* portrait: tall pedals as wide as the room right of the steering buttons allows (they end at --sl + 158px) */
       .compact .dlv-touch { --pb: max(16px, calc(env(safe-area-inset-bottom) + 4px)); --pw: clamp(56px, calc((100vw - var(--sl) - var(--sr) - 178px) / 2), 88px); height: auto; top: 0; }
@@ -634,7 +635,7 @@ export default function drive(city) {
       : `W gas · S brake, hold to reverse · A D steer · Space handbrake · E get out · H horn · R back on the road · Esc map`
     ui.help.hidden = false; ui.help.classList.remove('fade')
     clearTimeout(helpT)
-    if (!deliver) helpT = setTimeout(() => ui.help.classList.add('fade'), 7000)
+    if (!deliver || city.ui.compact) helpT = setTimeout(() => ui.help.classList.add('fade'), city.ui.compact ? 5000 : 7000) // phones: a moment, then out of the way
   }
 
   // ================================================================ the game state
