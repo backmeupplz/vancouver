@@ -707,10 +707,11 @@ export class Tiles {
     return Z(i, j) * (1 - u) * (1 - v) + Z(i + 1, j) * u * (1 - v) + Z(i, j + 1) * (1 - u) * v + Z(i + 1, j + 1) * u * v
   }
 
-  // how much of what's on screen has arrived (0..1), for the loading screen
-  progress() {
+  // what's in view has arrived: [tiles in, tiles in view] (main.js: the loading screen, then the loading indicator)
+  counts() {
     let want = 0, got = 0
     for (const t of this.tiles.values()) if (t.used === this.frame) { want++; if (t.state === 'ready' || t.state === 'missing') got++ }
-    return want ? got / want : 0
+    return [got, want]
   }
+  progress() { const [got, want] = this.counts(); return want ? got / want : 0 } // (0..1)
 }

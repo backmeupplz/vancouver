@@ -375,10 +375,11 @@ postScene.add(post)
 // ---------- anti-aliasing: the scene itself is multisampled (rt), but the ink lines are found per pixel in its
 // depth, so they step like any 1 px line. With FXAA the ink pass and what is drawn after it (trees, overlay) go to aa
 // (sRGB, so blending stays linear) and FXAA (NVIDIA's, Jasper Flick's version as in three.js's FXAAShader, MIT)
-// smooths the lines into the canvas. setAA(mode), for quality tiers (window.view.setAA): 'fxaa' (MSAA scene + FXAA),
-// 'msaa' (the MSAA scene only), 'off' (neither), 'auto' (the default: FXAA under a perspective camera below 1.5x
-// pixel ratio, where the steps show; at 2x they are half as big and the pass costs four times as much, and the map
-// view keeps its GPU budget: MSAA only, and none at 1.75x and up, see msaa below) ----------
+// smooths the lines into the canvas. setAA(mode), for quality tiers (window.view.setAA): 'auto' (the default: MSAA,
+// see msaa below, + FXAA), 'fxaa' (FXAA only: the low tier), 'msaa' (the MSAA scene only), 'off' (neither). FXAA runs
+// where a scene texel is over 2/3 CSS px (pixel ratio x adaptive resolution under 1.5), map and street level alike:
+// there the steps show, worst when adaptive resolution stretches the scene (at 0.5 they were 2 px stairs, #557); at
+// 2x and full resolution they are half as big and the pass would cost four times as much ----------
 const aa = new THREE.WebGLRenderTarget(1, 1, { colorSpace: THREE.SRGBColorSpace })
 const fxaa = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
   uniforms: { tDiffuse: { value: aa.texture }, px: { value: new THREE.Vector2() } },
@@ -427,7 +428,7 @@ function setAA(mode) { aaMode = mode; dirty = true } // the quality tier's aa
 // MSAA samples for camera C: 'auto' skips them for the map on a screen of 1.75+ device px per CSS px, where its
 // pixels are finer than the ink lines that draw the edges anyway (4x MSAA was ~40% of the map's frame at 2x).
 // A change reallocates rt: only when a plugin's camera comes or goes or the tier changes.
-const msaa = (C, pr) => aaMode === 'off' || (aaMode === 'auto' && !C.isPerspectiveCamera && pr >= 1.75) ? 0 : 4
+const msaa = (C, pr) => aaMode === 'off' || aaMode === 'fxaa' || (aaMode === 'auto' && !C.isPerspectiveCamera && pr >= 1.75) ? 0 : 4
 // the scene is drawn into the corner `scale` of rt (adaptive resolution, below), the ink pass stretches it over the
 // canvas; the trees and the overlay are drawn at full resolution
 function draw(scale = res) {
@@ -467,7 +468,7 @@ function draw(scale = res) {
   u.gain.value.set(1 + 0.05 * near, 1 + 0.06 * near, 1 + 0.09 * near)
   treeScene.fog = scene.fog
   renderer.info.autoReset = false; renderer.info.reset()
-  const smooth = aaMode === 'fxaa' || (aaMode === 'auto' && C.isPerspectiveCamera && pr < 1.5)
+  const smooth = (aaMode === 'fxaa' || aaMode === 'auto') && pr * scale < 1.5 // (scene texels bigger than 2/3 CSS px: their steps show)
   if (smooth && (aa.width !== w || aa.height !== h)) aa.setSize(w, h)
   // below full resolution the map camera renders from a spot snapped to the target's texel grid and the ink pass
   // shifts the picture back by the remainder: the coarse pixels move with the map instead of resampling a crawl
@@ -509,7 +510,7 @@ function draw(scale = res) {
 // at full resolution (twice as long each time it had to drop again soon after, #548). When the view stops and nothing animates,
 // one last frame is drawn at full resolution, so a still map is sharp; a view that stops while things animate (traffic,
 // ships, weather) goes straight back to full resolution half a second later, and stays there while its frames are on time.
-let res = 1, lateMs = 0, onTimeMs = 0, probeMs = 3000, upMs = 20000, promotedAt = -1e9, streamAt = -1e9, probedAt = -1e9, settleAt = Infinity, floorLate = 0, stillAt = 0, seenZoom = 0, probeFrom = 1
+let res = 1, loadedAt = 0, lateMs = 0, onTimeMs = 0, probeMs = 3000, upMs = 20000, promotedAt = -1e9, streamAt = -1e9, probedAt = -1e9, settleAt = Infinity, floorLate = 0, stillAt = 0, seenZoom = 0, probeFrom = 1
 const seen = new THREE.Matrix4()
 function settle() { settleAt = performance.now() + 2500; lateMs = onTimeMs = 0; dirty = true } // a new camera or tier compiles shaders: no measure
 // ms: since the last frame; cpu: the main thread's own work in it (a frame late from building a tile is not one a
@@ -517,6 +518,11 @@ function settle() { settleAt = performance.now() + 2500; lateMs = onTimeMs = 0; 
 function adaptResolution(ms, cpu, now, C) {
   if (!seen.equals(C.matrixWorld) || seenZoom !== C.zoom) { seen.copy(C.matrixWorld); seenZoom = C.zoom; stillAt = now }
   if (document.hidden || now < settleAt || ms > 250 || cpu > 10) return // nor is a stall (a hidden tab, a long task)
+  // nor are frames while tiles stream in: their uploads' GPU time lands in them, and a lower resolution would not help.
+  // It used to step the resolution down to the floor on every load and stay there for a minute (#557); after a
+  // load the next probe back up comes soon
+  if (now - streamAt < 300) { lateMs = 0; loadedAt = now; return }
+  if (loadedAt) { loadedAt = 0; probeMs = 3000 }
   if (res < 1 && now - stillAt > 500 && now - probedAt > probeMs) { probeFrom = res; res = 1; onTimeMs = lateMs = 0; probedAt = now; floorLate = 0; return }
   if (ms > 20) { lateMs += ms; onTimeMs = 0 } else { lateMs = Math.max(0, lateMs - ms * 0.1); onTimeMs += ms } // more than 1 in ~20 late adds up
   if (lateMs > 600) {
@@ -543,7 +549,7 @@ function applyQuality(t) { // a new tier (core/quality.js)
 }
 
 // ---------- frame loop ----------
-let lastFrame = performance.now(), drew = false, cpu = 0
+let lastFrame = performance.now(), drew = false, cpu = 0, frameMs = 16.7 // (frameMs: drawn back to back, smoothed, for #perf)
 function loop(now) {
   requestAnimationFrame(loop)
   const t0 = performance.now()
@@ -553,7 +559,7 @@ function loop(now) {
   const ms = now - lastFrame, dt = Math.min(0.1, ms / 1000 || 0); lastFrame = now
   if (city?.animating) dirty = true
   if (!dirty) { if (drew && res < 1) draw(1); drew = false; return } // still: once more, sharp
-  if (drew) adaptResolution(ms, cpu, now, own ? own.camera : cam)
+  if (drew) { adaptResolution(ms, cpu, now, own ? own.camera : cam); frameMs += (Math.min(ms, 250) - frameMs) * 0.1 }
   drew = true
   dirty = false
   if (own) {
@@ -626,4 +632,16 @@ settle() // from now on frame times measure the GPU (adaptive resolution)
 requestAnimationFrame(() => loadingEl.classList.add('done'))
 setTimeout(() => loadingEl.remove(), 800)
 $('#hint').hidden = false
+// #perf: the frame rate (of frames drawn back to back: a still map draws none) and the adaptive resolution when it is
+// down; while tiles stream in, how many of those in view are in, with a bar. Twice a second, never in the way
+{
+  const el = $('#perf'), fps = el.querySelector('.fps'), n = el.querySelector('.n'), bar = el.querySelector('.bar i')
+  el.hidden = false
+  setInterval(() => {
+    const [got, want] = tiles.counts(), busy = got < want || tiles.made.length > 0 || tiles.warming.length > 0
+    fps.textContent = `${Math.round(1000 / frameMs)} fps${res < 1 ? ` · ${Math.round(res * 100)}%` : ''}`
+    el.classList.toggle('busy', busy)
+    if (busy) { n.textContent = `${got}/${want}`; bar.style.width = `${Math.round((100 * got) / Math.max(1, want))}%` }
+  }, 500)
+}
 loadPlugins(city)

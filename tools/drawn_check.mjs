@@ -12,6 +12,7 @@
 //   ground-crack  a slit in the drawn ground inside the tile (but round a tunnel's open box): beside an edge no other
 //                 triangle shares, 2 cm out, no ground, or ground more than 1 cm higher or lower (a T-junction's step)
 //   object        things inside each other: parked cars, lamp poles, tree trunks, beach logs and the buildings' footprints
+//   ground-seam   a step over 2 cm between a tile's ground and the next tile's along their shared edge (#557)
 //   deck-zfight   two deck strips drawn over each other within 3 cm (they flicker; not where they only meet along an edge)
 import fs from 'node:fs'
 import zlib from 'node:zlib'
@@ -74,6 +75,25 @@ function decks(x, y, m = 0) { // [[height, kind]] of the deck strips drawn over 
   return out
 }
 
+// the ground's triangles touching the tile-local line x = at (u 0) or y = at (u 1), as [along, across, h] corners
+function rimTris(g, u, at) {
+  const P = g.position, I = g.index, out = []
+  for (let q = 0; q < I.length; q += 3) {
+    const v = [I[q], I[q + 1], I[q + 2]].map((i) => (u ? [P[i * 3], -P[i * 3 + 2], P[i * 3 + 1]] : [-P[i * 3 + 2], P[i * 3], P[i * 3 + 1]]))
+    if (v.some((p) => Math.abs(p[1] - at) < 0.01)) out.push(v.map((p) => [p[0], p[1] - at, p[2]]))
+  }
+  return out
+}
+function rimAt(tris, s) { // their heights at (along s, across 0)
+  const hs = []
+  for (const v of tris) {
+    const d = (v[1][1] - v[2][1]) * (v[0][0] - v[2][0]) + (v[2][0] - v[1][0]) * (v[0][1] - v[2][1]); if (!d) continue
+    const l1 = ((v[1][1] - v[2][1]) * (s - v[2][0]) + (v[2][0] - v[1][0]) * -v[2][1]) / d, l2 = ((v[2][1] - v[0][1]) * (s - v[2][0]) + (v[0][0] - v[2][0]) * -v[2][1]) / d, l3 = 1 - l1 - l2
+    if (l1 >= -1e-5 && l2 >= -1e-5 && l3 >= -1e-5) hs.push(l1 * v[0][2] + l2 * v[1][2] + l3 * v[2][2])
+  }
+  return hs
+}
+const drawn = new Map() // tile key -> its drawn ground (built once)
 function check(cell) {
   const [ci, cj] = cell.split('_').map(Number), X0 = ci * 4096, Y0 = cj * 4096
   const own = [], issues = []
@@ -81,7 +101,7 @@ function check(cell) {
   const add = (rule, x, y, h, v, what) => issues.push({ rule, x: +x.toFixed(1), y: +y.toFixed(1), h: +h.toFixed(1), v: +v.toFixed(2), what })
   for (let a = -1; a <= 4; a++) for (let b = -1; b <= 4; b++) { const k = `${ci * 4 + a}_${cj * 4 + b}`; if (tile(k)) { addSurf(k); if (a >= 0 && a < 4 && b >= 0 && b < 4) own.push(k) } }
   for (const k of own) {
-    const T = tile(k), out = build(T.t, 0) // what the page draws of it
+    const T = tile(k), out = build(T.t, 0), [ki, kj] = k.split('_').map(Number) // what the page draws of it
     // ---- paint on the ground: each decal triangle at its corners, edge middles and centre
     const g = out.paint
     if (g) {
@@ -185,6 +205,21 @@ function check(cell) {
           if (!hs.length || hs.every((g) => Math.abs(g - h) > 0.02)) { add('ground-crack', x + T.ox, y + T.oy, h, hs.length ? Math.min(...hs.map((g) => Math.abs(g - h))) : 1, hs.length ? 'a step between ground triangles' : 'a gap in the ground'); break }
         }
       }
+    }
+    // ---- the ground across the tile's east and north edges: the next tile's own ground meets it there
+    drawn.set(k, out.ground)
+    if (gr) for (const [u, nk] of [[0, `${ki + 1}_${kj}`], [1, `${ki}_${kj + 1}`]]) {
+      const N = tile(nk), ng = N && (drawn.get(nk) ?? (drawn.set(nk, build(N.t, 0).ground), drawn.get(nk)))
+      if (!ng) continue
+      const a = rimTris(gr, u, 1024), b = rimTris(ng, u, 0)
+      let worst = null
+      for (let s = 0.25; s < 1024; s += 0.5) {
+        const ha = rimAt(a, s), hb = rimAt(b, s)
+        if (!ha.length || !hb.length) continue
+        const d = Math.min(...ha.flatMap((p) => hb.map((q) => Math.abs(p - q))))
+        if (d > 0.02 && (!worst || d > worst[1])) worst = [s, d, ha[0]]
+      }
+      if (worst) add('ground-seam', T.ox + (u ? worst[0] : 1024), T.oy + (u ? 1024 : worst[0]), worst[2], worst[1], `a step in the ground across the tile's ${u ? 'north' : 'east'} edge`)
     }
     // ---- objects inside each other (tile-local): boxes [x, y, angle, half length, half width, what], discs [x, y, r, what]
     const boxes = [], discs = [], fpRings = []

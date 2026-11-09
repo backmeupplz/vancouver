@@ -45,6 +45,12 @@
   #gfx button[aria-pressed="true"] { background: rgba(127, 196, 232, 0.22); border-color: var(--accent); }
   #gfx span { margin-left: 6px; color: var(--muted); font-size: 12px; }
   #hint { right: var(--sr); bottom: var(--sb); padding: 7px 11px; color: var(--muted); }
+  /* frame rate, and while tiles stream in the background how many of those in view are in (main.js) */
+  #perf { left: 50%; bottom: calc(var(--sb) + 40px); transform: translateX(-50%); z-index: 15; padding: 3px 9px; font-size: 11px; color: var(--muted); white-space: nowrap; pointer-events: none; font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 7px; }
+  #perf .bar { width: 46px; height: 3px; border-radius: 2px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
+  #perf .bar i { display: block; height: 100%; background: var(--accent); transition: width .25s; }
+  #perf:not(.busy) .ld { display: none; }
+  .compact #perf { left: var(--sl); top: calc(var(--st) + 112px); bottom: auto; transform: none; } /* (the bottom is the dock, the player and the pedals) */
   /* loading: a centred card with a progress bar, then fades out */
   #loading { position: fixed; inset: 0; display: grid; place-items: center; z-index: 30; background: #0b1016; transition: opacity .5s; }
   #loading.done { opacity: 0; pointer-events: none; }
@@ -119,6 +125,7 @@
   <p><a href="https://git.borodutch.com/backmeupplz/vancouver">Source code</a> · <a href="https://git.borodutch.com/backmeupplz/vancouver/src/branch/main/PLUGINS.md">Write a plugin</a></p>
 </div>
 <div id="tools" class="panel" hidden></div>
+<div id="perf" class="panel" hidden aria-hidden="true"><span class="fps"></span><span class="ld">Loading <span class="n"></span> tiles</span><span class="ld bar"><i></i></span></div>
 <div id="hint" class="panel" hidden>Drag to pan · scroll to zoom · right-drag to turn</div>
 <div id="loading" role="status" aria-live="polite"><div class="card"><div class="title">Vancouver in code</div><div class="step">Loading…</div><div class="track"><div class="fill"></div></div></div></div>
 <script>

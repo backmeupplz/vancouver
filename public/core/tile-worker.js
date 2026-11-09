@@ -237,6 +237,19 @@ function ground(t, terr, level) {
     const mx = (ax + bx) / 2, my = (ay + by) / 2
     halve(out, ax, ay, mx, my); out.push(mx, my); halve(out, mx, my, bx, by)
   }
+  // a ring edge along the tile's edge gets a point on every terrain node it passes: the next tile's ground meets it
+  // there, and with its own corners elsewhere along the edge each side's splits (bends) fell in other places, so the
+  // two sides followed the terrain differently, up to 11 cm apart: a line across the street at every tile edge (#557).
+  // Between nodes the terrain along the edge is a straight line, so neither side splits it again: both are the same
+  const rimNodes = (out, ax, ay, bx, by) => {
+    const S = t.size, on = (u) => Math.abs(u) < 1e-3 || Math.abs(u - S) < 1e-3, ux = on(ax) && Math.abs(bx - ax) < 1e-3
+    if (!ux && !(on(ay) && Math.abs(by - ay) < 1e-3)) return false
+    const u0 = ux ? ay : ax, u1 = ux ? by : bx, s = Math.sign(u1 - u0)
+    for (let k = s > 0 ? Math.floor(u0 / cell) + 1 : Math.ceil(u0 / cell) - 1; s * (k * cell - u1) < -1e-3; k += s) {
+      if (Math.abs(k * cell - u0) > 1e-3) out.push(ux ? ax : k * cell, ux ? k * cell : ay)
+    }
+    return true
+  }
   const polys = [] // [class, rings], read first: their borders are welded together before they're triangulated
   for (let r = 0; r < runs; r++) {
     const c = dv.getUint8(o), np = dv.getUint32(o + 1, true); o += 5
@@ -256,7 +269,8 @@ function ground(t, terr, level) {
       if (k) holes.push(flat.length / 2)
       for (let n = 0; n < ring.length; n++) { // (long edges halved down to DENSE: alike from either side, so neighbours keep sharing them)
         const a = ring[n] * 2, b = ring[(n + 1) % ring.length] * 2
-        flat.push(W.xy[a], W.xy[a + 1]); halve(flat, W.xy[a], W.xy[a + 1], W.xy[b], W.xy[b + 1])
+        flat.push(W.xy[a], W.xy[a + 1])
+        if (!rimNodes(flat, W.xy[a], W.xy[a + 1], W.xy[b], W.xy[b + 1])) halve(flat, W.xy[a], W.xy[a + 1], W.xy[b], W.xy[b + 1])
       }
     }
     const tri = flat.length ? earcut(flat, holes) : []

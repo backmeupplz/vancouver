@@ -135,8 +135,9 @@ streamed square, and `'view'` fires as the focus moves. A perspective camera als
 trees within ~190 m are real 3D trees (the billboards beyond stand upright, pictures of the same forms turned and lit
 the same way, fading in over the last ~30 m), and those trees and the building faces between the camera and `city.player` (see below) dissolve so the player stays in view, fog fades into the sky texture you set
 as `scene.background` rather than one flat colour, detail tiles stay up while new ones arrive past the fog, and
-when frames keep coming late the view is drawn at a lower resolution (down to 0.75 CSS px per pixel; `release()`
-restores it). Its ink lines are smoothed by FXAA below 1.5x pixel ratio (`view.setAA('auto' | 'fxaa' | 'msaa' | 'off')`
+when frames keep coming late the view is drawn at a lower resolution (down to the quality tier's `minRes`, frames while
+tiles upload not counted; `release()` restores it). Wherever a scene pixel is over 2/3 CSS px (pixel ratio x resolution
+under 1.5) FXAA smooths its edges and ink lines, on the map too (`view.setAA('auto' | 'fxaa' | 'msaa' | 'off')`
 in `main.js` picks it, for quality tiers). Nothing changes for the map view when no plugin has a
 camera. The drive plugin is the example: it dives from the map into a chase camera behind a van (or a walker) and back.
 
