@@ -94,6 +94,27 @@ def runs(mask):
     return list(zip(np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]))
 
 
+def walled(tiles, d):
+    """the ground as drawn over parsed detail tiles {(ti, tj): parse()} in tiles dir d: each point on its own tile's
+    terrain and seawalls (core/util.js wallHeight = tools/seawall.py height()) -> ({key: wall pieces}, f(x, y, low));
+    f.terrain: the terrain alone"""
+    import seawall
+    G = Ground(tiles)
+    walls = {k: [(*w, seawall.inland(w[0], w[2], G)) for w in seawall.tile_walls(f'{d}/0/{k[0]}_{k[1]}.bin')] for k in tiles}
+
+    def drawn(x, y, low=None):
+        x, y = np.atleast_1d(np.asarray(x, float)), np.atleast_1d(np.asarray(y, float))
+        out = G(x, y)
+        ti, tj = np.floor(x / L0).astype(int), np.floor(y / L0).astype(int)
+        for key in set(zip(ti.tolist(), tj.tolist())):
+            if walls.get(key):
+                m = (ti == key[0]) & (tj == key[1])
+                out[m] = seawall.height(walls[key], out[m], x[m], y[m], None if low is None else np.broadcast_to(low, x.shape)[m])
+        return out
+    drawn.terrain = G
+    return walls, drawn
+
+
 def audit(ij):
     i, j = ij
     tiles = {}
@@ -103,7 +124,7 @@ def audit(ij):
             if os.path.exists(p): tiles[(4 * i + a, 4 * j + b)] = parse(p)
     own = [(k, T) for k, T in tiles.items() if 4 * i <= k[0] < 4 * i + 4 and 4 * j <= k[1] < 4 * j + 4]
     if not own: return []
-    G = Ground(tiles)
+    G = walled(tiles, DIR)[1]  # (the seawalls' walks too)
     feat = load_feat(i, j)
     ways = [w for w in feat.get('lines', []) if line_kind(w[3])]
     # stations, parkades and covered bridges are built around their tracks and ramps: a deck inside them is real

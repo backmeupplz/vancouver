@@ -459,6 +459,9 @@ def _log_box(b):
     return shapely.Polygon([(x + c * u - s_ * v, y + s_ * u + c * v) for u, v in ((-ln / 2, -d / 2), (ln / 2, -d / 2), (ln / 2, d / 2), (-ln / 2, d / 2))])
 
 
+LOG_CLEAR = 0.05  # metres between two beach things (the tile's 6 cm grid moves each up to 4.4 cm: tools/tiles.py beach_bits)
+
+
 def _log_hits(tile):
     """beach things (logs, towers, nets) inside one another or a building: [(index, other index or -1)]"""
     L = tile.get('beach') or []
@@ -468,7 +471,7 @@ def _log_hits(tile):
     for i, p in enumerate(boxes):
         if len(bt.query(p, predicate='intersects')): out.append((i, -1)); continue
         for q in t.query(p, predicate='intersects'):
-            if q > i and p.intersection(boxes[q]).area > 0.005: out.append((i, int(q)))
+            if q > i and p.distance(boxes[q]) < LOG_CLEAR: out.append((i, int(q)))
     return out
 
 
@@ -685,27 +688,15 @@ SW_PATHS = {KIND_I[k] for k in ('pedestrian', 'footway', 'cycleway', 'path', 'st
 def _seawall(ij, d):
     """a cell's detail tiles with seawalls: {(ti, tj): (parsed tile, pieces)}, and the drawn ground at points (each
     point on its own tile's terrain and seawalls, as the page draws it) -> f(x, y, low)"""
-    from audit_elev import parse, Ground
-    import seawall
+    from audit_elev import parse, walled
     i, j = ij
-    tiles, walls = {}, {}
+    tiles = {}
     for a in range(-1, 5):
         for b in range(-1, 5):
             p = f'{d}/0/{4 * i + a}_{4 * j + b}.bin'
-            if os.path.exists(p): tiles[(4 * i + a, 4 * j + b)] = parse(p); walls[(4 * i + a, 4 * j + b)] = seawall.tile_walls(p)
-    G = Ground(tiles)
-
-    def drawn(x, y, low=None):
-        x, y = np.atleast_1d(np.asarray(x, float)), np.atleast_1d(np.asarray(y, float))
-        out = G(x, y)
-        ti, tj = np.floor(x / L0).astype(int), np.floor(y / L0).astype(int)
-        for key in set(zip(ti.tolist(), tj.tolist())):
-            if walls.get(key):
-                m = (ti == key[0]) & (tj == key[1])
-                out[m] = seawall.height(walls[key], out[m], x[m], y[m], None if low is None else np.broadcast_to(low, x.shape)[m])
-        return out
+            if os.path.exists(p): tiles[(4 * i + a, 4 * j + b)] = parse(p)
+    walls, drawn = walled(tiles, d)
     own = {k: v for k, v in walls.items() if 4 * i <= k[0] < 4 * i + 4 and 4 * j <= k[1] < 4 * j + 4 and v}
-    drawn.terrain = G
     return tiles, own, drawn
 
 
@@ -718,11 +709,12 @@ def seawall_walk_check(ij, d):
     """the paths near a seawall (on its walk, blending off it) have no step: none rises or drops more than SW_STEP over
     a metre along it as drawn beyond what the LiDAR ground under it does, so a walker walks it end to end (where the
     wall changes the ground: the terrain's own slopes past its ends are the terrain's)"""
+    import seawall
     from shapely.geometry import LineString, Point
     tiles, own, drawn = _seawall(ij, d)
     out = []
     for key, pieces in own.items():
-        near = shapely.unary_union([LineString(P).buffer(float(reach.max()) + 6) for P, top, reach, *_ in pieces])
+        near = shapely.unary_union([LineString(P).buffer(float(reach.max()) + seawall.B_IN) for P, top, reach, *_ in pieces])
         for L in tiles[key][4]:
             if L['kind'] not in SW_PATHS or L['z'] is not None or len(L['pts']) < 2: continue
             Q = np.array(densify([tuple(p) for p in L['pts']], 1.0), float)
@@ -747,7 +739,7 @@ def seawall_wall_check(ij, d):
     out = []
     for key, pieces in own.items():
         ox, oy = tiles[key][0], tiles[key][1]
-        for P, top, reach, rail, foot, F in pieces:
+        for P, top, reach, rail, foot, F, _ in pieces:
             m = (P[:, 0] >= ox) & (P[:, 0] < ox + L0) & (P[:, 1] >= oy) & (P[:, 1] < oy + L0) & (F > 0.5)  # (where the wall stands: not its ends, where it blends into the ground)
             if not m.any(): continue
             n = _wall_frames(P)[m]; P_ = P[m]
@@ -771,7 +763,9 @@ def seawall_path_check(ij, d):
     tiles, own, drawn = _seawall(ij, d)
     out = []
     for key, pieces in own.items():
-        zone = shapely.unary_union([LineString(P).buffer(float(np.median(reach)), single_sided=True) for P, top, reach, *_ in pieces])
+        # (the walk: from the line in to its reach, point by point)
+        zone = shapely.unary_union([shapely.Polygon(np.r_[P[k:k + 2], (P + _wall_frames(P) * reach[:, None])[k:k + 2][::-1]]).buffer(0)
+                                    for P, top, reach, *_ in pieces for k in range(len(P) - 1)])
         for L in tiles[key][4]:
             if L['kind'] not in SW_PATHS or L['z'] is not None or len(L['pts']) < 2: continue
             Q = np.array(densify([tuple(p) for p in L['pts']], 2.0), float)

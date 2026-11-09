@@ -152,7 +152,8 @@ function terrain(t) {
       for (let i = 0; i < n; i++, o += 11) P.push(dv.getInt16(o, true) * t.k, dv.getInt16(o + 2, true) * t.k, dv.getInt16(o + 4, true) / 100, dv.getInt16(o + 6, true) / 100, dv.getUint8(o + 8) / 10, dv.getUint8(o + 9) / 255, dv.getUint8(o + 10))
       starts.push(P.length / 7)
     }
-    out.wall = wallGrid(Float32Array.from(P), starts)
+    const e = out.ext // (the walk's terrain a few metres in may lie in the next tile)
+    out.wall = wallGrid(Float32Array.from(P), starts, (x, y) => e ? sampleGrid(e.h, e.n, e.size, x + e.off, y + e.off) : sampleGrid(h, n, t.size, x, y))
   }
   return out
 }

@@ -25,7 +25,7 @@ GRADE = 0.06  # the steepest the top climbs along a run
 TOP_MAX = 9.0  # metres: a walk higher over the sea is on a deck or a plaza, not on a seawall
 STEP_UP = 0.8  # metres the walk's ground may change from one point to the next before the run is split there
 EDGE = 7.0  # the furthest in the walk is drawn at the wall's top (past it the terrain, which is the LiDAR's, takes over)
-B_IN, B_END = 6.0, 10.0  # metres the top blends into the ground past its reach inland, and past a run's ends
+B_IN, B_END = 10.0, 20.0  # metres the top blends into the ground past its reach inland, and past a run's ends
 LOW, LOW_B = 2.0, 8.0  # the water at the wall's foot: flat this far out, back to the ground's over the next LOW_B
 SLIT = 0.2  # metres out from the line the walk's ground still is (tiles.py cuts the ground there: the face covers the cut)
 FADE = 3.0  # metres over which the nearest of two walls takes over from the other
@@ -65,6 +65,14 @@ def runs_of(ok, gap, least):
     return out
 
 
+def grade(z, d):
+    """z no steeper than d from one point to the next: a peak cut down, a dip filled (both ways)"""
+    z = z.copy()
+    for k in range(1, len(z)): z[k] = min(max(z[k], z[k - 1] - d), z[k - 1] + d)
+    for k in range(len(z) - 2, -1, -1): z[k] = min(max(z[k], z[k + 1] - d), z[k + 1] + d)
+    return z
+
+
 def smooth_top(z, grade, step):
     """a run's top: a running median (no lamp post or bench in the LiDAR ground), then no steeper than grade"""
     from scipy.ndimage import median_filter, uniform_filter1d
@@ -74,6 +82,95 @@ def smooth_top(z, grade, step):
         for k in range(1, len(z)): z[k] = min(max(z[k], z[k - 1] - d), z[k - 1] + d)
         for k in range(len(z) - 2, -1, -1): z[k] = min(max(z[k], z[k + 1] - d), z[k + 1] + d)
     return z
+
+
+BAND = 0.95  # metres the walk's top may sit off the LiDAR ground on it (tools/geom_rules.py SW_LIDAR, less a margin)
+CLEAR = 0.3  # metres between the edge of a path along a wall and its line
+WALK_GRADE = 0.1  # the steepest a walk's top climbs along it where the ground lets it (tools/geom_rules.py SW_STEP: 0.2)
+SHIFT = 2.0  # metres a path along a wall may be mapped out past its edge (OSM against the LiDAR): moved in onto the walk
+
+
+def fit(P, n, z, w, pw, plines, ptree):
+    """a run's wall fitted to the LiDAR ground and its walk's paths (P its points on the coastline, n their normals to
+    the land, z its top so far, w its walk's reach): the top the smoothest line that stays within BAND of the ground at
+    the paths along it and across the walk (to 4 m in, or its reach), the reach in as far as the ground stays so, the
+    line in to where the ground comes up to the top (the coastline is often drawn out at the foot of the rocks below
+    it) but out past every path along the walk -> (the line's offset in from P, top, reach from the line)"""
+    from scipy.ndimage import maximum_filter1d, median_filter, minimum_filter1d, uniform_filter1d
+    from scipy.spatial import cKDTree
+    from shapely.geometry import LineString
+    m = len(P)
+    t = np.stack([n[:, 1], -n[:, 0]], 1)
+    off = np.arange(-3, REACH + 0.01, 0.5)
+    D = np.stack([hr_lookup(P[:, 0] + o * n[:, 0], P[:, 1] + o * n[:, 1], 1) for o in off], 1)
+    # the paths along the run (not across it: stairs, ramps), every metre: (its point, offset in, LiDAR ground, half width)
+    near = cKDTree(P)
+    S = []
+    for q in ptree.query(LineString(P).buffer(REACH + 4)):
+        Q = np.array(densify(list(plines[q].coords), 1.0))
+        if len(Q) < 2: continue
+        d = np.gradient(Q, axis=0); d /= np.maximum(np.hypot(d[:, 0], d[:, 1]), 1e-9)[:, None]
+        _, k = near.query(Q)
+        o = ((Q - P[k]) * n[k]).sum(1); a = ((Q - P[k]) * t[k]).sum(1)
+        sel = (np.abs((d * t[k]).sum(1)) > 0.7) & (np.abs(a) <= STEP) & (o > -4) & (o < REACH + 2)
+        if sel.any(): S.append(np.c_[k[sel], o[sel], hr_lookup(Q[sel, 0], Q[sel, 1], 1), np.full(sel.sum(), pw[q][1] / 2)])
+    S = np.concatenate(S) if S else np.zeros((0, 4))
+    S = S[np.isfinite(S[:, 2])]
+    by = [S[S[:, 0] == k] for k in range(m)]
+    # (to start: the ground a metre to 4 m in, the walk's paths' own LiDAR read low where one is mapped out over the edge)
+    plateau = np.nanmedian(np.where((off >= 2) & (off <= 5), D, np.nan), 1)
+    T = smooth_top(np.where(np.isfinite(plateau), np.fmax(plateau, z), z), GRADE, STEP); W = np.minimum(w, EDGE)
+    for _ in range(3):
+        # the line where the ground comes up to the walk (a 2 m cell's uncertainty out), but never in past the inner edge
+        # of the walk's first path by more than SHIFT (one mapped out over the edge is moved in onto the walk: tools/tiles.py off_walls)
+        ed = np.zeros(m); bound = np.full(m, 9.0)
+        for k in range(m):
+            s = by[k][by[k][:, 1] > -3]  # (the walk's: not a path out at the rocks' foot)
+            up = np.flatnonzero((off >= -1) & (D[k] >= T[k] - BAND))
+            ed[k] = off[up[0]] - 0.25 if len(up) else 0.0
+            if len(s): bound[k] = (s[:, 1] + s[:, 3]).min() + SHIFT
+        ed = np.minimum(uniform_filter1d(median_filter(ed, 7, mode='nearest'), 5, mode='nearest'), bound)
+        lo = np.full(m, -np.inf); hi = np.full(m, np.inf); ext = np.minimum(w - ed, EDGE)
+        for k in range(m):
+            # what the walk stands on from its edge in: its paths (but those moved in), the ground to 4 m in; as far as one top fits them
+            s = by[k][by[k][:, 1] - by[k][:, 3] >= ed[k] + CLEAR]
+            j = (off >= ed[k] + 0.5) & (off <= ed[k] + min(ext[k], 4.0)) & np.isfinite(D[k])
+            v = np.r_[np.c_[s[:, 1] - s[:, 3], s[:, 2], np.ones(len(s))], np.c_[off[j], D[k][j], np.zeros(j.sum())]]
+            v = v[np.argsort(v[:, 0])]
+            if not len(v): continue
+            run_lo, run_hi = np.maximum.accumulate(v[:, 1]), np.minimum.accumulate(v[:, 1])
+            keep = int(np.argmax(run_lo - run_hi > 2 * BAND)) if (run_lo - run_hi > 2 * BAND).any() else len(v)
+            keep = max(keep, 1)
+            if keep < len(v): ext[k] = min(ext[k], max(v[keep, 0] - ed[k] - 0.5, 1.0))  # (the ground climbing off the walk: it reaches less far)
+            # the band: the paths on it, and the ground where the walk's width is measured (min(reach, 4) in: geom_rules
+            # seawall-lidar); the ground between is the 2 m LiDAR's smear of kerbs, planters, benches
+            u = v[:keep]; u = u[(u[:, 2] == 1) | (np.abs(u[:, 0] - ed[k] - min(ext[k], 4.0)) <= 0.5)]
+            if len(u): lo[k], hi[k] = u[:, 1].max() - BAND, u[:, 1].min() + BAND
+        # the top moved only where it must, and smoothly: down by the most it is over a band within 6 m, up likewise
+        env = lambda v: uniform_filter1d(maximum_filter1d(np.nan_to_num(np.maximum(v, 0), posinf=0), 7, mode='nearest'), 7, mode='nearest')
+        T = smooth_top(T, GRADE, STEP)  # (no bump a walker would feel: then moved into the band where it must)
+        for _ in range(4): T = T - env(T - hi); T = T + env(lo - T)
+        hi_ = np.maximum(lo, hi)
+        for _ in range(20): T = grade(np.clip(T, lo, hi_), WALK_GRADE * STEP)  # (into the band, and no steeper than a walk)
+        T = np.clip(T, lo, hi_)
+        W = ext
+    W = np.maximum(uniform_filter1d(minimum_filter1d(np.minimum(w - ed, W), 5, mode='nearest'), 5, mode='nearest'), 1.0)
+    return ed, T, W
+
+
+def unfold(P, Q):
+    """which points of Q (P's points, each moved along its normal) to keep so that no segment of the line through them
+    runs against the way P runs there (a fold: a spike in the wall's face)"""
+    keep = np.ones(len(P), bool)
+    for _ in range(len(P)):
+        k = np.flatnonzero(keep)
+        if len(k) < 3: break
+        dq, dp = np.diff(Q[k], axis=0), np.diff(P[k], axis=0)
+        bad = (dq * dp).sum(1) < 0.5 * np.hypot(*dq.T) * np.hypot(*dp.T)
+        if not bad.any(): break
+        j = int(np.flatnonzero(bad)[0])
+        keep[k[j + 1] if j + 1 < len(k) - 1 else k[j]] = False
+    return keep
 
 
 def detect(coast, paths, sand, rails, why=None):
@@ -93,7 +190,11 @@ def detect(coast, paths, sand, rails, why=None):
     stree = STRtree(sp) if sp else None
     rl = [LineString(p) for p in rails.values()]
     rtree = STRtree(rl) if rl else None
-    edges = [(wid, pts, False) for wid, pts in coast.items()]
+    # the coastline whole: OSM splits it into ways anywhere, and a run ending at each split blends its walk down there
+    from shapely.ops import linemerge
+    first = {tuple(np.round(p[0], 3)): wid for wid, p in coast.items()}
+    merged = linemerge([LineString(p) for p in coast.values()], directed=True)
+    edges = [(first.get(tuple(np.round(g.coords[0], 3)), k), [tuple(c) for c in g.coords], False) for k, g in enumerate(getattr(merged, 'geoms', [merged]))]
     # a beach's landward edge: the walk behind the beach up on its wall (English Bay, Second Beach), the sand at its
     # foot; its ring turned so the sand lies on the right as the sea does of a coastline
     for k, g in enumerate(sp):
@@ -156,14 +257,7 @@ def detect(coast, paths, sand, rails, why=None):
         from scipy.ndimage import median_filter as _mf
         zf = _mf(np.where(np.isfinite(Z), Z, -99.0), 5, mode='nearest')
         step = np.r_[False, np.abs(np.diff(zf)) > STEP_UP]
-        # and where a path crosses it, down to the sand or the water (a ramp, stairs, a boat ramp): a gap the walk blends down through
-        # (one that goes on 3 m out past the line: not the walk itself, drawn a little over its edge here and there)
-        for q in ptree.query(LineString(P), predicate='intersects'):
-            Q = np.array(densify(pw[q][0], 1.0))
-            for c in shapely.get_coordinates(shapely.intersection(LineString(P), plines[q])):
-                near_c = Q[np.hypot(Q[:, 0] - c[0], Q[:, 1] - c[1]) < 10]
-                k = np.argmin(np.hypot(P[:, 0][None] - near_c[:, :1], P[:, 1][None] - near_c[:, 1:]), 1)
-                if len(near_c) and (((near_c - P[k]) * n[k]).sum(1) < -3).any(): step |= np.hypot(P[:, 0] - c[0], P[:, 1] - c[1]) < 4
+        # (a path across it, stairs or a ramp down to the sand or the water, is cut at its edge: tools/tiles.py off_walls)
         spans = [(a + s0, b + s0) for s0, e0 in runs_of(ok, gap=int(10 / STEP), least=int(24 / STEP))
                  for a, b in runs_of(~step[s0:e0] | (np.arange(e0 - s0) == 0), 0, int(24 / STEP))]
         for s, e in spans:
@@ -174,23 +268,16 @@ def detect(coast, paths, sand, rails, why=None):
             from scipy.ndimage import maximum_filter1d, median_filter, uniform_filter1d
             z = smooth_top(z, GRADE, STEP)
             w = np.minimum(uniform_filter1d(maximum_filter1d(w, 7), 7), EDGE)
+            ed, z, w = fit(P[s:e], n[s:e], z, w, pw, plines, ptree)
             f = np.minimum(uniform_filter1d(median_filter(f, 9, mode='nearest'), 5, mode='nearest'), z - 0.8)
-            # the wall where the walk's edge is: the coastline is often drawn out at the foot of the rocks below it, so
-            # the line moves in to where the LiDAR ground first comes up to the top (less a metre: its 2 m cells smear
-            # the edge), the rocks or the beach at its foot
-            off = np.arange(0, 8.01, 0.5)
-            D = np.stack([hr_lookup(P[s:e, 0] + o * n[s:e, 0], P[s:e, 1] + o * n[s:e, 1], 1) for o in off], 1)
-            up = D >= z[:, None] - 0.6
-            ed = np.maximum(np.where(up.any(1), off[np.argmax(up, 1)], 0.0) - 1.0, 0.0)
-            ed = uniform_filter1d(median_filter(ed, 9, mode='nearest'), 5, mode='nearest')
-            ed = np.minimum(ed, np.maximum(np.nan_to_num(W0[s:e], nan=0.0) - 0.5, 0.0))  # (never in past the walk's first path: it stays on top)
-            Pw = P[s:e] + n[s:e] * ed[:, None]; w = np.maximum(w - ed, 1.5)
+            Pw = P[s:e] + n[s:e] * ed[:, None]
             rail = np.zeros(e - s, bool)
             if rtree is not None:
                 ra, rb = rtree.query(shapely.points(Pw + 0.6 * n[s:e]), predicate='dwithin', distance=2.0)
                 rail[ra] = True
                 rail = uniform_filter1d(rail.astype(float), 5) > 0.5
-            out.append((wid, Pw, z, w, rail, f))
+            keep = unfold(P[s:e], Pw)  # (moved in round a tight bend the line folds over itself: those points go)
+            if keep.sum() >= 2: out.append((wid, Pw[keep], z[keep], w[keep], rail[keep], f[keep]))
     return out
 
 
@@ -243,7 +330,21 @@ def amenities(R, paths, sand, builds, src='data/lm.osm.pbf'):
                 v = v / dv if dv > 1e-3 else np.array([1.0, 0.0]); x, y = c + v * clear
             a = math.atan2(-v[1], -v[0])  # +x towards the path
         out.append((float(x), float(y), a, k))
-    return out
+    return apart(out)
+
+
+def apart(K, clear=0.15):
+    """beach things clear of each other: one OSM maps by another (two picnic tables side by side) moved off it,
+    away from it, a step at a time (geom_rules.py log_fix would drop it)"""
+    K = list(K)
+    for i in range(1, len(K)):
+        for _ in range(40):
+            x, y, a, k = K[i]; b = kit_box(x, y, a, k)
+            hit = next((q for q in K[:i] if abs(q[0] - x) < 8 and abs(q[1] - y) < 8 and kit_box(*q).distance(b) < clear), None)
+            if hit is None: break
+            v = np.array([x - hit[0], y - hit[1]]); v = v / (np.hypot(*v) or 1.0) if np.hypot(*v) > 1e-6 else np.array([1.0, 0.0])
+            K[i] = (x + v[0] * 0.1, y + v[1] * 0.1, a, k)
+    return K
 
 
 def bake():
@@ -299,6 +400,7 @@ def height(R, g, x, y, low=None):
     for P, top, reach, _, foot, *E in R:
         best = np.full(len(x), R_); hv = g.copy()  # this run's nearest segment
         f = E[0] if E else ends(P)  # (a tile's piece of a run carries the whole run's)
+        gw = E[1] if len(E) > 1 else None  # the terrain on its walk (inland()): what the walk blends to at the run's ends
         a, b = P[:-1], P[1:]
         ab = b - a; L2 = np.maximum((ab ** 2).sum(1), 1e-9)
         N = vnormals(P)
@@ -313,9 +415,13 @@ def height(R, g, x, y, low=None):
                           ab[k, 0] * (y - a[k, 1]) - ab[k, 1] * (x - a[k, 0])))
             d = np.where(sd < 0, -dist, dist)
             T = top[k] + (top[k + 1] - top[k]) * u; Ft = foot[k] + (foot[k + 1] - foot[k]) * u; W = reach[k] + (reach[k + 1] - reach[k]) * u; F = f[k] + (f[k + 1] - f[k]) * u
+            Gw = g if gw is None else g + (gw[k] + (gw[k + 1] - gw[k]) * u - g) * np.clip(2 * F, 0, 1)
             side = d > -SLIT if low is None else np.where(np.asarray(low, bool), d >= 0.4, d > -SLIT)
             w_in = np.clip(1 - (d - W) / B_IN, 0, 1); w_out = np.clip(1 - (-d - LOW) / LOW_B, 0, 1)
-            h = np.where(side, g + (T - g) * w_in * F, g + (Ft - g) * w_out * F)
+            # the walk's side: its top; toward a run's ends first the terrain on the walk (the same across it: the coping stays
+            # on the walk while the wall stands, F > 0.5), then the terrain where it is; past its reach the terrain there.
+            # the foot's: the water or sand, toward the ends the terrain
+            h = np.where(side, g + (Gw + (T - Gw) * F - g) * w_in, g + (Ft - g) * w_out * F)
             best = np.where(m, dist, best); hv = np.where(m, h, hv)
         # the two nearest runs, cross-faded where they're about as near (a run ending by another, two at a corner)
         first = best < d1; second = ~first & (best < d2)
@@ -323,6 +429,14 @@ def height(R, g, x, y, low=None):
         d1, h1 = np.where(first, best, d1), np.where(first, hv, h1)
     t = np.minimum(1, (d2 - d1) / FADE)
     return h1 + (h2 - h1) * 0.5 * (1 - t * t * (3 - 2 * t))
+
+
+def inland(P, reach, ground):
+    """per point of a run its walk's terrain: ground (the drawn terrain, x, y -> z) min(reach, 4) m in from its line
+    (the page's core/tile-worker.js terrain())"""
+    Q = P + vnormals(P) * np.minimum(reach, 4.0)[:, None]
+    z = np.asarray(ground(Q[:, 0], Q[:, 1]), float)
+    return np.where(np.isfinite(z), z, np.asarray(ground(P[:, 0], P[:, 1]), float))  # (past the tiles there are: at the line)
 
 
 def tile_walls(path):

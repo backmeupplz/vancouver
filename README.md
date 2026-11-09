@@ -74,9 +74,12 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    The seawalls are found, not listed (`uv run --with numpy,scipy,shapely,osmium python3 tools/seawall.py` →
    `data/seawalls.npz`, optional): a stretch of coastline (or a beach's landward edge) is a seawall where a paved walk runs
    along it within a few metres, the LiDAR ground at the walk stands well over the water or sand and comes up to the
-   edge (Stanley Park, Coal Harbour, English Bay, False Creek, Kits, Canada Place, the North Shore's seawalks...). The
-   walk's height, smoothed along it, is the ground from the edge to the far side of its paths (the walk and its bike lane),
-   the water or sand at its foot flat; the page draws the ground so over the 8 m terrain (`core/util.js wallHeight`, for
+   edge (Stanley Park, Coal Harbour, English Bay, False Creek, Kits, Canada Place, the North Shore's seawalks...). Each
+   run is fitted to the LiDAR: its line where the ground comes up to the walk, its top the smoothest that stays within a
+   metre of the ground at its paths, its walk as far in as one top fits (the walk and its bike lane), the water or sand
+   at its foot flat. Toward a run's ends the walk first sinks to the terrain on it, then blends into the terrain. Paths
+   along a wall that OSM maps out over its edge are moved in onto the walk, and paths across one (stairs, ramps) end at
+   its edge (`tools/tiles.py off_walls`). The page draws the ground so over the 8 m terrain (`core/util.js wallHeight`, for
    walkers, people and the drawn ground alike) and a stone face with a coping, and a railing where OSM maps one. The same
    step puts the picnic tables, bins, fountains, washrooms and concession stands OSM maps by the beaches and walks among
    the logs.

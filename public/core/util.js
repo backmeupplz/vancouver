@@ -33,9 +33,10 @@ export function sampleGrid(h, n, size, x, y) {
 // The seawalls over a detail tile (tools/seawall.py, the SEAW section, tile-worker.js terrain()): the ground on top of
 // a wall's walk up to its reach and the water or sand at its foot, the terrain's 8 m grid can't step. P: per point
 // [x, y north (tile-local), top, foot, reach, end weight (0 at a run's ends), rail], 7 floats each; starts: each run's
-// first point, then the total. -> { seg, start, idx } segments in 32 m cells over the tile (tools/seawall.py height())
-const WALL_C = 32, WALL_N = 34, WALL_R = 28 // cell, cells across (one past each edge), the furthest a wall reaches (REACH + 4 + B_IN)
-export function wallGrid(P, starts) {
+// first point, then the total; ground(x, y): the terrain (its walk's, min(reach, 4) m in, is what the walk blends to at
+// a run's ends: tools/seawall.py inland()). -> { seg, start, idx, G } segments in 32 m cells over the tile (tools/seawall.py height())
+const WALL_C = 32, WALL_N = 34, WALL_R = 32 // cell, cells across (one past each edge), the furthest a wall reaches (REACH + 4 + B_IN)
+export function wallGrid(P, starts, ground) {
   const seg = []
   for (let r = 0; r < starts.length - 1; r++) for (let i = starts[r]; i < starts[r + 1] - 1; i++) seg.push(i)
   const lists = Array.from({ length: WALL_N * WALL_N }, () => [])
@@ -53,14 +54,16 @@ export function wallGrid(P, starts) {
     N[i * 2] -= dy / l; N[i * 2 + 1] += dx / l; N[i * 2 + 2] -= dy / l; N[i * 2 + 3] += dx / l
   }
   for (let i = 0; i < N.length; i += 2) { const l = Math.hypot(N[i], N[i + 1]) || 1e-9; N[i] /= l; N[i + 1] /= l }
+  const G = new Float32Array(P.length / 7)
+  for (let i = 0; i < G.length; i++) { const o = Math.min(P[i * 7 + 4], 4); G[i] = ground ? ground(P[i * 7] + N[i * 2] * o, P[i * 7 + 1] + N[i * 2 + 1] * o) : NaN }
   const segRun = new Int32Array(seg.length)
   for (let k = 0, r = 0; k < seg.length; k++) { while (seg[k] >= starts[r + 1]) r++; segRun[k] = r }
-  return { P, N, runs: Int32Array.from(starts), seg: Int32Array.from(seg), segRun, start, idx: Int32Array.from(lists.flat()) }
+  return { P, N, G, runs: Int32Array.from(starts), seg: Int32Array.from(seg), segRun, start, idx: Int32Array.from(lists.flat()) }
 }
 // the drawn ground at tile-local (x, y) over the terrain's g there (tools/seawall.py height(), the same numbers): low
 // true for the ground classes at a wall's foot (water, sand) and what lies on them, else the walk's side (to 0.2 m out
 // over the wall's line: tools/tiles.py cuts the ground there, under the face)
-const B_IN = 6, LOW = 2, LOW_B = 8, FADE = 3
+const B_IN = 10, LOW = 2, LOW_B = 8, FADE = 3
 export function wallHeight(W, g, x, y, low) {
   const c = Math.max(0, Math.min(WALL_N - 1, Math.floor(y / WALL_C) + 1)) * WALL_N + Math.max(0, Math.min(WALL_N - 1, Math.floor(x / WALL_C) + 1))
   const P = W.P, N = W.N
@@ -77,8 +80,10 @@ export function wallHeight(W, g, x, y, low) {
     rd = dist // (off a segment's end, the side its corner's normal says)
     const sd = u <= 0 ? (x - ax) * N[i * 2] + (y - ay) * N[i * 2 + 1] : u >= 1 ? (x - P[b]) * N[i * 2 + 2] + (y - P[b + 1]) * N[i * 2 + 3] : dx * (y - ay) - dy * (x - ax)
     const d = sd < 0 ? -dist : dist, lerp = (o) => P[a + o] + (P[b + o] - P[a + o]) * u, F = lerp(5)
-    rh = (low ? d >= 0.4 : d > -0.2) ? g + (lerp(2) - g) * Math.max(0, Math.min(1, 1 - (d - lerp(4)) / B_IN)) * F
-      : g + (lerp(3) - g) * Math.max(0, Math.min(1, 1 - (-d - LOW) / LOW_B)) * F
+    if (low ? d >= 0.4 : d > -0.2) { // the walk: toward a run's ends first the terrain on its walk (the coping stays on it), then the terrain here
+      const gw = W.G ? W.G[i] + (W.G[i + 1] - W.G[i]) * u : NaN, Gc = gw === gw ? g + (gw - g) * Math.min(1, 2 * F) : g
+      rh = g + (Gc + (lerp(2) - Gc) * F - g) * Math.max(0, Math.min(1, 1 - (d - lerp(4)) / B_IN))
+    } else rh = g + (lerp(3) - g) * Math.max(0, Math.min(1, 1 - (-d - LOW) / LOW_B)) * F
   }
   done()
   const t = Math.min(1, (d2 - d1) / FADE)

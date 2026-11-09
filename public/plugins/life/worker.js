@@ -123,18 +123,21 @@ function tileH(t, x, y) {
 // the seawalls' walks over the terrain (core/util.js wallHeight, copied: this classic worker can't import it)
 function wallH(W, g, x, y) {
   const M = 34, c = Math.max(0, Math.min(M - 1, Math.floor(y / 32) + 1)) * M + Math.max(0, Math.min(M - 1, Math.floor(x / 32) + 1)), P = W.P, N = W.N
-  let d1 = 28, h1 = g, d2 = 28, h2 = g, run = -1, rd = 28, rh = g
+  let d1 = 32, h1 = g, d2 = 32, h2 = g, run = -1, rd = 32, rh = g
   const done = () => { if (rd < d1) { d2 = d1; h2 = h1; d1 = rd; h1 = rh } else if (rd < d2) { d2 = rd; h2 = rh } }
   for (let q = W.start[c]; q < W.start[c + 1]; q++) {
     const i = W.seg[W.idx[q]], r = W.segRun[W.idx[q]]
-    if (r !== run) { done(); run = r; rd = 28; rh = g }
+    if (r !== run) { done(); run = r; rd = 32; rh = g }
     const a = i * 7, b = a + 7, ax = P[a], ay = P[a + 1], dx = P[b] - ax, dy = P[b + 1] - ay, L2 = dx * dx + dy * dy || 1e-9
     const u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2)), dist = Math.hypot(x - ax - dx * u, y - ay - dy * u)
     if (dist >= rd) continue
     rd = dist
     const sd = u <= 0 ? (x - ax) * N[i * 2] + (y - ay) * N[i * 2 + 1] : u >= 1 ? (x - P[b]) * N[i * 2 + 2] + (y - P[b + 1]) * N[i * 2 + 3] : dx * (y - ay) - dy * (x - ax)
     const d = sd < 0 ? -dist : dist, lerp = (o) => P[a + o] + (P[b + o] - P[a + o]) * u, F = lerp(5)
-    rh = d > -0.2 ? g + (lerp(2) - g) * Math.max(0, Math.min(1, 1 - (d - lerp(4)) / 6)) * F : g + (lerp(3) - g) * Math.max(0, Math.min(1, 1 - (-d - 2) / 8)) * F
+    if (d > -0.2) {
+      const gw = W.G ? W.G[i] + (W.G[i + 1] - W.G[i]) * u : NaN, Gc = gw === gw ? g + (gw - g) * Math.min(1, 2 * F) : g
+      rh = g + (Gc + (lerp(2) - Gc) * F - g) * Math.max(0, Math.min(1, 1 - (d - lerp(4)) / 10))
+    } else rh = g + (lerp(3) - g) * Math.max(0, Math.min(1, 1 - (-d - 2) / 8)) * F
   }
   done()
   const t = Math.min(1, (d2 - d1) / 3)

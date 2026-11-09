@@ -476,6 +476,8 @@ def beach_bits(X0, Y0, polys, builds):
     off = [g for k in BEACH_OFF for g in polys.get(k, [])] + [Polygon(b['ring']) for b in builds if len(b['ring']) >= 3]
     tree = STRtree(off) if off else None
     out = []
+    # as the LOGS section keeps them (1/256 turn, 1/10 m, 1/100 m): the rules (tools/geom_rules.py log_fix) see what the page draws
+    items = [(x, y, round(a / (2 * math.pi) * 256) * 2 * math.pi / 256, min(25.5, round(ln * 10) / 10), min(2.55, round(d * 100) / 100), k) for x, y, a, ln, d, k in items]
     for x, y, a, ln, d, k in items:
         if k == 17: continue  # nets stand on their courts (pitches)
         ux, uy = math.cos(a) * ln / 2, math.sin(a) * ln / 2
@@ -2393,7 +2395,7 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     per = ground_partition(per, tx, ty, out.k, holes if detail else None)
     for k in GROUND:
         if k not in per: continue
-        geoms = list(per[k])
+        geoms = [q for p in per[k] for q in getattr(p, 'geoms', [p]) if q.geom_type == 'Polygon']  # (a part the partition left in pieces)
         body = bytearray()
         for p in geoms:
             rings = [list(p.exterior.coords)[:-1]] + [list(r.coords)[:-1] for r in p.interiors]
@@ -2405,6 +2407,7 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     out.section('GRND', struct.pack('<H', runs) + bytes(gb))
     # lines, with a node table so pieces can join across tiles
     sel = []
+    if sw: lines = off_walls(lines, sw)
     for L in lines:
         if not detail and (KI[L['kind']] >= KI['service'] and L['kind'] not in ('rail', 'lightrail', 'runway', 'taxiway')): continue
         mid = L['own']  # the point that decided which 4 km tile owns the piece
@@ -2513,6 +2516,43 @@ def seawalls_near(x0, y0, size, m=WALL_M):
         for r in np.split(k, np.flatnonzero(np.diff(k) > 1) + 1):
             s_, e_ = max(0, r[0] - 1), min(len(P), r[-1] + 2)
             if e_ - s_ >= 2: out.append(tuple(v[s_:e_] for v in R))
+    return out
+
+
+WALL_PATHS = ('pedestrian', 'footway', 'cycleway', 'path', 'steps')  # (tools/geom_rules.py SW_PATHS)
+
+
+def off_walls(lines, sw, gap=0.75, out_=seawall.SHIFT + 1):
+    """the paths on the ground by the seawalls: one along a wall mapped out over its
+    edge (OSM's metre or two) moved in onto its walk (its edge seawall.CLEAR in from the line); one across it (stairs or
+    a ramp down off the walk) cut there, ending at its edge and going on from its foot, not draped over the face (the
+    page draws no stairs) -> lines, a cut piece in parts (its inner ends new nodes: dead ends)"""
+    from shapely.strtree import STRtree
+    seg = [(P[k], P[k + 1]) for P, *_ in sw for k in range(len(P) - 1)]  # (to the run's ends: the walk's side steps there too, the face fading)
+    if not seg: return lines
+    face = unary_union([LineString(ab) for ab in seg]); tree = STRtree([LineString(ab) for ab in seg])
+    A, B = np.array([a for a, _ in seg]), np.array([b for _, b in seg])
+    t = (B - A) / np.maximum(np.hypot(*(B - A).T), 1e-9)[:, None]; n = np.stack([-t[:, 1], t[:, 0]], 1)  # (the walk's side)
+    cut = face.buffer(gap, cap_style='flat')
+    out = []
+    for L in lines:
+        if L['z'] is not None or L['kind'] not in WALL_PATHS or len(L['pts']) < 2 or LineString(L['pts']).distance(face) > out_ + L['w'] / 2 + 1:
+            out.append(L); continue
+        Q = np.array(densify([tuple(p) for p in L['pts']], 2.0), float)
+        q = tree.nearest(shapely.points(Q))
+        sd = ((Q - A[q]) * n[q]).sum(1); d = np.gradient(Q, axis=0); d /= np.maximum(np.hypot(*d.T), 1e-9)[:, None]
+        need = L['w'] / 2 + seawall.CLEAR - sd
+        mv = (np.abs((d * t[q]).sum(1)) > 0.7) & (sd > -out_) & (need > 0)
+        if mv.any(): Q[mv] += n[q[mv]] * need[mv, None]; L = dict(L, pts=[tuple(c) for c in Q])
+        g = LineString(L['pts'])
+        if not face.intersects(g): out.append(L); continue
+        dd = g.difference(cut)
+        parts = [p for p in getattr(dd, 'geoms', [dd]) if p.geom_type == 'LineString' and p.length >= 0.5]
+        parts.sort(key=lambda p: g.project(Point(p.coords[0])))
+        for k, p in enumerate(parts):
+            a = L['a'] if k == 0 and g.project(Point(p.coords[0])) < 1e-6 else hash((L['a'], L['b'], k, 0)) & 0x7fffffffffffffff
+            b = L['b'] if k == len(parts) - 1 and g.length - g.project(Point(p.coords[-1])) < 1e-6 else hash((L['a'], L['b'], k, 1)) & 0x7fffffffffffffff
+            out.append(dict(L, pts=[tuple(c) for c in p.coords], a=a, b=b))
     return out
 
 
