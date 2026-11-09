@@ -10,6 +10,7 @@
 // and stops there. Ships (city.ships), bridge piers (city.landmarks.piers) and other players (city.multiplayer) are
 // solid too. Published as city.player { mode: 'boat' }, with city.models.boat for others.
 import { kit, kitMaterial, repaint } from '../../core/kit.js'
+import { makeBoat, COLOUR } from './boat.js'
 import { makeWater } from './water.js'
 import { makeGoals, fmtTime } from './goals.js'
 import { want } from './fleet.js'
@@ -24,7 +25,6 @@ const TRAIL = 48, TRAIL_DT = 0.2 // wake: samples, seconds apart
 const SPRAY = 90 // spray droplets
 const PLANE = 5.4 // m/s (10.5 kn): faster than this she lifts and planes
 const RAD = Math.PI / 180, KN = 1.944
-const COLOUR = '#2f6f8f'
 function polar(deg) {
   for (let i = 2; i < POLAR.length; i += 2) if (deg <= POLAR[i]) return POLAR[i - 1] + ((POLAR[i + 1] - POLAR[i - 1]) * (deg - POLAR[i - 2])) / (POLAR[i] - POLAR[i - 2])
   return POLAR[POLAR.length - 1]
@@ -45,34 +45,6 @@ function rose(c, r, w) {
 }
 // a little sloop seen from above, pointing up, with its boom (data-sail) to turn
 const BOAT_SVG = (s) => `<path d="M0 ${-9 * s} C${4 * s} ${-4 * s} ${4 * s} ${4 * s} ${3 * s} ${8 * s} L${-3 * s} ${8 * s} C${-4 * s} ${4 * s} ${-4 * s} ${-4 * s} 0 ${-9 * s}Z" fill="#fdf6ea"/><line data-sail x1="0" y1="${-2 * s}" x2="0" y2="${7 * s}" stroke="#2f6f8f" stroke-width="${1.6 * s}" stroke-linecap="round"/>`
-
-// A 6.6 m sloop, flat-shaded like the map. Forward -z, origin on the waterline. userData: hull (heels and pitches),
-// boom and jib (turn about y), main and jibSail (flap); update(dt, speed) bobs it, for other players' boats.
-function makeBoat(THREE, colour = COLOUR) {
-  const boat = new THREE.Group(), hull = new THREE.Group()
-  const M = (color, extra) => new THREE.MeshLambertMaterial({ color, flatShading: true, ...extra })
-  const spar = M(0xd9d9d4), sailM = M(0xfbfaf2, { side: THREE.DoubleSide })
-  // the hull (its plan extruded, bevelled, a V underneath; the deck on top), the cabin with its windows and the mast,
-  // in one mesh (the life plugin's kit)
-  const k = kit(THREE)
-  k.c(new THREE.Color(colour).getHex()).prism([-0.95, -3.1, 0.95, -3.1, 1.2, -1, 1.15, 0.8, 0.75, 2.3, 0, 3.5, -0.75, 2.3, -1.15, 0.8, -1.2, -1], -0.45, 0.65, { bevel: 0.06, cap: () => k.c(0xe9dcc3) })
-  k.rot(0, 'x', -Math.PI / 2).xf(0, (v) => { if (v.y < 0) v.x *= 0.5 })
-  k.c(0xf3ead8).box(-0.65, 0.65, 0.63, 1.13, -1.25, 0.65, 0.92, 0.95) // the cabin
-  k.c(0x2c3c4e).box(-0.635, 0.635, 0.82, 0.98, -1.05, 0.45, 0.97) // its windows
-  k.c(0xd9d9d4).rod([0, 0.65, -0.9], [0, 9.25, -0.9], 0.08, 0.05) // the mast
-  hull.add(new THREE.Mesh(k.geometry(true), kitMaterial(THREE, undefined, false)))
-  const tri = (a, b, c) => { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute([...a, ...b, ...c], 3)); g.computeVertexNormals(); return new THREE.Mesh(g, sailM) }
-  const boom = new THREE.Group(); boom.position.set(0, 1.5, -0.9); hull.add(boom)
-  const bm = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, 3).translate(0, 0, 1.5), spar); boom.add(bm)
-  const main = tri([0, 0.05, 0.05], [0, 7.6, 0.02], [0, 0.05, 2.95]); boom.add(main)
-  const jib = new THREE.Group(); jib.position.set(0, 0.75, -3.15); hull.add(jib)
-  const jibSail = tri([0, 0, 0], [0, 7.2, 2.2], [0, 0.35, 2.3]); jib.add(jibSail)
-  boat.add(hull)
-  boat.userData = { hull, boom, jib, main, jibSail }
-  let t = Math.random() * 10
-  boat.update = (dt) => { t += dt; hull.position.y = 0.06 * Math.sin(t * 1.4); hull.rotation.set(0.02 * Math.sin(t * 1.1), 0, 0.12 + 0.03 * Math.sin(t * 0.9)); boom.rotation.y = jib.rotation.y = -0.4 }
-  return boat
-}
 
 export default function sail(city) {
   const { THREE } = city

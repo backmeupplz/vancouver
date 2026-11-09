@@ -3,6 +3,7 @@
 #   berths:   straight quay runs where a port terminal (industrial=port) meets the water, with the water side
 #             (coastline has water on its right; river polygons are reoriented the same way)
 #   river:    the Fraser's North Arm and main channel centrelines, for tugs towing log booms
+#   moorings: marina berths, a boat each side of the fingers (man_made=pier)
 #   anchorages: approximate Port of Vancouver anchorage spots (OSM has no seamark:type=anchorage here)
 # Usage: uv run --with osmium,shapely python3 tools/ships_data.py [data/lm.osm.pbf]
 # Map data © OpenStreetMap contributors, ODbL.
@@ -13,6 +14,7 @@ from shapely import wkb
 from shapely.geometry import LineString, Point, Polygon
 from shapely.geometry.polygon import orient
 from shapely.ops import linemerge, unary_union
+from shapely.strtree import STRtree
 
 SRC = sys.argv[1] if len(sys.argv) > 1 else '/Users/borodutch/code/vancouver/data/lm.osm.pbf'
 OUT = os.path.join(os.path.dirname(__file__), '..', 'public', 'plugins', 'ships', 'data.json')
@@ -27,9 +29,9 @@ def ll(x, y): return [round(LAT0 + y / KY, 5), round(LON0 + x / KX, 5)]
 tmp = tempfile.mkdtemp()
 sub = os.path.join(tmp, 'sea.osm.pbf')
 subprocess.run(['osmium', 'tags-filter', '-O', '-o', sub, SRC, 'w/route=ferry', 'w/natural=coastline', 'w/waterway=river',
-                'wr/industrial=port', 'wr/industrial=oil;port', 'wr/industrial=port;oil', 'wr/water=river'], check=True)
+                'wr/industrial=port', 'wr/industrial=oil;port', 'wr/industrial=port;oil', 'wr/water=river', 'w/man_made=pier'], check=True)
 fab = osmium.geom.WKBFactory()
-ferries, coast, rivers, terminals, riverpolys = [], [], {}, [], []
+ferries, coast, rivers, terminals, riverpolys, piers = [], [], {}, [], [], []
 
 
 class H(osmium.SimpleHandler):
@@ -52,6 +54,8 @@ class H(osmium.SimpleHandler):
             coast.append(line)
         elif t.get('waterway') == 'river' and t.get('name') in ('Fraser River', 'Fraser River (North Arm)'):
             rivers.setdefault(t['name'], []).append(line)
+        elif t.get('man_made') == 'pier':
+            piers.append(line)
 
     def area(self, a):
         t = a.tags
@@ -132,6 +136,24 @@ out['anchorages'] = [
     [49.2925, -123.2600], [49.3020, -123.2640], [49.2870, -123.2760], [49.2975, -123.2810],
     [49.3015, -123.0820], [49.2990, -123.0640],  # inner harbour, off Neptune and Lynnterm
 ]
+
+# Moorings: a boat each side of every marina finger (a short two-node pier), clear of the other floats and of the
+# boats already berthed: [lat, lon, heading (degrees, along the finger), the finger's length]
+fingers = [f for f in piers if len(f.coords) == 2 and 8 <= f.length <= 22]
+tree, taken, moor = STRtree(piers), {}, []
+for f in fingers:
+    (ax, ay), (bx, by) = f.coords
+    ux, uy = (bx - ax) / f.length, (by - ay) / f.length
+    for s in (1, -1):
+        p = Point((ax + bx) / 2 - uy * s * 2.7, (ay + by) / 2 + ux * s * 2.7)
+        if not REGION.contains(p) or any(piers[i] is not f and piers[i].distance(p) < 2.2 for i in tree.query(p.buffer(2.2))):
+            continue
+        cell = (round(p.x / 4), round(p.y / 4))
+        if any(math.hypot(p.x - q.x, p.y - q.y) < 3.6 for dx in (-1, 0, 1) for dy in (-1, 0, 1) for q in taken.get((cell[0] + dx, cell[1] + dy), [])):
+            continue
+        taken.setdefault(cell, []).append(p)
+        moor.append([*ll(p.x, p.y), round(math.degrees(math.atan2(ux, uy))) % 360, round(f.length)])
+out['moorings'] = moor
 json.dump(out, open(OUT, 'w'), separators=(',', ':'))
 print(f"{OUT}: {os.path.getsize(OUT)} bytes, {len(out['ferries'])} ferry lines, {len(berths)} berth runs, "
       f"{len(out['river'])} river lines; terminals: {sorted({b['t'] for b in berths})}")

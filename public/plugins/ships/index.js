@@ -1,11 +1,13 @@
 // Ships and boats on the water: freighters at the English Bay and inner-harbour anchorages, container ships,
 // bulkers and tankers at their terminals, BC Ferries on their routes from Tsawwassen and Horseshoe Bay, the
-// False Creek mini ferries, tugs towing log booms on the Fraser, a few sail and motor boats in English Bay and, in
-// the Alaska season, cruise ships at Canada Place and Ballantyne Pier.
+// False Creek mini ferries, tugs towing log booms on the Fraser, a few sail and motor boats in English Bay, kayaks and
+// paddleboards inshore, the marinas' moored boats, float planes at the Flight Centre and, in the Alaska season,
+// cruise ships at Canada Place and Ballantyne Pier. The models: models.js.
 // Simulated on the clock (Vancouver time, the same for everyone); set AIS_URL below for live positions.
 // Routes and berths: tools/ships_data.py → data.json, from OpenStreetMap (© OpenStreetMap contributors, ODbL).
 // The SeaBus belongs to the transit plugin.
 import { mulberry32, vancouver, getJSON } from '../../core/util.js'
+import { shipModels } from './models.js'
 
 // ---- LIVE AIS: the one switch -------------------------------------------------------------------------------
 // A same-origin URL returning the vessels in the area as JSON, polled every 15 s while the page is visible:
@@ -39,82 +41,9 @@ function cruiseDay(ms) { // { wd, shoulder, weekend } while ships are berthed, e
   return (cdDay = m < 4 || m > 10 || sec < 7 * 3600 || sec > (weekend ? 17.5 : 16.5) * 3600 ? null : { wd, shoulder: m === 4 || m === 10, weekend })
 }
 
-const WHITE = 0xf3f3ee, NAVY = 0x1d3463
-const BOXES = [0x2b6cb0, 0xc0392b, 0xe8e8e3, 0x7d8590, 0x2f8f5b, 0xe67e22, 0xf1c40f, 0x1d3a5f, 0x8e44ad, 0xb5651d, 0x16a085]
-const HULLS = [0x1d3a5f, 0x7a1f1f, 0x23262b, 0x1f5f4a, 0x2b4a7a, 0x3a3f47]
-
-
-// Models: parts [geometry, x (along, + = bow), y (bottom, 0 = waterline), z (across), length, height, width, colour, tilt]
-// H: ship hull with a pointed bow, F: double-ended ferry hull, B: box, S: triangular sail
-const MODELS = {
-  container(r, L = 280 + r() * 40, B = 42) {
-    const p = [['H', 0, -6, 0, L, 20, B, pick(r, HULLS)], ['B', -0.38 * L, 14, 0, 16, 24, B * 0.9, WHITE],
-      ['B', -0.38 * L, 38, 0, 11, 3, B * 1.06, WHITE], ['B', -0.44 * L, 14, 0, 9, 30, 9, pick(r, [0x23262b, 0xc0392b, 0x2b6cb0])]]
-    for (let x = -0.31 * L; x < 0.3 * L; x += 14) {
-      const tiers = Math.max(1, Math.round((2 + r() * 5) * (x > 0.2 * L ? 0.6 : 1)))
-      for (const k of [-1, 0, 1]) p.push(['B', x, 14, k * B * 0.3, 12.2, tiers * 2.6 * (0.8 + r() * 0.4), B * 0.29, pick(r, BOXES)])
-    }
-    return { L, B, p }
-  },
-  bulk(r, L = 200 + r() * 40, B = 32, cranes = r() < 0.4) {
-    const hatch = pick(r, [0x9c4a2f, 0x7d8590, 0x4f7d55, 0x2b4a7a]), p = [['H', 0, -6, 0, L, 18, B, pick(r, HULLS)],
-      ['B', -0.4 * L, 12, 0, 16, 20, B * 0.85, WHITE], ['B', -0.46 * L, 12, 0, 7, 26, 7, pick(r, [0x23262b, 0xc0392b, 0xe67e22])]]
-    for (let i = 0; i < 7; i++) {
-      const x = -0.28 * L + i * 0.095 * L
-      p.push(['B', x, 12, 0, 0.075 * L, 2.6, B * 0.7, hatch])
-      if (cranes && i % 2 && i < 7) p.push(['B', x + 0.047 * L, 12, B * 0.32, 2.4, 20, 2.4, 0xe0b830], ['B', x + 0.047 * L, 30, B * 0.32, 24, 1.6, 1.6, 0xe0b830, 0.5])
-    }
-    return { L, B, p }
-  },
-  tanker(r, L = 230 + r() * 30, B = 44) {
-    return { L, B, p: [['H', 0, -6, 0, L, 18, B, pick(r, [0x7a1f1f, 0x23262b, 0x1d3a5f])], ['B', -0.05 * L, 12, 0, 0.64 * L, 0.6, B * 0.94, 0x6d7d62],
-      ['B', -0.04 * L, 12.6, 0, 0.56 * L, 2, 3, 0xd5d5d0], ['B', 0, 12.6, 0, 6, 4, B * 0.7, 0xd5d5d0],
-      ['B', -0.4 * L, 12, 0, 16, 22, B * 0.8, WHITE], ['B', -0.46 * L, 12, 0, 8, 28, 8, pick(r, [0x23262b, 0xc0392b])]] }
-  },
-  car(r, L = 200, B = 32) {
-    return { L, B, p: [['H', 0, -6, 0, L, 12, B, pick(r, [0x23262b, 0x1d3a5f])], ['B', -0.03 * L, 6, 0, 0.9 * L, 30, B, pick(r, [WHITE, 0x2b4a7a, 0xd9d4c4])],
-      ['B', 0.36 * L, 36, 0, 8, 4, B, WHITE]] }
-  },
-  general(r) { return MODELS.bulk(r, 150 + r() * 40, 26, true) },
-  cruise(r, L = 290, B = 36) { // white decks stepping back to the bow, rows of balconies, lifeboats, a pool deck and a raked funnel
-    const [hull, funnel] = pick(r, [[NAVY, 0x23262b], [WHITE, NAVY], [WHITE, 0x23262b], [0x1d1d22, 0xc0392b], [WHITE, 0x2b6cb0], [NAVY, WHITE]])
-    const lo = [-0.05 * L, 0.84 * L], hi = [-0.09 * L, 0.76 * L] // the two blocks of decks: middle, length
-    const p = [['H', 0, -8, 0, L, 19, B, hull], ['H', lo[0], 11, 0, lo[1], 19, B * 0.97, WHITE], ['H', hi[0], 30, 0, hi[1], 12, B * 0.95, WHITE],
-      ['B', -0.05 * L, 12.5, 0, 0.52 * L, 3.4, B * 1.05, 0xee8a1c], ['B', -0.14 * L, 42, 0, 0.5 * L, 6, B * 0.8, WHITE],
-      ['B', -0.02 * L, 48, 0, 0.12 * L, 0.4, B * 0.34, 0x46aee0], ['B', 0.27 * L, 37, 0, 6, 4.5, B * 1.1, WHITE], ['B', -0.31 * L, 46, 0, 0.07 * L, 12, B * 0.32, funnel, 0.18]]
-    for (const y of [17, 21.5, 26]) p.push(['H', lo[0], y, 0, lo[1], 1.3, B * 0.99, 0x3b4a58])
-    for (const y of [33, 37.5]) p.push(['H', hi[0], y, 0, hi[1], 1.3, B * 0.97, 0x3b4a58])
-    return { L, B, p }
-  },
-  bcf(r, L = 160, B = 27) {
-    return { L, B, p: [['F', 0, -4, 0, L, 8.5, B, NAVY], ['F', 0, 4.5, 0, L, 4.5, B, WHITE], ['B', 0, 9, 0, 0.84 * L, 6, B * 0.95, WHITE],
-      ['B', 0, 15, 0, 0.78 * L, 1.8, B * 0.97, 0x2a3b52], ['B', 0, 16.8, 0, 0.74 * L, 4, B * 0.9, WHITE], ['B', 0, 20.8, 0, 0.3 * L, 3, B * 0.7, WHITE],
-      ['B', 0, 23.8, 0, 8, 7, 6, WHITE], ['B', 0, 30.8, 0, 8.4, 1.5, 6.4, NAVY]] }
-  },
-  mini(r, aquabus) {
-    const L = 10, B = 3.6
-    return { L, B, small: true, p: [['F', 0, -0.5, 0, L, 1.6, B, aquabus ? WHITE : 0x2a6fb5],
-      ['B', 0, 1.1, 0, 0.6 * L, 1.9, B * 0.85, aquabus ? pick(r, [0xe74c3c, 0xf39c12, 0xf1c40f, 0x27ae60, 0x2980b9, 0x8e44ad]) : 0xeef2f5],
-      ['B', 0, 3, 0, 0.66 * L, 0.25, B * 0.92, WHITE]] }
-  },
-  tug(r, L = 24, B = 9) {
-    return { L, B,  p: [['H', 0, -1.5, 0, L, 4, B, 0x1d1d22], ['B', 0.05 * L, 2.5, 0, 0.42 * L, 3, B * 0.72, WHITE],
-      ['B', 0.12 * L, 5.5, 0, 0.24 * L, 2.6, B * 0.6, WHITE], ['B', -0.1 * L, 5.5, 0, 1.6, 4, 1.6, 0xc0392b]] }
-  },
-  boom(r) {
-    const p = [['B', 0, -0.4, 0, 70, 1, 20, 0x8a6a46]]
-    for (const x of [-34, -12, 12, 34]) p.push(['B', x, 0.4, 0, 1.6, 0.5, 20.6, 0x5e4630])
-    return { L: 70, B: 20, p }
-  },
-  sail(r, L = 10 + r() * 4, B = 3.4) {
-    return { L, B, small: true, p: [['H', 0, -0.6, 0, L, 1.6, B, r() < 0.8 ? WHITE : NAVY], ['B', 0.12 * L, 1, 0, 0.25, 1.25 * L, 0.25, 0xf4f4f0],
-      ['S', 0.12 * L - 0.2 * L, 1.8, 0, 0.4 * L, 1.1 * L, 0.12, pick(r, [0xfbfbf5, 0xfbfbf5, 0xe74c3c, 0x2980b9])]] }
-  },
-  motor(r, L = 8 + r() * 4, B = 3) {
-    return { L, B, small: true, p: [['H', 0, -0.5, 0, L, 1.5, B, pick(r, [WHITE, WHITE, 0x2b4a7a, 0xc0392b])], ['B', -0.08 * L, 1, 0, 0.32 * L, 1.3, B * 0.7, 0x2a3b52]] }
-  },
-}
+// The fleet: a variant of a class's model (models.js), stretched to this vessel's length and beam
 const pick = (r, a) => a[Math.floor(r() * a.length)]
+const vessel = (models) => (r, kind, L, B) => { const m = pick(r, models[kind]); return { m, L: L ?? m.L, B: B ?? m.B, small: m.small } }
 
 export default async function ships(city) {
   const { THREE } = city
@@ -122,14 +51,13 @@ export default async function ships(city) {
   const ground = (x, z) => city.world.heightAt(x, z)
   const xz = (lat, lon) => { const v = city.world.fromLatLon(lat, lon); return [v.x, v.z] }
 
-  // geometries
-  const hullShape = (pts) => new THREE.Shape(pts.map(([x, y]) => new THREE.Vector2(x, y)))
-  const extrude = (pts) => new THREE.ExtrudeGeometry(hullShape(pts), { depth: 1, bevelEnabled: false }).rotateX(-Math.PI / 2)
-  const GEO = {
-    H: extrude([[-0.5, -0.5], [0.3, -0.5], [0.5, 0], [0.3, 0.5], [-0.5, 0.5]]),
-    F: extrude([[-0.5, -0.3], [-0.42, -0.5], [0.42, -0.5], [0.5, -0.3], [0.5, 0.3], [0.42, 0.5], [-0.42, 0.5], [-0.5, 0.3]]),
-    B: new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0),
-    S: new THREE.ExtrudeGeometry(hullShape([[0.5, 0], [-0.5, 0], [0.5, 1]]), { depth: 1, bevelEnabled: false }).translate(0, 0, -0.5),
+  const V = vessel(shipModels(THREE))
+  const MODELS = {
+    container: (r) => V(r, 'container', 280 + r() * 40), bulk: (r) => V(r, 'bulk', 200 + r() * 40), tanker: (r) => V(r, 'tanker', 230 + r() * 30),
+    car: (r) => V(r, 'car'), general: (r) => V(r, 'general', 150 + r() * 40), cruise: (r, L) => V(r, 'cruise', L),
+    bcf: (r, L, B) => V(r, 'bcf', L, B), mini: (r, aquabus) => V(r, aquabus ? 'aquabus' : 'fcf'), tug: (r) => V(r, 'tug'), boom: (r) => V(r, 'boom'),
+    sail: (r) => V(r, 'sail', 10 + r() * 4, 3.4), motor: (r) => V(r, 'motor', 8 + r() * 4, 3),
+    kayak: (r) => V(r, 'kayak'), sup: (r) => V(r, 'sup'),
   }
 
   // ---------- the fleet: dynamic vessels first (their instances are re-uploaded each frame), then static ----------
@@ -245,31 +173,47 @@ export default async function ships(city) {
     }
   }
 
-  // ---------- instanced meshes: one per geometry, Lambert, colour per instance ----------
-  const count = { H: 0, F: 0, B: 0, S: 0 }
-  for (const v of [...dyn, ...stat]) {
-    v.parts = v.p.map(([g, x, y, z, sx, sy, sz, col, tilt]) => {
-      const m = new THREE.Matrix4().compose(new THREE.Vector3(x, y, z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), tilt || 0), new THREE.Vector3(sx, sy, sz))
-      return [g, count[g]++, m, col]
+  // paddlers close inshore: kayaks and paddleboards on slow loops off the beaches and in False Creek
+  const PADDLE = [[49.288, -123.148, 60], [49.2775, -123.158, 70], [49.278, -123.2, 80], [49.296, -123.158, 60], [49.3215, -123.155, 60], // off the beaches
+    ...data.ferries.filter((f) => f.op !== 'bcf').slice(0, 9).filter((f, i) => i % 3 === 0).map((f) => [...f.pts[f.pts.length >> 1], 35])] // False Creek
+  for (let i = 0; i < 16 && !AIS_URL; i++) {
+    const [la, lo, R] = PADDLE[i % PADDLE.length], [cx, cz] = xz(la, lo), sup = i % 3 === 2, a0 = r() * 7, w = ((sup ? 0.9 : 1.5) / R) * (r() < 0.5 ? 1 : -1), e = 0.4 + r() * 0.4
+    add(dyn, MODELS[sup ? 'sup' : 'kayak'](r), (t, out) => {
+      const a = t * w + a0
+      out[0] = cx + R * Math.cos(a); out[1] = cz + R * e * Math.sin(a); out[2] = Math.atan2(-Math.sin(a) * w, -e * Math.cos(a) * w); out[3] = 0.2 // (too slow for a wake)
+      return true
     })
-    delete v.p
   }
-  const dynCount = { H: 0, F: 0, B: 0, S: 0 }
-  for (const v of dyn) for (const [g] of v.parts) dynCount[g]++
-  const mat = new THREE.MeshLambertMaterial()
-  const meshes = {}
-  const col = new THREE.Color()
-  for (const g in GEO) {
-    if (!count[g]) continue
-    const m = new THREE.InstancedMesh(GEO[g], mat, count[g])
-    m.name = 'ships-' + g
-    m.castShadow = m.receiveShadow = true
-    m.frustumCulled = false // spread over the whole region; each draw is a few thousand triangles
-    m.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-    meshes[g] = m
-    city.scene.add(m)
+  // moored: marina berths, three in four taken, and float planes at the Vancouver Harbour Flight Centre's floats
+  const moored = []
+  for (const [la, lo, hd, len] of data.moorings || []) {
+    if (r() < 0.25) continue
+    const [x, z] = xz(la, lo), L = Math.min(13, Math.max(6, len * 0.85)) * (0.8 + r() * 0.2), kind = r() < 0.55 ? 'moored' : 'motor'
+    add(moored, V(r, kind, L, L * 0.34), null, { x, z, h: (hd * Math.PI) / 180 + (r() < 0.5 ? Math.PI : 0) })
   }
-  for (const v of [...dyn, ...stat]) for (const [g, i, , c] of v.parts) meshes[g].setColorAt(i, col.set(c))
+  for (const [la, lo, hd] of [[49.29098, -123.1178, 190], [49.290944, -123.1175, 190], [49.290755, -123.116867, 205], [49.290683, -123.116593, 205]])
+    add(moored, V(r, 'floatplane'), null, { x: xz(la, lo)[0], z: xz(la, lo)[1], h: (hd * Math.PI) / 180 })
+
+  // ---------- one batched mesh: every variant's geometry once, an instance per vessel, drawn in one call ----------
+  const usedBy = (list) => [...new Set(list.map((v) => v.m))]
+  const all = [...dyn, ...stat], used = usedBy(all)
+  const mat = new THREE.MeshLambertMaterial({ vertexColors: true })
+  const mesh = new THREE.BatchedMesh(all.length, used.reduce((n, m) => n + m.geo.attributes.position.count, 0), 0, mat)
+  mesh.name = 'ships'
+  mesh.castShadow = mesh.receiveShadow = true
+  mesh.frustumCulled = false // spread over the whole region (each vessel is culled on its own)
+  mesh.sortObjects = false
+  for (const m of used) m.id = mesh.addGeometry(m.geo)
+  for (const v of all) { v.id = mesh.addInstance(v.m.id); v.s = new THREE.Vector3(v.L / v.m.L, v.B / v.m.B, v.B / v.m.B) }
+  city.scene.add(mesh)
+  // the moored boats: a batch of their own that never moves, shown from SMALL_ZOOM in
+  const moor = new THREE.BatchedMesh(Math.max(1, moored.length), usedBy(moored).reduce((n, m) => n + m.geo.attributes.position.count, 0) || 3, 0, mat)
+  moor.name = 'ships-moored'
+  moor.castShadow = moor.receiveShadow = true
+  moor.sortObjects = false
+  const mid = new Map(usedBy(moored).map((m) => [m, moor.addGeometry(m.geo)]))
+  for (const v of moored) v.id = moor.addInstance(mid.get(v.m))
+  city.scene.add(moor)
 
   // wakes: a Kelvin V and a churned centre line behind every moving vessel, in the overlay
   const wakeGeo = new THREE.BufferGeometry()
@@ -290,7 +234,7 @@ export default async function ships(city) {
   city.overlay.add(wakes)
 
   // ---------- placing ----------
-  const W4 = new THREE.Matrix4(), M4 = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), pos = new THREE.Vector3(), one = new THREE.Vector3(1, 1, 1), ZERO = new THREE.Matrix4().makeScale(0, 0, 0)
+  const W4 = new THREE.Matrix4(), M4 = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), pos = new THREE.Vector3(), one = new THREE.Vector3(1, 1, 1)
   const water = (x, z, h, L) => { // the sea is the lowest ground under the hull (the shore is interpolated up into it)
     const dx = Math.sin(h) * L * 0.45, dz = -Math.cos(h) * L * 0.45
     return Math.min(ground(x, z), ground(x + dx, z + dz), ground(x - dx, z - dz))
@@ -298,10 +242,15 @@ export default async function ships(city) {
   function put(v, x, z, h, k = 1) {
     pos.set(x, water(x, z, h, v.L * k), z)
     W4.compose(pos, q.setFromAxisAngle(up, Math.PI / 2 - h), one.setScalar(k))
-    for (const p of v.parts) meshes[p[0]].setMatrixAt(p[1], M4.multiplyMatrices(W4, p[2]))
+    mesh.setMatrixAt(v.id, M4.copy(W4).scale(v.s))
+    mesh.setVisibleAt(v.id, true)
   }
-  const hide = (v) => { for (const p of v.parts) meshes[p[0]].setMatrixAt(p[1], ZERO) }
+  const hide = (v) => mesh.setVisibleAt(v.id, false)
   for (const v of stat) put(v, v.x, v.z, v.h)
+  for (const v of moored) {
+    pos.set(v.x, water(v.x, v.z, v.h, v.L), v.z)
+    moor.setMatrixAt(v.id, M4.compose(pos, q.setFromAxisAngle(up, Math.PI / 2 - v.h), one.set(v.L / v.m.L, v.B / v.m.B, v.B / v.m.B)))
+  }
   for (const v of dyn) hide(v)
   const out = [0, 0, 0, 0]
   function update() {
@@ -319,12 +268,7 @@ export default async function ships(city) {
     }
     wakes.count = nw
     wakes.instanceMatrix.needsUpdate = true
-    for (const g in meshes) {
-      const a = meshes[g].instanceMatrix
-      a.clearUpdateRanges(); a.addUpdateRange(0, dynCount[g] * 16); a.needsUpdate = true
-    }
   }
-  for (const g in meshes) { meshes[g].instanceColor.needsUpdate = true; meshes[g].instanceMatrix.needsUpdate = true }
   update()
   city.requestRender()
 
@@ -347,6 +291,7 @@ export default async function ships(city) {
   function check() {
     const t = Date.now() / 1000, now = cruiseDay(t * 1000)?.wd ?? ''
     if (now !== berthed) { berthed = now; update(); city.requestRender() } // a cruise ship came in or left
+    if (moor.visible !== city.view.zoom >= SMALL_ZOOM) { moor.visible = !moor.visible; city.requestRender() }
     const want = onScreen()
     if (want === 2 && !stop) stop = city.animate()
     else if (want < 2 && stop) { stop(); stop = null; update() }
@@ -405,6 +350,7 @@ export default async function ships(city) {
       }
       for (const v of dyn) if (!(v.small && zoom < SMALL_ZOOM) && v.place(t, out, v)) near(v, out[0], out[1], out[2], out[3], v.k || 1)
       for (const v of stat) near(v, v.x, v.z, v.h, 0, 1)
+      if (moor.visible) for (const v of moored) near(v, v.x, v.z, v.h, 0, 1)
       return res
     },
   }
@@ -414,8 +360,9 @@ export default async function ships(city) {
       clearInterval(tick); clearTimeout(aisT); clearTimeout(viewT); offFrame(); offView()
       document.removeEventListener('visibilitychange', check)
       stop?.()
-      for (const m of [...Object.values(meshes), wakes]) { m.removeFromParent(); m.dispose() }
-      for (const g of [...Object.values(GEO), wakeGeo]) g.dispose()
+      for (const m of [mesh, moor, wakes]) { m.removeFromParent(); m.dispose() }
+      for (const m of usedBy([...all, ...moored])) m.geo.dispose()
+      wakeGeo.dispose()
       mat.dispose(); wakes.material.dispose(); credit.remove()
       delete city.ships
       city.requestRender()
