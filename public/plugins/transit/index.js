@@ -171,8 +171,9 @@ export default async function transit(city) {
   let speed = 1, anchorSim = Date.now(), anchorReal = performance.now() // clock
   const show = { sky: true, wce: true, seabus: true, bus: true }
 
-  function prepare(ch) { // world coordinates, lengths and bridge runs per shape
+  function prepare(ch, road) { // world coordinates, lengths and bridge runs per shape (road: buses, on the road decks)
     for (const sh of ch.shapes) {
+      sh.road = road
       const n = sh.x.length, q = man.q
       sh.wx = new Float32Array(n); sh.wz = new Float32Array(n); sh.cum = new Float32Array(n)
       sh.ra = new Int32Array(n); sh.rb = new Int32Array(n)
@@ -205,9 +206,58 @@ export default async function transit(city) {
       const ha = H(sh.wx[a], sh.wz[a]), hb = H(sh.wx[b], sh.wz[b])
       out.y = ha + (hb - ha) * f + lift
     } else out.y = H(out.x, out.z) + lift
+    if (sh.road && lift > -2.5) { const z = deckAt(out.x, out.z, sh.wx[hi] - sh.wx[lo], sh.wz[hi] - sh.wz[lo], out.y); if (z != null) out.y = z }
     out.hidden = lift < -2.5
     return out
   }
+
+  // the road decks (bridges, viaducts) of the map tiles' road graphs: a bus on one rides on it as the van does
+  // (drive/index.js: deck height + 0.58 for the van's body over the drawn surface, 0.2 off a deck), not on the
+  // ground or a bridge line guessed from the timetable shape. By level (detail, overview): 32 m cell -> [piece, i]
+  const DC = 32, decks = [new Map(), new Map()], deckCells = new Map() // tile -> its cells
+  const dkey = (x, y) => Math.floor(x / DC) * 65536 + Math.floor(y / DC)
+  function addDecks(t) {
+    if (deckCells.has(t)) dropDecks(t)
+    const g = decks[t.level ? 1 : 0], cells = []
+    for (const p of t.graph?.pieces || []) {
+      if (!p.z || !p.drive) continue
+      for (let i = 0; i < p.pts.length / 2 - 1; i++) {
+        const x0 = p.pts[i * 2], y0 = p.pts[i * 2 + 1], x1 = p.pts[i * 2 + 2], y1 = p.pts[i * 2 + 3], r = p.w / 2 + 1
+        for (let cx = Math.floor((Math.min(x0, x1) - r) / DC); cx <= Math.floor((Math.max(x0, x1) + r) / DC); cx++) for (let cy = Math.floor((Math.min(y0, y1) - r) / DC); cy <= Math.floor((Math.max(y0, y1) + r) / DC); cy++) {
+          const k = cx * 65536 + cy
+          let a = g.get(k); if (!a) g.set(k, (a = []))
+          a.push(p, i); cells.push(k)
+        }
+      }
+    }
+    deckCells.set(t, cells)
+  }
+  function dropDecks(t) {
+    const g = decks[t.level ? 1 : 0], ps = new Set(t.graph?.pieces || [])
+    for (const k of deckCells.get(t) || []) { const a = g.get(k); if (!a) continue; const b = []; for (let j = 0; j < a.length; j += 2) if (!ps.has(a[j])) b.push(a[j], a[j + 1]); if (b.length) g.set(k, b); else g.delete(k) }
+    deckCells.delete(t)
+  }
+  // the deck surface under world (x, z) along a road heading (dx, dz) (one across it is a bridge over this street),
+  // the one nearest height y where decks stack; detail tiles first. Or null
+  function deckAt(x, z, dx, dz, y) {
+    const n = -z, l = Math.hypot(dx, dz) || 1, ux = dx / l, uy = -dz / l
+    for (const g of decks) {
+      const a = g.get(dkey(x, n))
+      if (!a) continue
+      let best = null
+      for (let j = 0; j < a.length; j += 2) {
+        const p = a[j], i = a[j + 1], P = p.pts, x0 = P[i * 2], y0 = P[i * 2 + 1], sx = P[i * 2 + 2] - x0, sy = P[i * 2 + 3] - y0, L2 = sx * sx + sy * sy || 1
+        if (Math.abs(sx * ux + sy * uy) < 0.85 * Math.sqrt(L2)) continue
+        const f = ((x - x0) * sx + (n - y0) * sy) / L2
+        if (f < 0 || f > 1 || Math.hypot(x - x0 - sx * f, n - y0 - sy * f) > p.w / 2 + 0.5) continue
+        const h = p.z[i] + (p.z[i + 1] - p.z[i]) * f + 0.38
+        if (best == null || Math.abs(h - y) < Math.abs(best - y)) best = h
+      }
+      if (best != null) return best
+    }
+    return null
+  }
+  const offDecks = city.world.eachTile(addDecks), offDrop = city.on('tile:unload', dropDecks)
 
   // ---------- meshes ----------
   const mat = new THREE.MeshLambertMaterial({ vertexColors: true })
@@ -232,7 +282,7 @@ export default async function transit(city) {
   const load = (c) => {
     c.loading = true
     return fetch(new URL(c.file, DATA)).then((r) => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer() })
-      .then((b) => { c.data = prepare(decode(b)); kick(true) })
+      .then((b) => { c.data = prepare(decode(b), !c.rail); kick(true) })
       .catch((e) => { console.warn('transit: could not load', c.file, e); setTimeout(() => { c.loading = false }, 30000) })
   }
   const rail = chunks.find((c) => c.rail)
@@ -484,7 +534,7 @@ export default async function transit(city) {
   return {
     dispose() {
       cancelAnimationFrame(raf); raf = 0
-      offTile(); clearTimeout(rebuild); document.removeEventListener('visibilitychange', onVis)
+      offTile(); offDecks(); offDrop(); clearTimeout(rebuild); document.removeEventListener('visibilitychange', onVis)
       city.scene.remove(group); city.scene.remove(structs)
       for (const m of Object.values(meshes)) m.geometry.dispose()
       structs.geometry.dispose(); structs.material.dispose(); mat.dispose()

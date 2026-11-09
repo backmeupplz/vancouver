@@ -139,7 +139,8 @@ export default function life(city) {
             if (pose > 3.5) pitch = iB.x; // tipping back from the feet`}
           vCol = col; vEmit = em; ${SHADE.vert}
           vec3 objectNormal = orient(N0, iA.w, pitch);`)
-        .replace('#include <begin_vertex>', `vec3 transformed = orient(P0, iA.w, pitch) + iA.xyz;
+        .replace('#include <begin_vertex>', `${kind === 'car' ? 'P0 *= 1.0 - floor(iB.w * 0.5) / 15.0; // growing in, shrinking away (worker.js output())' : ''}
+          vec3 transformed = orient(P0, iA.w, pitch) + iA.xyz;
           ${hide ? 'vec2 dc = iA.xz - uCam.xz; if (dot(dc, dc) < uNear) transformed = vec3(0.0, -1e5, 0.0);' : ''}`)
       s.fragmentShader = s.fragmentShader
         .replace('#include <common>', `#include <common>\nvarying vec3 vCol, vEmit; ${SHADE.vars} uniform float uNight;`)
@@ -171,7 +172,7 @@ export default function life(city) {
   const carsNear = carModels(THREE).map((g) => instanced(g, carNearMat, MAX_NEAR))
   const peopleNear = peopleModels(THREE).map((g) => instanced(g.scale(H, H, H), personNearMat, MAX_NEAR))
   const allNear = [...carsNear, ...peopleNear]
-  const pickCar = MODELS.map((_, k) => (buf, s) => carsNear[DETAIL(k, buf[s + 7])]) // by kind and seed
+  const pickCar = MODELS.map((_, k) => (buf, s) => carsNear[DETAIL(k, buf[s + 7] % 2)]) // by kind and seed
   const pickPerson = (buf, s) => peopleNear[Math.min(2, Math.floor((buf[s + 5] % 1) / 0.3))] // by seed (pose + 0.9 seed)
   const bikes = instanced(bike, bikeMat, MAX_BIKES)
   // light on the road at night (overlay, additive): a headlight pool ahead of each car and a red glow behind,
@@ -441,9 +442,10 @@ export default function life(city) {
 
   // ---------------------------------------------------------------- the worker
   const worker = new Worker(new URL('./worker.js', import.meta.url))
-  if (location.search.includes('lifedebug')) window.lifeDebug = (x, y, r = 30) => new Promise((ok) => { debugCb = ok; worker.postMessage({ type: 'debug', x, y, r }) })
+  if (location.search.includes('lifedebug')) window.lifeDebug = (x, y, r = 30, ids) => new Promise((ok) => { debugCb = ok; worker.postMessage({ type: 'debug', x, y, r, ids }) })
   let debugCb = null
   let busy = false, accDt = 0, spare = null, simT = 0, simAt = 0, stats = { cars: 0, people: 0 }
+  const vp = new THREE.Matrix4()
   let elapsed = 0, sentT = 0 // the frames' dt summed (the ticks' time), and the clock when the tick in flight was sent
   worker.onmessage = ({ data: m }) => {
     if (m.type === 'frame') {
@@ -458,25 +460,15 @@ export default function life(city) {
       snap.raw.set(m.buf.subarray(0, m.cars * 8)); snap.aux.set(m.buf.subarray(m.base, m.base + m.cars * 2))
       snap.n = m.cars; snap.counts = m.counts; snap.t = sentT
       carsAt(elapsed) // (now: city.traffic.nearby pairs these ids with positions)
-      let off = m.cars
-      for (const o of peopleNear) o.n = 0
-      const np = Math.min(m.nPeople, people.cap)
-      put(people, m.buf, off, np)
-      if (near) pickNear(m.buf, off, np, NEAR_PEOPLE, pickPerson)
-      off += m.nPeople
-      for (const o of peopleNear) show(o, o.n)
-      put(bikes, m.buf, off, Math.min(m.nBikes, bikes.cap))
-      // the people for city.traffic.people, while a game asks for them: x, y, z, yaw and id
-      snap.np = 0
-      if (performance.now() - snap.asked < 2000) {
-        const n = m.nPeople, P = snap.ppos
-        if (P.length < n * 5) snap.ppos = new Float32Array(n * 8)
-        for (let i = 0, o = m.cars * 8; i < n; i++, o += 8) { const q = i * 5; snap.ppos[q] = m.buf[o]; snap.ppos[q + 1] = m.buf[o + 1]; snap.ppos[q + 2] = m.buf[o + 2]; snap.ppos[q + 3] = m.buf[o + 3]; snap.ppos[q + 4] = m.buf[m.pbase + i] }
-        snap.np = n
-      }
+      // the people and cyclists likewise (peopleAt()), with their velocities, and the people's ids
+      const nb = m.nPeople + m.nBikes
+      if (snap.praw.length < nb * 8) { snap.praw = new Float32Array(nb * 12); snap.pq = new Float32Array(nb * 12); snap.pv = new Float32Array(nb * 3); snap.pid = new Float32Array(nb * 1.5) }
+      snap.praw.set(m.buf.subarray(m.cars * 8, (m.cars + nb) * 8)); snap.pv.set(m.buf.subarray(m.vbase, m.vbase + nb * 2)); snap.pid.set(m.buf.subarray(m.pbase, m.pbase + m.nPeople))
+      snap.pn = m.nPeople; snap.bn = m.nBikes
+      peopleAt(elapsed)
       simT = m.simT; simAt = performance.now()
       stats = m
-      if (window.lifeDebug) { const a = (window.lifeMs ||= []); a.push(m.ms); if (a.length > 600) a.shift() }
+      if (window.lifeDebug) { const a = (window.lifeMs ||= []); a.push(m.ms); if (a.length > 600) a.shift(); window.lifeAt = performance.now() }
       city.requestRender()
     } else if (m.type === 'debug') debugCb?.(m)
     else if (m.type === 'net') {
@@ -512,6 +504,26 @@ export default function life(city) {
     }
     for (const o of carsNear) show(o, o.n)
   }
+  // the people and cyclists at clock time t, moved on from the latest snapshot like the cars (drawn as they came, they
+  // moved only on the frames an answer arrived: a stutter whenever the worker answered a frame late)
+  function peopleAt(t) {
+    const n = snap.pn + snap.bn, R = snap.praw, Q = snap.pq, V = snap.pv, e = Math.min(0.5, Math.max(0, t - snap.t))
+    Q.set(R.subarray(0, n * 8))
+    if (e > 0) for (let i = 0; i < n; i++) { Q[i * 8] += V[i * 2] * e; Q[i * 8 + 2] += V[i * 2 + 1] * e }
+    for (const o of peopleNear) o.n = 0
+    const np = Math.min(snap.pn, people.cap)
+    put(people, Q, 0, np)
+    if (nearPeople.value > 0) pickNear(Q, 0, np, NEAR_PEOPLE, pickPerson)
+    for (const o of peopleNear) show(o, o.n)
+    put(bikes, Q, snap.pn, Math.min(snap.bn, bikes.cap))
+    // the people for city.traffic.people, while a game asks for them: x, y, z, yaw and id
+    snap.np = 0
+    if (performance.now() - snap.asked < 2000) {
+      if (snap.ppos.length < snap.pn * 5) snap.ppos = new Float32Array(snap.pn * 8)
+      for (let i = 0; i < snap.pn; i++) { const q = i * 5, o = i * 8; snap.ppos[q] = Q[o]; snap.ppos[q + 1] = Q[o + 1]; snap.ppos[q + 2] = Q[o + 2]; snap.ppos[q + 3] = Q[o + 3]; snap.ppos[q + 4] = snap.pid[i] }
+      snap.np = snap.pn
+    }
+  }
   function put(o, buf, off, n) { o.ib.array.set(buf.subarray(off * 8, (off + n) * 8)); show(o, n) }
   function show(o, n) { o.ib.clearUpdateRanges(); o.ib.addUpdateRange(0, n * 8); o.ib.needsUpdate = true; o.m.geometry.instanceCount = n }
   // the n things in buf at off within r of the camera (the same test as the boxes' shader) into the detailed model
@@ -527,7 +539,7 @@ export default function life(city) {
   }
 
   // ---------------------------------------------------------------- city.traffic, for games
-  const snap = { raw: new Float32Array(0), pos: new Float32Array(0), aux: new Float32Array(0), n: 0, counts: [], t: 0, ppos: new Float32Array(0), np: 0, asked: 0 }
+  const snap = { raw: new Float32Array(0), pos: new Float32Array(0), aux: new Float32Array(0), n: 0, counts: [], t: 0, ppos: new Float32Array(0), np: 0, asked: 0, praw: new Float32Array(0), pq: new Float32Array(0), pv: new Float32Array(0), pid: new Float32Array(0), pn: 0, bn: 0 }
   const pools2 = { people: [], poles: [] } // reused result objects, so a game can ask every frame without garbage
   const rec = (k, i) => pools2[k][i] || (pools2[k][i] = { id: 0, x: 0, y: 0, z: 0, heading: 0, r: 0 })
   const obstacles = new Map()
@@ -678,9 +690,11 @@ export default function life(city) {
     if (sig.glow) { glowMat.size = Math.max(3, 2.6 * 6 * city.view.zoom) * city.renderer.getPixelRatio(); glowMat.opacity = glowNear.opacity = 0.45 + 0.55 * city.light.night }
     accDt += dt; elapsed += dt
     if (snap.n) carsAt(elapsed)
+    if (snap.pn || snap.bn) peopleAt(elapsed)
     if (!busy) {
       busy = true; sentT = elapsed
-      worker.postMessage({ type: 'tick', dt: accDt, buf: spare }, spare ? [spare.buffer] : [])
+      const C = city.view.camera // what it sees: no car or person appears or vanishes there (worker.js seen())
+      worker.postMessage({ type: 'tick', dt: accDt, buf: spare, view: [...vp.multiplyMatrices(C.projectionMatrix, C.matrixWorldInverse).elements] }, spare ? [spare.buffer] : [])
       spare = null; accDt = 0
     }
     updateSignals(simT + (performance.now() - simAt) / 1000)
