@@ -30,7 +30,7 @@ export function createQuality(gl, apply) {
   let setting = 'auto'
   try { setting = localStorage.getItem(KEY) || 'auto' } catch {}
   if (!['auto', 'high', 'low'].includes(setting)) setting = 'auto'
-  const guess = guessTier(gl)
+  const guess = document.documentElement.classList.contains('embed') ? 'low' : guessTier(gl) // embeds (index.html): small, often on phones
   const q = {
     guess,
     get setting() { return setting },

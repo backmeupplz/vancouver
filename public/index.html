@@ -14,7 +14,11 @@
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231d4f8f'/%3E%3Cpath d='M6 26V14h4v12zm6 0V6h5v20zm7 0V11h4v15zm6 0v-8h2v8z' fill='%23cfe0ee'/%3E%3C/svg%3E">
-<meta name="twitter:card" content="summary_large_image">
+<!-- X shows the player (/play, the embed mode below) as an iframe in the post; twitter:image is the fallback -->
+<meta name="twitter:card" content="player">
+<meta name="twitter:player" content="https://vancouver.borodutch.com/play">
+<meta name="twitter:player:width" content="480">
+<meta name="twitter:player:height" content="480">
 <meta name="twitter:title" content="Vancouver in code">
 <meta name="twitter:description" content="An isometric Vancouver drawn entirely in code from OpenStreetMap.">
 <meta name="twitter:image" content="https://vancouver.borodutch.com/og.jpg">
@@ -100,12 +104,22 @@
   body.sheet-dragging .tool-panel, body.sheet-dragging #about, body.sheet-dragging .sheet { transition: none !important; animation: none !important; }
   @keyframes sheet-in { from { transform: translateY(40px); opacity: .4 } to { transform: none; opacity: 1 } }
   @media (prefers-reduced-motion: reduce) { .compact .tool-panel, .compact #about { animation: none } }
+  /* embed (/play, ?embed: inside an X post, often 480 px or less): the dock and the sheets of the phone layout, a
+     smaller title bar with a link out, no lofi player */
+  #full { display: none; }
+  .embed #full { display: inline-flex; align-items: center; min-height: 44px; padding: 0 12px; text-decoration: none; color: var(--text); white-space: nowrap; }
+  .embed #bar h1 { display: none; }
+  .embed #bar { padding: 0 4px; }
+  .embed .lofi { display: none !important; }
+  .embed #tools button { flex-basis: 48px; } /* all six fit 360 px */
+  /* sailing's how-to and goals cards: at the top, clear of the steering and sail buttons a short frame puts them over */
+  html.embed .sl-learn, html.embed .sl-goals { top: var(--st); left: var(--sl); right: var(--sr); width: auto; bottom: auto; max-height: calc(100% - var(--st) - 96px); overflow-y: auto; box-sizing: border-box; }
 </style>
 <script type="importmap">{ "imports": { "three": "./vendor/three.module.min.js" } }</script>
 </head>
 <body>
 <canvas></canvas>
-<div id="bar" class="panel"><h1>Vancouver in code</h1><button id="aboutBtn" aria-expanded="false" aria-controls="about">About</button></div>
+<div id="bar" class="panel"><h1>Vancouver in code</h1><button id="aboutBtn" aria-expanded="false" aria-controls="about">About</button><a id="full" href="/" target="_blank" rel="noopener">Open full ↗</a></div>
 <div id="about" class="panel" hidden role="dialog" aria-label="About"><button type="button" class="sheet-x" aria-label="Close">×</button>
   <p>Vancouver drawn entirely in code: every building, street, tree and boat comes from open data and is rendered live in your browser with three.js.</p>
   <p>Inspired by <a href="https://vancouver.isoworld.xyz/">isoworld's Isometric Vancouver</a>, a hand-guided illustration of the city.</p>
@@ -129,8 +143,17 @@
 <div id="hint" class="panel" hidden>Drag to pan · scroll to zoom · right-drag to turn</div>
 <div id="loading" role="status" aria-live="polite"><div class="card"><div class="title">Vancouver in code</div><div class="step">Loading…</div><div class="track"><div class="fill"></div></div></div></div>
 <script>
+  // embed mode (/play or ?embed, see the CSS above): starts at ?at=X,Y,zoom (links to a spot, nginx.conf /at/) or a pretty
+  // spot; core/quality.js starts Auto at Low; "Open full" opens the full site at the current view
+  if (location.pathname.startsWith('/play') || new URLSearchParams(location.search).has('embed')) {
+    document.documentElement.classList.add('embed')
+    const at = new URLSearchParams(location.search).get('at')
+    if (!location.hash) history.replaceState(null, '', '#' + (/^-?[\d.]+,-?[\d.]+,[\d.]+$/.test(at) ? at : '17004,8086,0.1'))
+    const full = document.getElementById('full')
+    full.onclick = () => { full.href = '/' + location.hash }
+  }
   // phones: html.compact (narrow, or a touch screen in landscape) switches the layout, see the CSS above
-  const compact = () => document.documentElement.classList.toggle('compact', innerWidth <= 600 || (matchMedia('(pointer: coarse)').matches && innerHeight <= 500))
+  const compact = () => document.documentElement.classList.toggle('compact', innerWidth <= 600 || document.documentElement.classList.contains('embed') || (matchMedia('(pointer: coarse)').matches && innerHeight <= 500))
   compact(); addEventListener('resize', compact)
   // the on-screen keyboard: --vv-h / --vv-top are the visible part of the page, so sheets with an input keep it in view
   const vv = window.visualViewport
