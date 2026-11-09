@@ -479,6 +479,8 @@ const CSS = `
 .compact .lofi-name{max-width:11em}
 .compact .lofi .lofi-menu button{height:44px;padding:0 14px 0 8px;font-size:14px}
 .compact .lofi-menu{max-height:calc(100vh - 140px);overflow-y:auto}
+#menu .lofi{flex-wrap:wrap;align-self:flex-start;padding:0 12px 0 0}
+#menu .lofi-menu{position:static;flex:1 0 100%;margin-top:6px;max-height:none}
 @media (orientation:landscape){.compact .lofi-menu:not([hidden]){display:grid;grid-template-columns:1fr 1fr;min-width:340px}}
 `
 const ICON = {
@@ -515,6 +517,7 @@ export default function lofi(city) {
     + MENU.map((k) => `<button type="button" role="menuitemradio" tabindex="-1" data-vibe="${k}"><i aria-hidden="true">${k === 'auto' ? '✨' : VIBES[k].icon}</i>${k === 'auto' ? 'Auto' : VIBES[k].label}${k === 'auto' ? '<small></small>' : ''}</button>`).join('')
     + '</div>'
   document.body.appendChild(el)
+  city?.ui?.inMenu?.(el) // phones: in the ⋯ sheet
   const [playBtn, nextBtn, vibeBtn] = el.querySelectorAll('button')
   const menu = el.querySelector('.lofi-menu'), items = [...menu.querySelectorAll('button')]
   const canvas = el.querySelector('canvas'), g2 = canvas.getContext('2d')

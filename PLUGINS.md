@@ -68,10 +68,11 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.tiles` | the tile streamer (advanced) |
 | `city.on(event, fn)` | `'frame'` `(dt, t)`, `'view'` `(view)`, `'quality'` `(tier)`, `'tile:load'` / `'tile:unload'` `(tile)`, `'weather'` `(weather)`, `'player'` `(player)`; returns an unsubscribe function |
 | `city.requestRender()`, `city.animate()` | see above |
-| `city.ui.addButton({ label, title, icon, onClick, panel })` | a toolbar button at the top right (a dock at the bottom on phones); with `panel: true`, `.panel` is a popover element you fill (a bottom sheet on phones); `.set({ icon, label })` relabels it |
+| `city.ui.addButton({ label, title, icon, onClick, panel, dock })` | a toolbar button at the top right; with `panel: true`, `.panel` is a popover element you fill (a bottom sheet on phones); `.set({ icon, label })` relabels it. On phones the dock at the bottom keeps only the buttons with `dock: true` (the games: Drive, Sail) and a ⋯ button; the rest are tiles in its sheet |
+| `city.ui.inMenu(el, home)` | on phones, move your on-screen element `el` into the ⋯ sheet (back where it was on a wide screen); its own CSS and `hidden` still apply there, and it is listed only while `home` (default: its parent) is on screen, so a game's secondary toggles (sound, lane assist) show only in that game. The sheet also holds the music, graphics quality, a frame rate switch, About and the credits |
 | `city.ui.sheet(el, close)`, `.closeAll()`, `.onCloseAll(fn)`, `.compact` | your own panel behaving like the toolbar's (close button, drag down to close on phones; only one open at a time); `compact` is true in the phone layout (`html.compact` in CSS) |
 | `city.ui.toast(text)` | a short message |
-| `city.ui.credit(text, href)` | a line in the credits strip at the bottom of the page (a link with `href`); `.set(text, href)`, `.remove()` |
+| `city.ui.credit(text, href)` | a line in the credits strip at the bottom of the page (on phones: in the ⋯ sheet, with a short © OpenStreetMap link left on screen); a link with `href`; `.set(text, href)`, `.remove()` |
 | `city.traffic` | the simulated cars, from the life plugin (see below); `undefined` without it |
 | `city.quality.tier` | graphics quality (`core/quality.js`): `name` `'high'` or `'low'` and its knobs, e.g. `life` and `weather` (the share of agents / particles to draw) and `detail`; `city.on('quality', tier)` fires when it changes (the viewer's About → Graphics, or Auto dropping to low on a slow GPU). Scale your counts by it |
 
@@ -199,7 +200,8 @@ Plugins may import from `core/` (relative paths, e.g. `'../../core/util.js'`):
   `x, z, half length, half width, rot` each (the long axis is `(cos rot, −sin rot)` in x / z).
 - **A game on screen**: a plugin that takes over the screen with its own camera and controls adds the classes
   `dlv-on` (and `dlv-touchy` with on-screen touch controls) to `document.body`: the toolbar steps aside and the chat
-  button, the music player and toasts make room for the controls.
+  button, the music player and toasts make room for the controls. On phones a floating ⋯ (the sheet, see `inMenu`)
+  sits at the top right, 84 px in from the edge: keep your Back to map button in the 78 px to its right.
 
 ## Traffic
 

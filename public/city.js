@@ -141,10 +141,65 @@ function makeUI() {
     aboutBtn.addEventListener('click', () => { if (about.hidden) document.dispatchEvent(new Event(CLOSE_ALL)) }, true) // before its own toggle
     document.addEventListener(CLOSE_ALL, close)
   }
+  // Phones: the dock keeps the buttons added with `dock: true` (the games) and a ⋯ button whose sheet holds the rest
+  // of the toolbar, what plugins pass to inMenu() (music, a game's secondary toggles, its chat), the graphics
+  // quality, the frame rate switch, the top bar (About, Open full, online) and the credits. In a game (body.dlv-on)
+  // a floating ⋯ takes the dock's place. A wide screen puts everything back where it was.
+  const menu = document.createElement('div')
+  menu.id = 'menu'; menu.className = 'panel'; menu.hidden = true
+  menu.setAttribute('role', 'dialog'); menu.setAttribute('aria-label', 'More')
+  menu.innerHTML = '<div class="menu-tools"></div><div class="menu-items"></div><div class="menu-set"><div class="menu-gfx"></div>'
+    + '<label class="menu-fps"><input type="checkbox"> Frame rate</label></div><div class="menu-foot"></div>'
+  document.body.append(menu)
+  const grid = menu.querySelector('.menu-tools'), items = menu.querySelector('.menu-items'), foot = menu.querySelector('.menu-foot')
+  const mores = []
+  const closeMenu = () => { menu.hidden = true; for (const b of mores) b.setAttribute('aria-expanded', 'false') }
+  sheet(menu, closeMenu)
+  document.addEventListener(CLOSE_ALL, closeMenu)
+  const moreButton = (cls) => {
+    const b = document.createElement('button')
+    b.type = 'button'; b.className = cls
+    b.innerHTML = '<span class="ic" aria-hidden="true">⋯</span><span class="lb">More</span>'
+    b.setAttribute('aria-label', 'More: music, chat, settings'); b.setAttribute('aria-controls', 'menu'); b.setAttribute('aria-expanded', 'false')
+    b.onclick = () => {
+      const open = menu.hidden
+      document.dispatchEvent(new Event(CLOSE_ALL))
+      if (!open) return
+      for (const m of moved) m.el.classList.toggle('menu-off', !!m.home && !m.home.getClientRects().length) // its game is off
+      menu.hidden = false; b.setAttribute('aria-expanded', 'true')
+    }
+    mores.push(b)
+    return b
+  }
+  const more = moreButton('more')
+  document.body.append(moreButton('panel more-fab'))
+  const fps = menu.querySelector('.menu-fps input')
+  try { fps.checked = localStorage.getItem('vancouver.fps') === '1' } catch {}
+  const showFps = () => { document.documentElement.classList.toggle('fps-on', fps.checked); try { localStorage.setItem('vancouver.fps', fps.checked ? '1' : '0') } catch {} }
+  fps.onchange = showFps; showFps()
+  // what moves: a comment marks each element's place for the way back
+  const buttons = [], moved = []
+  let phone = compact()
+  const placeButton = (b) => (phone && !b.dock ? grid.append(b) : bar.insertBefore(b, more))
+  const placeEl = (m) => (phone ? m.to.append(m.el) : m.mark.after(m.el))
+  function move(el, to, home) { const m = { el, to, home, mark: document.createComment('menu') }; el.before(m.mark); moved.push(m); placeEl(m) }
+  const unmove = (el) => { const i = moved.findIndex((m) => m.el === el); if (i >= 0) moved.splice(i, 1)[0].mark.remove() }
+  bar.append(more)
+  const gfx = document.getElementById('gfxBox'), top = document.getElementById('bar')
+  if (gfx) move(gfx, menu.querySelector('.menu-gfx'))
+  if (top) move(top, foot)
+  addEventListener('resize', () => { // (index.html's listener has set html.compact by now)
+    if (phone === compact()) return
+    phone = compact()
+    for (const b of buttons) placeButton(b)
+    for (const m of moved) placeEl(m)
+    if (!phone) closeMenu()
+  })
   return {
     // a toolbar button at the top right (on phones: the dock at the bottom); with `panel: true` it opens a small
     // panel under it (on phones: a bottom sheet). `set({ icon, label })` changes what the button says.
-    addButton({ label, title, icon, onClick, panel }) {
+    // `dock: true`: one of the few that stay on the phone dock (the games); the rest go in its ⋯ sheet
+    addButton({ label, title, icon, onClick, panel, dock }) {
       const b = document.createElement('button')
       b.type = 'button'
       const ic = document.createElement('span'), lb = document.createElement('span')
@@ -155,7 +210,8 @@ function makeUI() {
       b.append(ic, lb)
       if (title) b.title = title
       b.setAttribute('aria-label', title || label)
-      bar.append(b)
+      b.dock = !!dock
+      buttons.push(b); placeButton(b)
       bar.hidden = false
       let el = null
       if (panel) {
@@ -178,7 +234,7 @@ function makeUI() {
         })
       }
       if (onClick) b.addEventListener('click', onClick)
-      return { button: b, panel: el, set, remove() { b.remove(); el?.remove(); bar.hidden = !bar.children.length } }
+      return { button: b, panel: el, set, remove() { b.remove(); el?.remove(); buttons.splice(buttons.indexOf(b), 1); bar.hidden = !buttons.length } }
     },
     // the bottom-sheet behaviour of toolbar panels, for a plugin's own panel: returns a function that puts the
     // close button back (call it after replacing the panel's contents)
@@ -195,6 +251,9 @@ function makeUI() {
       document.body.append(t)
       setTimeout(() => t.remove(), ms)
     },
+    // on phones, `el` lives in the ⋯ sheet instead of where it is (its own CSS and `hidden` still apply there); it
+    // is listed only while `home` (default: its parent) is on screen, so a game's toggles show only in that game
+    inMenu(el, home = el.parentElement) { move(el, items, home === document.body ? null : home) },
     // a line in the credits strip at the bottom of the page (a link with href): { set(text, href), remove() }
     credit(text, href) {
       let el = document.getElementById('credits')
@@ -204,13 +263,14 @@ function makeUI() {
         el.className = 'panel'
         Object.assign(el.style, { left: '50%', bottom: '12px', transform: 'translateX(-50%)', padding: '4px 10px', fontSize: '11px', color: 'var(--muted)', zIndex: 15, display: 'flex', gap: '10px', whiteSpace: 'nowrap', maxWidth: 'calc(100% - 24px)', overflow: 'hidden' })
         document.body.append(el)
+        move(el, foot) // phones: in the ⋯ sheet (index.html keeps a short OpenStreetMap credit on screen)
       }
       const s = document.createElement('a')
       s.target = '_blank'; s.rel = 'noopener'; s.style.color = 'inherit'
       el.append(s)
       const set = (t, h) => { s.textContent = t; if (h) s.href = h }
       set(text, href)
-      return { set, remove() { s.remove(); if (!el.children.length) el.remove() } }
+      return { set, remove() { s.remove(); if (!el.children.length) { unmove(el); el.remove() } } }
     },
   }
 }

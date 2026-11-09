@@ -239,7 +239,7 @@ export default function sail(city) {
     .compact .sl-learn { left: var(--sl); right: var(--sr); width: auto; top: calc(var(--st) + 140px); bottom: auto; gap: 10px; padding: 10px 12px; }
     .compact .sl-learn svg { width: 112px; height: 112px } .compact .sl-learn ul { font-size: 12px; padding-left: 14px }
     /* landscape phones: between the readout and the buttons, clear of the steering and the sail buttons below */
-    @media (orientation: landscape) { .compact .sl-goals, .compact .sl-learn { top: var(--st); left: calc(var(--sl) + 240px); right: calc(var(--sr) + 90px); bottom: auto; max-height: calc(100% - var(--st) - 72px); overflow-y: auto; box-sizing: border-box; } }
+    @media (orientation: landscape) { .compact .sl-goals, .compact .sl-learn { top: var(--st); left: calc(var(--sl) + 240px); right: calc(var(--sr) + 136px); bottom: auto; max-height: calc(100% - var(--st) - 72px); overflow-y: auto; box-sizing: border-box; } }
     .compact .sl-pick { top: calc(var(--st) + 52px); left: var(--sl); right: var(--sr); transform: none; justify-content: space-between; white-space: normal; }
     .compact .sl-pick button { min-height: 44px; padding: 0 14px; flex: none; }
     .compact .sl-touch { --pb: max(16px, calc(env(safe-area-inset-bottom) + 4px)); height: auto; top: 0; }
@@ -247,7 +247,8 @@ export default function sail(city) {
     .compact .sl-touch .l { left: var(--sl) } .compact .sl-touch .r { left: calc(var(--sl) + 84px) }
     .compact .sl-touch .trim { right: var(--sr) } .compact .sl-touch .ease { right: calc(var(--sr) + 86px) }
     .compact body.sail-on .sl-help { top: calc(var(--st) + 116px); bottom: auto; left: var(--sl); right: calc(var(--sr) + 88px); transform: none; width: auto; max-width: none; white-space: normal; text-align: left; font-size: 12.5px; }
-    body.sl-learning .sl-help { display: none }`
+    body.sl-learning .sl-help { display: none }
+    html.embed body:has(.sl-learn:not([hidden]), .sl-goals:not([hidden])) .more-fab { display: none } /* the embed's cards span the top: ⋯ comes back with them closed */`
   document.head.append(css)
   const el = (cls, html) => { const d = document.createElement('div'); d.className = cls; d.innerHTML = html; d.hidden = true; document.body.append(d); return d }
   const K = touchy ? { left: '◀', right: '▶', trim: 'Trim', ease: 'Ease' } : { left: 'A', right: 'D', trim: 'W', ease: 'S' } // what to press, in hints
@@ -290,6 +291,7 @@ export default function sail(city) {
   ui.cancel.onclick = () => cancelPick()
   ui.mute.onclick = () => setMuted(!muted)
   ui.mute.textContent = muted ? 'Sound off' : 'Sound on'
+  city.ui.inMenu?.(ui.mute) // phones: in the ⋯ sheet
   q(ui.btns, '[data-goals]').onclick = () => toggleGoals()
   q(ui.btns, '[data-learn]').onclick = () => (ui.learn.hidden ? showLearn() : hideLearn())
   q(ui.learn, '[data-ok]').onclick = () => hideLearn()
@@ -311,7 +313,7 @@ export default function sail(city) {
   const keys = new Set()
   let seenAt = { surf: -99, plane: -99, gust: -99 }
 
-  const button = city.ui.addButton({ label: 'Sail', icon: '⛵', title: 'Sail a small boat on the real water, in the real wind', onClick: () => startPick() })
+  const button = city.ui.addButton({ label: 'Sail', icon: '⛵', title: 'Sail a small boat on the real water, in the real wind', onClick: () => startPick(), dock: true })
 
   // ---------------------------------------------------------------- pick where to start
   const picker = mapPicker(city, 'sl-picking', (x, z) => {

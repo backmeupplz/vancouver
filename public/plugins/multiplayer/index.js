@@ -148,7 +148,8 @@ export default function multiplayer(city) {
     .compact .live-menu .t { font-size: 13px; padding: 4px 12px 6px; }
     .compact .live-fab { top: var(--st); right: calc(var(--sr) + 84px); width: 44px; height: 44px; padding: 0; font-size: 19px; border-radius: 12px; }
     .compact .live-fab .lb { display: none; }
-    .compact .live-fab .live-badge { position: absolute; top: -4px; right: -4px; margin: 0; }`
+    .compact .live-fab .live-badge { position: absolute; top: -4px; right: -4px; margin: 0; }
+    #menu .live-fab { font-size: 14px } #menu .live-fab .lb { display: inline } #menu .live-fab .live-badge { position: static; margin-left: 6px; }`
   document.head.append(css)
   const h = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e }
   const btn = (cls, text, title) => { const b = h('button', cls, text); b.type = 'button'; if (title) { b.title = title; b.setAttribute('aria-label', title) } return b }
@@ -181,6 +182,7 @@ export default function multiplayer(city) {
   const fabBadge = h('span', 'live-badge'); fabBadge.hidden = true; fab.append(fabBadge)
   fab.onclick = () => toggleChat()
   document.body.append(fab)
+  city.ui.inMenu?.(fab) // phones: in the ⋯ sheet
 
   const panel = h('div', 'panel live-chat'); panel.hidden = true
   panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', 'Chat')

@@ -541,17 +541,15 @@ export default function drive(city) {
       .compact .dlv-co { left: var(--sl); top: var(--st); padding: 5px 11px; min-height: 44px; box-sizing: border-box; }
       .compact .dlv-co .name { font-size: 10.5px } .compact .dlv-co .stats { gap: 10px; margin-top: 1px }
       .compact .dlv-co .credit { display: none }
-      .compact .dlv-read { left: var(--sl); top: var(--st); height: 44px; display: flex; align-items: center; gap: 4px; box-sizing: border-box; padding: 0 12px; font-size: 13px; max-width: calc(100% - var(--sl) - var(--sr) - 94px); }
+      .compact .dlv-read { left: var(--sl); top: var(--st); height: 44px; display: flex; align-items: center; gap: 4px; box-sizing: border-box; padding: 0 12px; font-size: 13px; max-width: calc(100% - var(--sl) - var(--sr) - 140px); }
       .compact .dlv-read .st { min-width: 0; overflow: hidden; text-overflow: ellipsis }
-      .compact .dlv-co { max-width: calc(100% - var(--sl) - var(--sr) - 94px); }
+      .compact .dlv-co { max-width: calc(100% - var(--sl) - var(--sr) - 140px); } /* clear of ⋯ and Map */
       .compact .dlv-btns { right: var(--sr); top: var(--st); }
       .compact .dlv-btns .opt, .dlv-btns .short, .compact .dlv-btns .long { display: none }
       .compact .dlv-btns .short { display: inline }
       .compact .dlv-btns [data-exit] { width: 78px; height: 44px; padding: 0; border-radius: 12px; }
       .compact .dlv-btns [data-assist] { width: 78px; height: 44px; padding: 0; border-radius: 12px; }
-      /* the top-left card gets the row but for the buttons: in portrait Lane goes under Map (the cards below make room) */
-      @media (orientation: portrait) { .compact .dlv-btns { flex-direction: column } .compact.dlv-assist .dlv-job { right: calc(var(--sr) + 86px) } }
-      @media (orientation: landscape) { .compact.dlv-assist .dlv-read, .compact.dlv-assist .dlv-co { max-width: calc(100% - var(--sl) - var(--sr) - 176px); } }
+      #menu [data-assist] .short { display: none } /* phones: Lane assist and Sound are in the ⋯ sheet (city.ui.inMenu) */
       .compact .dlv-job { top: calc(var(--st) + 52px); left: var(--sl); right: var(--sr); transform: none; width: auto; max-width: 460px; padding: 8px 12px 8px 8px; gap: 10px; }
       .compact .dlv-job > div:last-child { min-width: 0; flex: 1 }
       .compact .dlv-job .where, .compact .dlv-job .sub, .compact .dlv-job .what { max-width: none }
@@ -617,10 +615,11 @@ export default function drive(city) {
   ui.assist.onclick = () => setAssist(!assist)
   function assistHint() { // once, the first time the van is driven
     try { if (localStorage.getItem('delivery.assistSeen')) return; localStorage.setItem('delivery.assistSeen', '1') } catch { return }
-    city.ui.toast(`Lane assist is ${assist ? 'on' : 'off'}: when you let go of the steering, the ${game ? 'bus' : taxi ? 'cab' : 'van'} straightens up along the road.${touchy ? ' The Lane button switches it.' : ' G or the button switches it.'}`, 7000)
+    city.ui.toast(`Lane assist is ${assist ? 'on' : 'off'}: when you let go of the steering, the ${game ? 'bus' : taxi ? 'cab' : 'van'} straightens up along the road.${city.ui.compact ? ' Switch it in the ⋯ menu.' : touchy ? ' The Lane button switches it.' : ' G or the button switches it.'}`, 7000)
   }
   ui.mute.onclick = () => setMuted(!muted)
   ui.mute.textContent = muted ? 'Sound off' : 'Sound on'
+  city.ui.inMenu?.(ui.assist); city.ui.inMenu?.(ui.mute)
   let popT = 0, helpT = 0
   function popup(big, line) {
     ui.b.textContent = big; ui.qq.textContent = line
@@ -675,7 +674,7 @@ export default function drive(city) {
   const keys = new Set()
   let autopilot = null, probe = null // ?drivedebug (tools/drive_check.mjs): the input instead of the keys; told of every hit
 
-  const button = city.ui.addButton({ label: 'Drive', icon: '🚐', title: 'Explore the streets by van or on foot, or deliver parcels (D)', panel: true })
+  const button = city.ui.addButton({ label: 'Drive', icon: '🚐', title: 'Explore the streets by van or on foot, or deliver parcels (D)', panel: true, dock: true })
   button.panel.innerHTML = `<div class="dlv-menu">
     <button data-m="car"><span>🚐</span><div>Explore by van<small>Drive anywhere, no jobs</small></div></button>
     <button data-m="foot"><span>🚶</span><div>Explore on foot<small>Walk the sidewalks; ${touchy ? 'hop' : 'E gets'} in the van</small></div></button>

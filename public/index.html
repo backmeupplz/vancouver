@@ -54,7 +54,9 @@
   #perf .bar { width: 46px; height: 3px; border-radius: 2px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
   #perf .bar i { display: block; height: 100%; background: var(--accent); transition: width .25s; }
   #perf:not(.busy) .ld { display: none; }
-  .compact #perf { left: var(--sl); top: calc(var(--st) + 112px); bottom: auto; transform: none; } /* (the bottom is the dock, the player and the pedals) */
+  .compact #perf { left: var(--sl); top: calc(var(--st) + 44px); bottom: auto; transform: none; } /* (the bottom is the dock and the pedals) */
+  .compact:not(.fps-on) #perf .fps, .compact:not(.fps-on) #perf:not(.busy), .compact:not(.fps-on) body.dlv-on #perf { display: none } /* phones: only while loading, unless ⋯ → Frame rate */
+  .compact body.dlv-on #perf { top: calc(var(--st) + 52px); }
   /* loading: a centred card with a progress bar, then fades out */
   #loading { position: fixed; inset: 0; display: grid; place-items: center; z-index: 30; background: #0b1016; transition: opacity .5s; }
   #loading.done { opacity: 0; pointer-events: none; }
@@ -86,13 +88,42 @@
   .compact #tools button { flex: 1 0 58px; flex-direction: column; gap: 1px; min-height: 50px; padding: 4px 2px 3px; font-size: 11px; line-height: 1.1; border-radius: 11px; position: relative; }
   .compact #tools .ic { font-size: 19px; line-height: 22px; }
   .compact #tools .live-badge { position: absolute; top: 3px; left: calc(50% + 6px); margin: 0; }
-  .compact .lofi { --lofi-bottom: calc(var(--sb) + 64px); }
   .compact #credits { left: var(--sl) !important; right: auto !important; top: calc(var(--st) + 50px) !important; bottom: auto !important; transform: none !important; max-width: calc(100% - var(--sl) - var(--sr)) !important; flex-wrap: wrap; row-gap: 0; background: none !important; border: 0 !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; padding: 0 2px !important; font-size: 10.5px !important; color: rgba(227, 234, 240, .78) !important; text-shadow: 0 1px 2px rgba(0, 0, 0, .8); pointer-events: auto; }
+  /* the ⋯ sheet (city.js): only the games stay on the dock; everything else lives in here on phones */
+  #tools .more, .more-fab, #osm { display: none; }
+  .compact #tools .more { display: inline-flex; }
+  .compact body.dlv-on .more-fab { display: grid; place-items: center; right: calc(var(--sr) + 84px); top: var(--st); width: 44px; height: 44px; padding: 0; z-index: 26; font: 22px/1 system-ui, sans-serif; color: var(--text); border-radius: 12px; cursor: pointer; }
+  .more-fab .lb { display: none; }
+  #menu { overflow-y: auto; box-sizing: border-box; }
+  #menu [hidden], #menu .menu-off, #menu > div:empty { display: none !important; }
+  #menu > div + div { margin-top: 12px; }
+  #menu .menu-tools { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 6px; }
+  #menu .menu-tools button, #menu .menu-items > button { font: inherit; color: var(--text); background: rgba(255, 255, 255, .05); border: 1px solid var(--line); border-radius: 12px; cursor: pointer; }
+  #menu .menu-tools button { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 60px; padding: 4px 2px; font-size: 12px; }
+  #menu .menu-tools button[aria-pressed="true"] { background: rgba(255, 255, 255, .12); }
+  #menu .menu-tools .ic { font-size: 20px; line-height: 24px; }
+  #menu .menu-tools .ic:empty { display: none; }
+  #menu .menu-tools .live-badge { position: absolute; top: 4px; left: calc(50% + 8px); margin: 0; }
+  body.dlv-on #menu .menu-tools { display: none; } /* their panels are the map's: a game hides them */
+  #menu .menu-items { display: flex; flex-direction: column; gap: 6px; }
+  #menu .menu-items > * { position: static !important; transform: none !important; margin: 0 !important; max-width: none !important; }
+  #menu .menu-items > button { width: 100%; height: auto; min-height: 44px; padding: 0 14px; text-align: left; border-radius: 10px; font-size: 14px; }
+  #menu .menu-set { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 6px 12px; }
+  #menu #gfxBox h2 { margin: 0 0 4px; font-size: 10.5px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  #menu #gfx button { min-height: 44px; padding: 0 14px; }
+  #menu .menu-fps { display: flex; align-items: center; gap: 2px; min-height: 44px; color: var(--text); cursor: pointer; }
+  .compact #menu #bar { position: static; display: flex !important; flex-wrap: wrap; height: auto; max-width: none; padding: 0; background: none; border: 0; backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .compact #menu #bar h1 { margin-right: auto; }
+  .compact #menu #credits { position: static !important; display: flex !important; flex-wrap: wrap; white-space: normal !important; gap: 2px 10px; padding: 0 !important; margin-top: 6px; color: var(--muted) !important; text-shadow: none; }
+  .compact body.dlv-on #about:not([hidden]) { display: block !important; } /* About from the ⋯ sheet in a game */
+  /* the short credit that stays on screen (the full one is in the sheet): top left on the map, bottom centre in a game */
+  .compact #osm { display: flex; align-items: center; position: fixed; left: var(--sl); top: var(--st); min-height: 44px; padding: 0 2px; z-index: 15; font-size: 10.5px; color: rgba(227, 234, 240, .85); text-decoration: none; text-shadow: 0 1px 2px rgba(0, 0, 0, .8); white-space: nowrap; }
+  .compact body.dlv-on #osm { top: auto; bottom: 0; left: 50%; transform: translateX(-50%); min-height: 0; padding: 0 4px 1px; font-size: 9.5px; }
   .toast { pointer-events: none; }
   .compact .toast { top: calc(var(--st) + 56px); }
   .compact body.dlv-picking .toast { top: calc(var(--st) + 116px); }
   .compact body.dlv-on .toast { top: auto; bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 170px); }
-  .compact .tool-panel, .compact #about { left: 0; right: 0; top: auto !important; bottom: 0; width: auto; max-height: calc(var(--vv-h) - var(--st) - 52px); border-radius: 16px 16px 0 0; border-width: 1px 0 0; padding: 42px max(16px, env(safe-area-inset-right)) calc(14px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); z-index: 27; background: rgba(13, 19, 26, .92); overscroll-behavior: contain; font-size: 14px; animation: sheet-in .22s ease-out; }
+  .compact .tool-panel, .compact #about, .compact #menu { left: 0; right: 0; top: auto !important; bottom: 0; width: auto; max-height: calc(var(--vv-h) - var(--st) - 52px); border-radius: 16px 16px 0 0; border-width: 1px 0 0; padding: 42px max(16px, env(safe-area-inset-right)) calc(14px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); z-index: 27; background: rgba(13, 19, 26, .92); overscroll-behavior: contain; font-size: 14px; animation: sheet-in .22s ease-out; }
   .compact .sheet-grip { display: block; position: absolute; left: 0; right: 0; top: 0; height: 34px; touch-action: none; cursor: grab; z-index: 1; }
   .compact .sheet-grip::before { content: ''; position: absolute; left: 50%; top: 8px; width: 38px; height: 5px; margin-left: -19px; border-radius: 3px; background: rgba(255, 255, 255, .28); }
   .compact .sheet-x { display: grid; place-items: center; position: absolute; right: max(4px, env(safe-area-inset-right)); top: 0; width: 44px; height: 44px; padding: 0; border: 0; background: none; color: var(--muted); font: 22px/1 system-ui, sans-serif; cursor: pointer; z-index: 2; }
@@ -100,18 +131,17 @@
   .compact .tool-panel button, .compact .tool-panel input[type=range], .compact .tool-panel label, .compact .tool-panel input[type=datetime-local] { min-height: 44px; box-sizing: border-box; }
   .compact .tool-panel input[type=checkbox] { width: 20px; height: 20px; margin: 0 4px 0 0; accent-color: var(--accent); }
   .compact input, .compact select, .compact textarea { font-size: 16px !important; } /* iOS zooms into smaller inputs */
-  @media (orientation: landscape) { .compact .tool-panel, .compact #about { width: min(600px, 100%); margin: 0 auto; border-width: 1px 1px 0; } }
-  body.sheet-dragging .tool-panel, body.sheet-dragging #about, body.sheet-dragging .sheet { transition: none !important; animation: none !important; }
+  @media (orientation: landscape) { .compact .tool-panel, .compact #about, .compact #menu { width: min(600px, 100%); margin: 0 auto; border-width: 1px 1px 0; } }
+  body.sheet-dragging .tool-panel, body.sheet-dragging #about, body.sheet-dragging #menu, body.sheet-dragging .sheet { transition: none !important; animation: none !important; }
   @keyframes sheet-in { from { transform: translateY(40px); opacity: .4 } to { transform: none; opacity: 1 } }
-  @media (prefers-reduced-motion: reduce) { .compact .tool-panel, .compact #about { animation: none } }
-  /* embed (/play, ?embed: inside an X post, often 480 px or less): the dock and the sheets of the phone layout, a
-     smaller title bar with a link out, no lofi player */
+  @media (prefers-reduced-motion: reduce) { .compact .tool-panel, .compact #about, .compact #menu { animation: none } }
+  /* embed (/play, ?embed: inside an X post, often 480 px or less): the phone layout; the ⋯ sheet's top bar has a
+     link out instead of the title, a smaller music player */
   #full { display: none; }
   .embed #full { display: inline-flex; align-items: center; min-height: 44px; padding: 0 12px; text-decoration: none; color: var(--text); white-space: nowrap; }
   .embed #bar h1 { display: none; }
   .embed #bar { padding: 0 4px; }
   .embed .lofi-vibe, .embed .lofi canvas, .embed .lofi-name, .embed .lofi input { display: none !important; }
-  .embed #tools button { flex-basis: 48px; } /* all six fit 360 px */
   /* sailing's how-to and goals cards: at the top, clear of the steering and sail buttons a short frame puts them over */
   html.embed .sl-learn, html.embed .sl-goals { top: var(--st); left: var(--sl); right: var(--sr); width: auto; bottom: auto; max-height: calc(100% - var(--st) - 96px); overflow-y: auto; box-sizing: border-box; }
 </style>
@@ -133,12 +163,13 @@
     <li>Facades: 2022 LiDAR, property tax report (year built) and heritage register, City of Vancouver (<a href="https://opendata.vancouver.ca/pages/licence/">Open Government Licence – Vancouver</a>); wall colours from street photos on <a href="https://www.mapillary.com/">Mapillary</a> (<a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>)</li>
     <li>Terrain: MRDEM, Natural Resources Canada (<a href="https://open.canada.ca/en/open-government-licence-canada">OGL-Canada</a>)</li>
   </ul>
-  <h2>Graphics</h2>
-  <div id="gfx" role="group" aria-label="Graphics quality"><button type="button" data-q="auto" aria-pressed="true">Auto</button><button type="button" data-q="high" aria-pressed="false">High</button><button type="button" data-q="low" aria-pressed="false">Low</button><span></span></div>
+  <div id="gfxBox"><h2>Graphics</h2>
+  <div id="gfx" role="group" aria-label="Graphics quality"><button type="button" data-q="auto" aria-pressed="true">Auto</button><button type="button" data-q="high" aria-pressed="false">High</button><button type="button" data-q="low" aria-pressed="false">Low</button><span></span></div></div>
   <h2>Code</h2>
   <p><a href="https://git.borodutch.com/backmeupplz/vancouver">Source code</a> · <a href="https://git.borodutch.com/backmeupplz/vancouver/src/branch/main/PLUGINS.md">Write a plugin</a></p>
 </div>
 <div id="tools" class="panel" hidden></div>
+<a id="osm" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a>
 <div id="perf" class="panel" hidden aria-hidden="true"><span class="fps"></span><span class="ld">Loading <span class="n"></span> tiles</span><span class="ld bar"><i></i></span></div>
 <div id="hint" class="panel" hidden>Drag to pan · scroll to zoom · right-drag to turn</div>
 <div id="loading" role="status" aria-live="polite"><div class="card"><div class="title">Vancouver in code</div><div class="step">Loading…</div><div class="track"><div class="fill"></div></div></div></div>
