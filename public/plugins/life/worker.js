@@ -1672,11 +1672,12 @@ function output(buf) {
   let j = cars.length * 8
   let q = pbase
   // people and cyclists between their last two steps, rem / STEP of the way (drawn as they stood after each step, they
-  // moved every other frame at 60 fps); one who hopped far (a new path) at once
+  // moved every other frame at 60 fps); one who hopped far (a new path) at once, and one with no step behind them
+  // (just come, or sitting: no ox) where they are: (x - undefined) * 0 is NaN, not 0 (#591: it blacked the view out)
   const u = Math.min(1, rem / STEP)
   const put = (p, pose) => {
     const f = p.fall ? fallAngle(p.fall) : 0, mv = p.ox != null && Math.abs(p.x - p.ox) + Math.abs(p.y - p.oy) < 2, k = mv ? 1 - u : 0, q = vbase + j / 4 - cars.length * 2
-    a[j] = p.x - (p.x - p.ox) * k; a[j + 1] = p.h - (p.h - p.oh) * k + Math.sin(f) * 0.13; a[j + 2] = -(p.y - (p.y - p.oy) * k); a[j + 3] = p.ang
+    a[j] = mv ? p.x - (p.x - p.ox) * k : p.x; a[j + 1] = (mv ? p.h - (p.h - p.oh) * k : p.h) + Math.sin(f) * 0.13; a[j + 2] = -(mv ? p.y - (p.y - p.oy) * k : p.y); a[j + 3] = p.ang
     a[q] = mv ? (p.x - p.ox) / STEP : 0; a[q + 1] = mv ? -(p.y - p.oy) / STEP : 0
     a[j + 4] = p.fall ? f : p.mode === 'wait' ? 0 : p.phase; a[j + 5] = (p.fall ? 4 : p.mode === 'wait' ? 1 : pose) + p.seed * 0.9; a[j + 6] = p.shirt; a[j + 7] = p.pants
     j += 8

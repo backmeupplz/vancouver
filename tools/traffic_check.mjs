@@ -1,6 +1,7 @@
 // node tools/traffic_check.mjs: the traffic simulation (public/plugins/life/worker.js) moves cars smoothly: no jump or
 // sudden turn from one frame to the next (short pieces of road, junctions, a new network swapped in while they
-// drive), and no car appears or vanishes near the player
+// drive), and no car appears or vanishes near the player; and nothing it hands out (cars, people walking, people
+// sitting or waiting, cyclists) ever has a position, heading or speed that is not a number (#591)
 // node tools/traffic_check.mjs --live [--secs 60] [--port P] [SPEC...]: the same on the real page, as drawn. SPEC:
 // name=map#X,Y,zoom (the map view at that hash) or name=drive#X,Y,zoom[,yaw] (the van standing on the road nearest
 // that spot, the chase camera behind it); default: W 7th & Macdonald (#558) both ways, downtown, a bridge. Every frame
@@ -32,7 +33,10 @@ const pieces = [
   road(3, 4, [700, 500, 702, 501], 2, 4, 14), road(4, 5, [702, 501, 1000, 560], 2, 4, 14),
   road(6, 2, [500, 0, 500, 500], 5, 2, 9), road(2, 7, [500, 500, 500, 1000], 5, 2, 9),
 ]
-const tile = { key: '0/0_0', level: 0, ox: 0, oy: 0, size: 1024, terrain: { n: 2, h: new Float32Array([10, 10, 10, 10]) }, pieces, pois: [] }
+// for the people (switched on at the end): a footpath and a cycleway off the streets, a bench and a bus stop
+pieces.push({ ...road(20, 21, [100, 800, 400, 900], 9, 1, 3), drive: false }, { ...road(22, 23, [100, 850, 450, 950], 10, 1, 3), drive: false })
+const pois = [{ kind: 4, id: 30, x: 250, y: 852 }, { kind: 5, id: 31, x: 300, y: 870 }]
+const tile = { key: '0/0_0', level: 0, ox: 0, oy: 0, size: 1024, terrain: { n: 2, h: new Float32Array([10, 10, 10, 10]) }, pieces, pois }
 send({ type: 'opts', opts: { cars: true, people: false, bikes: false, density: 6, hour: 17, maxCars: 300, maxPeople: 0 } })
 send({ type: 'tiles', add: [tile], drop: [] })
 send({ type: 'area', area: { x: 500, y: 500, r: 3000, vx: 500, vy: 500, vr: 500 } })
@@ -40,11 +44,15 @@ const player = { x: 300, y: 620 } // off the road, within sight of the junction
 send({ type: 'obstacles', list: [{ id: 'p', x: player.x, y: player.y, ang: 0, len: 4.6, w: 1.9, speed: 0, h: null, c: 1, s: 0 }] })
 
 const DT = 1 / 60, last = new Map()
-let buf = null, jumps = 0, turns = 0, frames = 0, born = 0, gone = 0, jumped = '', turned = ''
+let buf = null, jumps = 0, turns = 0, frames = 0, born = 0, gone = 0, jumped = '', turned = '', nans = 0, nan = ''
 function tick(check) {
   got.length = 0
   send({ type: 'tick', dt: DT, buf })
   const m = got.find((x) => x.type === 'frame'), a = (buf = m.buf), now = new Map()
+  // every agent's 8 numbers (x, y, z, heading, ...) and the people's and cyclists' velocities
+  const things = m.cars + m.nPeople + m.nBikes, what = (i) => (i < m.cars ? 'car' : i < m.cars + m.nPeople ? 'person' : 'cyclist')
+  for (let i = 0; i < things * 8; i++) if (!Number.isFinite(a[i])) { nans++; nan ||= `${what(i >> 3)} ${i >> 3} field ${i & 7} is ${a[i]}` }
+  for (let i = m.vbase; i < m.vbase + (m.nPeople + m.nBikes) * 2; i++) if (!Number.isFinite(a[i])) { nans++; nan ||= `velocity ${i - m.vbase} is ${a[i]}` }
   for (let i = 0; i < m.cars; i++) {
     const id = a[m.base + i * 2], v = a[m.base + i * 2 + 1], x = a[i * 8], z = a[i * 8 + 2], yaw = a[i * 8 + 3]
     now.set(id, [x, z, yaw])
@@ -69,6 +77,15 @@ for (let i = 0; i < 3600; i++) {
 console.log(`${n0} cars, ${frames} frames: ${jumps} jumps (${jumped || '-'}), ${turns} sudden turns (${turned || '-'}), ${born} appeared and ${gone} vanished near the player`)
 assert(n0 > 30, `cars: ${n0}`)
 assert.equal(jumps + turns + born + gone, 0)
+// the people: walking, on the bench and at the bus stop, and the cyclists, from the frame they appear
+send({ type: 'opts', opts: { people: true, bikes: true, maxPeople: 300 } })
+let walkers = 0, riders = 0
+for (let i = 0; i < 1800; i++) { const m = tick(false); walkers = Math.max(walkers, m.nPeople); riders = Math.max(riders, m.nBikes) }
+got.length = 0; send({ type: 'debug', x: 0, y: 0, r: 0 })
+const sitters = got.find((x) => x.type === 'debug').statics
+console.log(`${walkers - sitters} walking, ${sitters} sitting or waiting, ${riders} cyclists: ${nans} numbers not finite (${nan || '-'})`)
+assert(walkers > sitters && sitters > 0 && riders > 0, 'people of every kind')
+assert.equal(nans, 0, nan)
 console.log('traffic ok')
 
 async function live() {

@@ -645,7 +645,7 @@ export default function drive(city) {
     ui.how.hidden = false; ui.how.classList.remove('fade')
     clearTimeout(howT); howT = setTimeout(hideHowTo, 10000)
   }
-  function hideHowTo() { if (ui.how.hidden || ui.how.classList.contains('fade')) return; clearTimeout(howT); if (!onFoot) assistHint(); ui.how.classList.add('fade'); setTimeout(() => { ui.how.hidden = true }, 400) }
+  function hideHowTo() { if (ui.how.hidden || ui.how.classList.contains('fade')) return; clearTimeout(howT); ui.how.classList.add('fade'); setTimeout(() => { ui.how.hidden = true; if (!onFoot && state === 'play') assistHint() }, 400) } // (the hint once the card has faded: over it on a phone held sideways, #591)
   function showHelp() { // the keys, for a few seconds after each change between van and feet (always while delivering)
     ui.help.textContent = taxi ? taxi.help() : game ? 'W gas · S brake (a tap is gentle, hold for more) · A D steer · E doors · H horn · R back on the route · Esc end the shift'
       : hike ? 'WASD or arrows to walk · Shift to push on (it tires you; each quarter mark is a second wind) · the trail guides you when you let go · Esc to the map'
