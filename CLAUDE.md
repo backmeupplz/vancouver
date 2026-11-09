@@ -22,7 +22,7 @@ look; PLUGINS.md is the plugin contract. Read the parts you need, not the whole 
   `streets.js` street names
 - `public/plugins/`: `drive/` (van, walk, hike, deliveries, bus, Rush Fare taxi; `van.js` physics specs, `route.js` bus GPS,
   `kerbs.js`), `life/` (traffic + pedestrians: `worker.js` sim, `index.js` render, `blades.js` street signs), `sail/`,
-  `weather/`, `transit/`, `ships/`, `planes/`, `landmarks/`, `lofi/`, `multiplayer/`
+  `progress/` (cash, XP, levels, maple leaves, dailies, leaderboards: `city.progress`), `weather/`, `transit/`, `ships/`, `planes/`, `landmarks/`, `lofi/`, `multiplayer/`
 - `tools/`: bake (`tiles.py` main, `osm_split.py`, `sea.py`, `heights.py`, `hrdem.py`, `common.py` shared helpers),
   data (`roofs.py`, `beachlogs.py`, `facades.py`, `mapillary.py`, `transit_data.py`), audits/checks (`audit_elev.py`,
   `audit_trunks.py`, `geom_rules.py` (every geometry rule: checks + fixes, the publish gate; `drawn_check.mjs` its checks on

@@ -128,5 +128,14 @@ export function shaded(m, night = { value: 0 }, ao = true) {
   m.customProgramCacheKey = () => (ao ? 'shaded' : 'shaded-flat')
   return m
 }
+// repaint a plain kit model in place: every vertex of colour `from` becomes `to` (hex numbers or CSS colours)
+export function repaint(THREE, obj, from, to) {
+  const a = new THREE.Color(from), b = new THREE.Color(to)
+  obj.traverse((m) => {
+    const c = m.geometry?.attributes.color; if (!c) return
+    for (let i = 0; i < c.count; i++) if (Math.abs(c.getX(i) - a.r) + Math.abs(c.getY(i) - a.g) + Math.abs(c.getZ(i) - a.b) < 1e-3) c.setXYZ(i, b.r, b.g, b.b)
+    c.needsUpdate = true
+  })
+}
 // the material for a kit's plain geometry (geometry(true)): its vertex colours, flat-shaded, with SHADE
 export const kitMaterial = (THREE, night, ao) => shaded(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), night, ao)

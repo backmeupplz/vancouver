@@ -1,6 +1,7 @@
 //! HTTP and WebSocket front of the live service. Routes answer both with and without the `/live`
 //! prefix, so it works whether or not the proxy strips it:
 //!   GET /live/stats   {now, day, week}
+//!   GET /live/boards  {day, boards: {name: [{name, chosen, v}]}}: the leaderboards' top 10 (scores come in over the socket)
 //!   GET /live/ws      WebSocket: presence (counts as a visit), multiplayer and chat (see world.rs)
 //!   GET /live/health  ok
 pub mod db;
@@ -61,7 +62,7 @@ pub fn router(cfg: Config) -> Router {
             w.lock().unwrap_or_else(|e| e.into_inner()).tick(Instant::now());
         }
     });
-    let routes = Router::new().route("/stats", get(stats)).route("/ws", get(ws)).route("/health", get(|| async { "ok" }));
+    let routes = Router::new().route("/stats", get(stats)).route("/boards", get(boards)).route("/ws", get(ws)).route("/health", get(|| async { "ok" }));
     Router::new().nest("/live", routes.clone()).merge(routes).with_state(app)
 }
 
@@ -81,6 +82,11 @@ pub async fn serve(listener: tokio::net::TcpListener, cfg: Config) {
 async fn stats(State(app): State<App>) -> Response {
     let s = app.world().stats();
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"), (header::CACHE_CONTROL, "no-store")], axum::Json(s)).into_response()
+}
+
+async fn boards(State(app): State<App>) -> Response {
+    let json = app.world().boards(Instant::now());
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"), (header::CACHE_CONTROL, "max-age=5"), (header::CONTENT_TYPE, "application/json")], json).into_response()
 }
 
 /// The visitor's address as the proxy saw it (Tugport sets X-Real-IP), else the socket's.

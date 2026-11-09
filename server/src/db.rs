@@ -36,6 +36,9 @@ pub struct Stats {
     pub week: i64,
 }
 
+pub const MAX_BOARDS: i64 = 32;
+pub const BOARD_ROWS: i64 = 1000;
+
 impl Db {
     pub fn open(path: &str) -> rusqlite::Result<Db> {
         let conn = Connection::open(path)?;
@@ -47,7 +50,9 @@ impl Db {
              CREATE TABLE IF NOT EXISTS visits (day INTEGER NOT NULL, hash BLOB NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY (day, hash));
              CREATE INDEX IF NOT EXISTS visits_seen ON visits (seen);
              CREATE TABLE IF NOT EXISTS blocks (owner TEXT NOT NULL, target TEXT NOT NULL, PRIMARY KEY (owner, target));
-             CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, at INTEGER NOT NULL);",
+             CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, at INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS scores (board TEXT NOT NULL, day INTEGER NOT NULL, id TEXT NOT NULL, v INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (board, day, id));
+             CREATE INDEX IF NOT EXISTS scores_top ON scores (board, day, v DESC);",
         )?;
         Ok(Db { conn, salt: None })
     }
@@ -112,6 +117,32 @@ impl Db {
     /// A user's chosen name, if they have one.
     pub fn username(&self, id: &str) -> rusqlite::Result<Option<String>> {
         self.conn.query_row("SELECT name FROM users WHERE id = ?1", [id], |r| r.get(0)).optional()
+    }
+
+    /// Keeps `id`'s best score on `board` (`day` 0: all time, else that day's board). A board holds its best
+    /// BOARD_ROWS scores and there are at most MAX_BOARDS boards, so made-up ids and names can't grow the file.
+    pub fn score(&self, board: &str, day: i64, id: &str, v: i64, now: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO scores (board, day, id, v, at) SELECT ?1, ?2, ?3, ?4, ?5
+             WHERE EXISTS (SELECT 1 FROM scores WHERE board = ?1) OR (SELECT COUNT(DISTINCT board) FROM scores) < ?6
+             ON CONFLICT (board, day, id) DO UPDATE SET v = excluded.v, at = excluded.at WHERE excluded.v > scores.v",
+            rusqlite::params![board, day, id, v, now, MAX_BOARDS],
+        )?;
+        self.conn.execute(
+            "DELETE FROM scores WHERE board = ?1 AND day = ?2 AND rowid NOT IN (SELECT rowid FROM scores WHERE board = ?1 AND day = ?2 ORDER BY v DESC, at LIMIT ?3)",
+            rusqlite::params![board, day, BOARD_ROWS],
+        )?;
+        self.conn.execute("DELETE FROM scores WHERE day > 0 AND day < ?1", [day - 7])?; // (day 0 deletes nothing)
+        Ok(())
+    }
+
+    /// The top `n` of every all-time board and of the boards of `day`: (board, id, chosen name, score), best first.
+    pub fn boards(&self, day: i64, n: i64) -> rusqlite::Result<Vec<(String, String, Option<String>, i64)>> {
+        let mut q = self.conn.prepare_cached(
+            "SELECT board, id, name, v FROM (SELECT s.board, s.id, u.name, s.v, ROW_NUMBER() OVER (PARTITION BY s.board ORDER BY s.v DESC, s.at) r
+               FROM scores s LEFT JOIN users u ON u.id = s.id WHERE s.day = 0 OR s.day = ?1) WHERE r <= ?2 ORDER BY board, r",
+        )?;
+        q.query_map([day, n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect()
     }
 
     /// Who has the name with this key (see text::name_key).
@@ -205,6 +236,28 @@ mod tests {
         let days: i64 = db.conn.query_row("SELECT COUNT(DISTINCT day) FROM visits", [], |r| r.get(0)).unwrap();
         assert_eq!(days, 2);
         assert_eq!(db.counts(t0 + 9 * DAY).unwrap(), (1, 1)); // the visit two days in is exactly 7 days old
+    }
+
+    #[test]
+    fn scores_keep_the_best_and_stay_bounded() {
+        let db = Db::open(":memory:").unwrap();
+        db.score("taxi", 0, "a", 50, 1).unwrap();
+        db.score("taxi", 0, "a", 20, 2).unwrap(); // lower: kept at 50
+        db.score("taxi", 0, "b", 70, 3).unwrap();
+        db.score("daily", 100, "a", 5, 4).unwrap();
+        db.score("daily", 90, "a", 9, 4).unwrap();
+        let top = |day| db.boards(day, 10).unwrap().into_iter().map(|(b, id, _, v)| (b, id, v)).collect::<Vec<_>>();
+        assert_eq!(top(100), vec![("daily".into(), "a".into(), 5), ("taxi".into(), "b".into(), 70), ("taxi".into(), "a".into(), 50)]);
+        db.score("daily", 101, "a", 1, 5).unwrap(); // a daily write drops days over a week old
+        assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM scores WHERE day = 90", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        for i in 0..BOARD_ROWS + 20 {
+            db.score("bus", 0, &format!("p{i}"), i, 6).unwrap();
+        }
+        assert_eq!(db.conn.query_row("SELECT COUNT(*), MIN(v) FROM scores WHERE board = 'bus'", [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).unwrap(), (BOARD_ROWS, 20));
+        for i in 0..MAX_BOARDS + 5 {
+            db.score(&format!("x{i}"), 0, "a", 1, 7).unwrap();
+        }
+        assert_eq!(db.conn.query_row("SELECT COUNT(DISTINCT board) FROM scores", [], |r| r.get::<_, i64>(0)).unwrap(), MAX_BOARDS);
     }
 
     #[test]

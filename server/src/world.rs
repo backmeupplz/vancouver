@@ -19,6 +19,8 @@
 //!   text   {"t":"check","name"}                          is this username free? (debounce it: ≤ 4/s)
 //!   text   {"t":"chat","ch":"g"|"n","text"}              global, or players within 1.5 km
 //!   text   {"t":"block","id"} / {"t":"unblock","id"}
+//!   text   {"t":"score","board","v"}                     a finished run's score (kept if it is their best; the
+//!                                                        board "daily" is per day); read them at GET /live/boards
 //!   binary [1][mode u8: 0 stopped, 1 car, 2 foot, 3 boat, 4 bus][x f32][y f32][z f32][heading i16 ×1e4][speed i16 ×100]   ≤ 10 Hz while playing
 //! server → client
 //!   text   {"t":"welcome","s","id","token","name","chosen","colour","blocks":[id],"players":[{s,id,name,chosen,colour}],"chat":[…],"stats"}
@@ -158,6 +160,7 @@ pub struct Client {
     checks: Bucket,
     blocking: Bucket,
     teleports: Bucket,
+    scores: Bucket,
     strikes: u32,
     strikes_at: Instant,
     last_chat: Option<(String, Instant)>,
@@ -197,6 +200,7 @@ enum In {
     Chat { ch: String, text: String },
     Block { id: String },
     Unblock { id: String },
+    Score { board: String, v: i64 },
 }
 
 struct Line {
@@ -219,6 +223,14 @@ pub struct World {
     stats: Option<(Stats, Instant)>,
     coarse_empty: bool,
     sent_now: usize,
+    boards: Option<(String, Instant)>,
+}
+
+pub const MAX_SCORE: i64 = 10_000_000;
+/// The day of the daily challenges and their board, the same sum in the page (plugins/progress):
+// ponytail: days turn at midnight Pacific Standard Time all year (1 am in summer); a tz database if that matters
+pub fn day_of(unix: i64) -> i64 {
+    (unix - 8 * 3600).div_euclid(86_400)
 }
 
 fn unix_ms() -> u64 {
@@ -240,7 +252,7 @@ impl World {
             Ok(n) => eprintln!("moved {n} blocks to UUIDs"),
             Err(e) => eprintln!("moving blocks to UUIDs: {e}"),
         }
-        World { clients: HashMap::new(), next: 1, ticks: 0, history: VecDeque::new(), per_ip: HashMap::new(), max_per_ip, hold: HashSet::new(), db, secret, stats: None, coarse_empty: true, sent_now: 0 }
+        World { clients: HashMap::new(), next: 1, ticks: 0, history: VecDeque::new(), per_ip: HashMap::new(), max_per_ip, hold: HashSet::new(), db, secret, stats: None, coarse_empty: true, sent_now: 0, boards: None }
     }
 
     // ------------------------------------------------------------------ identity tokens
@@ -305,6 +317,7 @@ impl World {
                 checks: b(4.0, 8.0),
                 blocking: b(5.0, 60.0),
                 teleports: b(0.1, 2.0),
+                scores: b(0.2, 6.0),
                 strikes: 0,
                 strikes_at: now,
                 last_chat: None,
@@ -366,6 +379,7 @@ impl World {
             In::Chat { ch, text } => self.chat(slot, &ch, &text, now),
             In::Block { id } => return self.block(slot, &id, true, now),
             In::Unblock { id } => return self.block(slot, &id, false, now),
+            In::Score { board, v } => return self.score(slot, &board, v, now),
         }
         Ok(())
     }
@@ -535,6 +549,44 @@ impl World {
                 self.history.pop_front();
             }
         }
+    }
+
+    /// A run's score from the page (nothing here can check it: the boards are for fun). Kept if it is the
+    /// player's best on that board; "daily" is one board a day.
+    fn score(&mut self, slot: u32, board: &str, v: i64, now: Instant) -> Result<(), Kick> {
+        let c = self.clients.get_mut(&slot).unwrap();
+        let named = !board.is_empty() && board.len() <= 16 && board.bytes().enumerate().all(|(i, b)| b.is_ascii_lowercase() || (i > 0 && (b.is_ascii_digit() || b == b'-')));
+        if !named || !(0..=MAX_SCORE).contains(&v) {
+            return self.strike(slot, now);
+        }
+        if !c.scores.take(now) {
+            return Ok(()); // one every 5 s (6 at once): the page sends a best only when it is beaten
+        }
+        let day = if board == "daily" { day_of(unix()) } else { 0 };
+        if let Err(e) = self.db.score(board, day, c.id.as_deref().unwrap(), v, unix()) {
+            eprintln!("score: {e}");
+        }
+        self.boards = None;
+        Ok(())
+    }
+
+    /// GET /live/boards: {"day", "boards": {board: [{"name","chosen","v"}]}}, the top 10 of each (names only, no ids),
+    /// worked out at most every 5 s.
+    pub fn boards(&mut self, now: Instant) -> String {
+        if let Some((json, at)) = &self.boards
+            && now.duration_since(*at) < Duration::from_secs(5)
+        {
+            return json.clone();
+        }
+        let day = day_of(unix());
+        let mut boards = serde_json::Map::new();
+        for (board, id, name, v) in self.db.boards(day, 10).unwrap_or_default() {
+            let row = json!({ "chosen": name.is_some(), "name": name.unwrap_or_else(|| placeholder(&id)), "v": v });
+            boards.entry(board).or_insert_with(|| json!([])).as_array_mut().unwrap().push(row);
+        }
+        let json = json!({ "day": day, "boards": boards }).to_string();
+        self.boards = Some((json.clone(), now));
+        json
     }
 
     fn block(&mut self, slot: u32, target: &str, on: bool, now: Instant) -> Result<(), Kick> {
@@ -853,6 +905,35 @@ mod tests {
             self.w.clients[&c.slot].id.clone().unwrap()
         }
     }
+    #[test]
+    fn scores_and_boards() {
+        let mut t = T::new();
+        let (a, b) = (t.join("Ada"), t.join("Ben"));
+        let send = |t: &mut T, c: &C, board: &str, v: i64| t.w.text(c.slot, &json!({ "t": "score", "board": board, "v": v }).to_string(), t.now);
+        send(&mut t, &a, "taxi", 300).unwrap();
+        send(&mut t, &b, "taxi", 900).unwrap();
+        send(&mut t, &a, "taxi", 100).unwrap(); // not their best
+        send(&mut t, &a, "daily", 2_000_150).unwrap();
+        let v: Value = serde_json::from_str(&t.w.boards(t.now)).unwrap();
+        assert_eq!(v["boards"]["taxi"], json!([{ "name": "Ben", "chosen": true, "v": 900 }, { "name": "Ada", "chosen": true, "v": 300 }]));
+        assert_eq!(v["boards"]["daily"][0]["v"], 2_000_150);
+        assert_eq!(v["day"], day_of(unix()));
+        assert!(!v.to_string().contains(&t.id(&a)), "no ids in the boards");
+        // out of bounds or a bad board name: strikes, nothing stored; a flood is dropped quietly
+        send(&mut t, &a, "taxi", MAX_SCORE + 1).unwrap();
+        send(&mut t, &a, "taxi", -1).unwrap();
+        send(&mut t, &a, "Taxi; DROP", 5).unwrap();
+        for i in 0..20 {
+            send(&mut t, &b, "bus", i).unwrap();
+        }
+        t.later(6000);
+        let v: Value = serde_json::from_str(&t.w.boards(t.now)).unwrap();
+        assert_eq!(v["boards"]["taxi"][1]["v"], 300);
+        assert_eq!(v["boards"]["bus"][0]["v"], 4, "the bucket let 5 more through (0..=4)");
+        assert_eq!(day_of(8 * 3600), 0);
+        assert_eq!(day_of(8 * 3600 - 1), -1);
+    }
+
     /// slots in a binary snapshot or map list
     fn slots(b: &[u8]) -> Vec<u32> {
         let n = u16::from_le_bytes([b[1], b[2]]) as usize;

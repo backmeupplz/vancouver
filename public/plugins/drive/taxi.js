@@ -215,6 +215,8 @@ export function openGarage(THREE, onStart, onBack) {
     q('[data-s]').innerHTML = BARS.map((B) => { const v = S[B.k], f = (v - B.r[0]) / (B.r[1] - B.r[0] || 1), w = 22 + 78 * (B.low ? 1 - f : f); return `<dt>${B.label}</dt><dd><b><i style="width:${w.toFixed(0)}%"></i></b></dd><dd>${B.fmt(v)}</dd>` }).join('')
     q('[data-d]').innerHTML = `<b>${esc(d.name)}</b><small>${esc(d.bio)}</small><q>${esc(d.line)}</q>`
     root.querySelectorAll('.tx-dots i').forEach((e, i) => e.classList.toggle('on', i === ch.cab))
+    const go = q('[data-go]'), ok = window.city?.progress?.unlocked(`cab:${ch.cab}`) ?? true // (levels: the progress plugin)
+    go.disabled = !ok; go.textContent = ok ? 'Start shift ›' : 'Locked: 🍁 Progress → Garage'
     const best = bestOf()
     q('[data-best]').innerHTML = best ? `Best shift: <b>${money(best.score)}</b> · ${esc(best.rank || '')} · ${esc(best.cab || '')}` : 'No shifts yet: the city is waiting.'
   }

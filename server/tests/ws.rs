@@ -114,6 +114,13 @@ async fn two_players() {
     assert_eq!((s["now"].as_u64(), s["day"].as_u64(), s["week"].as_u64()), (Some(2), Some(2), Some(2)));
     assert_eq!(get(&addr, "/stats").await, get(&addr, "/live/stats").await);
     assert_eq!(get(&addr, "/live/health").await, "ok");
+
+    // a score over the socket shows on the boards
+    a.send(Message::text(r#"{"t":"score","board":"taxi","v":420}"#)).await.unwrap();
+    a.send(Message::text(r#"{"t":"chat","ch":"g","text":"scored"}"#)).await.unwrap();
+    next_json(&mut a, |m| m["text"] == "scored").await; // (the score was handled before this came back)
+    let b: Value = serde_json::from_str(&get(&addr, "/live/boards").await).unwrap();
+    assert_eq!(b["boards"]["taxi"][0]["v"], 420);
 }
 
 #[tokio::test]

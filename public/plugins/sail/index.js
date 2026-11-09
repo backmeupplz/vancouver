@@ -9,7 +9,7 @@
 // to do next. The shore comes from the map tiles' water masks (the coarse base map until they load): the boat bumps
 // and stops there. Ships (city.ships), bridge piers (city.landmarks.piers) and other players (city.multiplayer) are
 // solid too. Published as city.player { mode: 'boat' }, with city.models.boat for others.
-import { kit, kitMaterial } from '../../core/kit.js'
+import { kit, kitMaterial, repaint } from '../../core/kit.js'
 import { makeWater } from './water.js'
 import { makeGoals, fmtTime } from './goals.js'
 import { clamp, smooth, wrap, circleBox } from '../../core/util.js'
@@ -376,6 +376,8 @@ export default function sail(city) {
     document.body.classList.toggle('dlv-touchy', touchy)
     pose(0)
     publish()
+    const hue = city.progress?.choice('boat')?.value || COLOUR // the hull colour picked in the progress panel
+    if (hue !== player.colour) { repaint(THREE, boat, player.colour, hue); player.colour = hue }
     city.player = player; city.emit('player', player)
   }
   function exit() {

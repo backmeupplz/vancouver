@@ -20,6 +20,7 @@
 // rear section towed about its joint, the tail swinging out round a tight turn.
 // Or Rush Fare (taxi.js, cabs.js): an arcade cab shift against the clock, with van.js's arcade numbers (taxiSpec): drifts
 // on the handbrake, a nitro boost, air off crests and deck ends (the cab's lift over the road, fly()).
+import { repaint } from '../../core/kit.js'
 import { makeVan, newVan, stepVan, jolt, VAN, BUS as CITYBUS, ARTIC } from './van.js'
 import { openGarage, taxiGame, specOf, CABS, DRIVERS, makeCab, CSS as TAXI_CSS } from './taxi.js'
 import { makeBus, setDoors } from './bus.js'
@@ -323,6 +324,8 @@ export default function drive(city) {
   // ================================================================ scene objects
   const COLOUR = '#f2a07e' // the Salmonberry van
   const van = makeVan(THREE, COLOUR), walker = makeWalker(THREE)
+  let vanColour = COLOUR // the colour picked in the progress panel, painted on when a drive starts
+  const paintVan = () => { const c = city.progress?.choice('van')?.value || COLOUR; if (c !== vanColour) { repaint(THREE, van, vanColour, c); vanColour = c; if (city.player) city.player.colour = c } }
   let vehicle = van // what is driven: the van, or a bus (bus.js)
   // model factories, so other players (multiplayer) look like this one
   city.models = { ...city.models, van: (colour = COLOUR) => makeVan(THREE, colour), person: (colour) => makeWalker(THREE, colour), bus: () => makeBus(THREE, {}) }
@@ -427,7 +430,7 @@ export default function drive(city) {
     sh.curve = clip; pk.type = 'peaking'; pk.frequency.value = 1900; pk.Q.value = 2.2; pk.gain.value = 8; lp.type = 'lowpass'; lp.frequency.value = 4000
     sh.connect(pk); pk.connect(lp); lp.connect(out); out.connect(master)
     out.gain.setValueAtTime(0, t); out.gain.linearRampToValueAtTime(0.06, t + 0.012)
-    const oscs = [418, 526].map((f) => {
+    const oscs = (city.progress?.choice('horn')?.value || [418, 526]).map((f) => {
       const o = ac.createOscillator(), g = ac.createGain()
       o.type = 'sawtooth'; o.frequency.setValueAtTime(f * 0.94, t); o.frequency.exponentialRampToValueAtTime(f, t + 0.05)
       g.gain.value = 0.45; o.connect(g); g.connect(sh); o.start(t)
@@ -787,6 +790,7 @@ export default function drive(city) {
       game = busGame(busCtx(), at.pick, at.data)
       spot = busSpawn = game.startAt(at.pick.from, at.x, at.y)
     }
+    paintVan()
     if (kind === 'taxi') vehicle = makeCab(THREE, CABS[taxiChoice.cab], taxiChoice.livery, DRIVERS[taxiChoice.driver])
     if (onFoot) {
       Object.assign(man, { x: spot.x, y: spot.y, yaw: spot.yaw, speed: 0, board: null, stamina: 1, winded: false, roof: undefined })
@@ -1166,7 +1170,7 @@ export default function drive(city) {
   function publishPlayer(emit) { // city.player (player-contract): where the user is, read by others every frame
     const P = body()
     if (state === 'off' || state === 'pick') { if (city.player) { city.player = null; city.emit('player', null) } return }
-    const p = city.player || (city.player = { vehicle: 'van', colour: COLOUR })
+    const p = city.player || (city.player = { vehicle: 'van', colour: vanColour })
     p.mode = onFoot ? 'foot' : game ? 'bus' : 'car'; p.vehicle = game ? 'bus' : taxi ? 'taxi' : 'van'; p.x = P.x; p.y = P.h; p.z = -P.y; p.heading = wrap(P.yaw + Math.PI); p.speed = P.speed
     if (emit) city.emit('player', p)
   }

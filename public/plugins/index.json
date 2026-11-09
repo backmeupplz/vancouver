@@ -7,6 +7,7 @@
 "plugins/landmarks/index.js",
 "plugins/drive/index.js",
 "plugins/sail/index.js",
+"plugins/progress/index.js",
 "plugins/life/index.js",
 "plugins/signs/index.js",
 "plugins/multiplayer/index.js"

@@ -203,6 +203,45 @@ Plugins may import from `core/` (relative paths, e.g. `'../../core/util.js'`):
   button, the music player and toasts make room for the controls. On phones a floating ⋯ (the sheet, see `inMenu`)
   sits at the top right, 84 px in from the edge: keep your Back to map button in the 78 px to its right.
 
+## Progress: cash, XP, levels, collectibles, dailies, leaderboards
+
+`plugins/progress` ties the modes together and publishes `city.progress`. It can be switched off, so always call it
+as `city.progress?.…` (it is there before any game can start: plugins load in `index.json` order, and it never
+throws). Everything is kept in `localStorage` (`progress.v1`); no accounts. **This contract is stable.**
+
+- `city.progress.award(kind, amount = 0, meta = {})` → `{ cash, xp, level }`. The player earned something: `amount`
+  dollars of cash (0–5000 a call, clamped) and as much XP (or `meta.xp`). `kind` is a short lowercase name of what was
+  done; each call also counts as the stats `kind` (+1) and `kind.cash` (+amount), which the daily challenges read.
+  Use these kinds where they fit (anything else works too and just pays): `delivery` (one parcel dropped off),
+  `fare` (one Rush Fare passenger dropped off), `bus` (one bus stop served), `sail` (a sight collected, a buoy race
+  finished), `hike` (a trail or summit finished), `stunt` (a jump, drift, near miss, combo: small amounts).
+  `meta`: `{ xp, label, score, board, quiet }`. `label` is the toast text (default: none for under $20, else
+  `+$amount`); `quiet: true` never toasts (use it for a stream of small awards; awards that do toast add up in one pop while it is on screen);
+  `score` (with optional `board`, default `kind`) also reports a finished run, see `score()`.
+  Award when the thing happens, not per frame: at most a few calls a second.
+- `city.progress.score(board, value)` → `true` when it is the player's best. A finished run's score for the
+  leaderboard `board` (`[a-z][a-z0-9-]{0,15}`; in use: `delivery` cash in one shift, `taxi` fares in one Rush Fare run,
+  `bus` a bus shift's score, `sail` a race's points, `hike` metres climbed in one hike; new ones just appear in the
+  panel). An integer 0–10 000 000, **higher is better** (for a time, pass points that fall with the seconds). Call it
+  once, when the run ends. The best is kept locally and sent to the live server (name from the multiplayer plugin).
+- `city.progress.stat(name, delta = 1)` → the new lifetime total. A counter of your own (`'taxi.combo'`,
+  `'sail.gybes'`); totals show in the panel when a daily challenge or unlock uses them. Distances are counted for you
+  from `city.player` (`km.car`, `km.bus`, `km.foot`, `km.boat`, and `climb` in metres on foot): don't report those.
+- `city.progress.unlocked(id)` → boolean. Ids are `slot:name`: `van:<name>` (van colours), `horn:<name>`,
+  `boat:<name>` (hull colours), `cab:<index>` (Rush Fare cabs, the index into `CABS`; the garage's Start button asks). Unknown ids are unlocked
+  (`true`), so gating by an id the progress plugin doesn't know never locks anyone out; the basic modes are never
+  gated.
+- `city.progress.choice(slot)` → what the player picked for `'van' | 'horn' | 'boat'` in the panel: `{ id, name,
+  value }` (`value`: a CSS colour for `van` / `boat`, the horn's oscillator frequencies in Hz for `horn`), or `null` for the default. Read it
+  when the game starts (and on `'progress:choice'`).
+- `city.progress.level`, `.xp`, `.cash`, `.stats` (read-only snapshot values).
+- Events on `city.on`: `'progress:award'` `({ kind, amount, xp, meta })`, `'progress:level'` `(level)`,
+  `'progress:unlock'` `({ id, name })`, `'progress:collect'` `({ id, name, area })`, `'progress:choice'` `(slot)`.
+
+Collectibles (the hidden maple leaves all over the map) are picked up by `city.player` coming within a few metres,
+in any mode: games need to do nothing for them. Scores go to the live server as `{t:'score', board, v}` through
+`city.multiplayer.send` and come back from `GET /live/boards` (server/src/world.rs).
+
 ## Traffic
 
 The life plugin publishes `city.traffic` when it starts and emits `'traffic:ready'` with it, so a game can bump

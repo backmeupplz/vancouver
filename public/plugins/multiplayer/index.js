@@ -715,6 +715,8 @@ export default function multiplayer(city) {
       return out
     },
     get connected() { return connected },
+    get name() { return me.name },
+    send: out, // a message for the live server (the progress plugin's scores)
   }
 
   connect()
