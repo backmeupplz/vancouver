@@ -8,6 +8,7 @@
 // (c) OpenStreetMap contributors, ODbL. Built into data/ by tools/transit_data.py (format documented there).
 
 import { vancouver, getJSON } from '../../core/util.js'
+import { kit } from '../../core/kit.js'
 
 const DATA = new URL('./data/', import.meta.url)
 const BUS_ZOOM = 0.07 // below this a bus is about a pixel wide: not drawn, its data not fetched
@@ -131,21 +132,32 @@ const KINDS = {
   wceLoco: { L: 20, parts: () => [...body(20, 4.6, 3.0, { base: C.purple, band: C.white, stripe: C.white, stripe2: C.yellow, win: [0.6, 0.62] }), [3, 0.9, 2.6, 7.6, 4.6, 0, C.purple], [2.4, 0.9, 2.9, 8.6, 3.2, 0, C.glass]] },
   wceCoach: { L: 25.9, parts: () => [...body(25.9, 5.8, 3.0, { stripe: C.purple, stripe2: C.purple, win: [0.35, 0.5] }), [25.0, 0.6, 3.04, 0, 3.7, 0, C.glass]] },
   seabus: { L: 34, parts: () => [[34, 1.8, 11.5, 0, -0.8, 0, C.hull], [33, 0.35, 11.6, 0, 0.95, 0, C.yellow], [30, 3.2, 10, 0, 1.3, 0, C.white], [29, 1.3, 10.1, 0, 2.6, 0, C.glass], [30.1, 1.2, 8, 0, 2.6, 0, C.glass], [9, 1.8, 6, 0, 4.5, 0, C.white], [9.1, 0.8, 6.1, 0, 5.2, 0, C.glass]] },
-  bus12: { L: 12.2, parts: () => bus(12.2) },
-  bus18: { L: 18.3, parts: () => [...bus(18.3), [1.2, 2.6, 2.4, 1.0, 0.45, 0, C.dark]] },
-  trolley12: { L: 12.2, parts: () => [...bus(12.2), ...poles(12.2)] },
-  trolley18: { L: 18.3, parts: () => [...bus(18.3), [1.2, 2.6, 2.4, 1.0, 0.45, 0, C.dark], ...poles(18.3)] },
+  bus12: { L: 12.2, geo: (THREE) => busGeo(THREE, 12.2) },
+  bus18: { L: 18.3, geo: (THREE) => busGeo(THREE, 18.3, true) },
+  trolley12: { L: 12.2, geo: (THREE) => busGeo(THREE, 12.2, false, true) },
+  trolley18: { L: 18.3, geo: (THREE) => busGeo(THREE, 18.3, true, true) },
 }
-function bus(L) {
-  return [
-    ...body(L, 3.2, 2.55, { floor: 0.45, stripe: C.blue, stripe2: C.yellow, win: [0.42, 0.85] }),
-    [L * 0.18, 0.35, 2.3, L * 0.3, 3.2, 0, C.grey], // roof equipment
-    ...[-1, 1].flatMap((sd) => [[1.0, 0.9, 0.3, L * 0.33, 0, sd * 1.15, C.dark], [1.0, 0.9, 0.3, -L * 0.28, 0, sd * 1.15, C.dark]]), // wheels
-  ]
-}
-function poles(L) { // two trolley poles from the rear of the roof up towards the wires
-  const len = 6.2, tilt = Math.PI - 0.32
-  return [[1.6, 0.4, 1.4, -L / 2 + 3.4, 3.2, 0, C.dark], ...[-0.3, 0.3].map((z) => [len, 0.16, 0.16, -L / 2 + 2.9 - (len / 2) * Math.cos(0.32), 3.55 - 0.08 + (len / 2) * Math.sin(0.32) - 0.0, z, C.dark, tilt])]
+// A city bus (12 m, or 18 m articulated: one rigid model with its bellows), front +x, built with the kit: a body
+// with a raked windscreen and rounded roof ends, the window band, the blue and yellow stripes, a lit-looking sign,
+// wheels in their arches, roof equipment, and a trolleybus's two poles up to the wires
+function busGeo(THREE, L, artic = false, trolley = false) {
+  const k = kit(THREE), h = L / 2, W = 1.275
+  k.c(C.white).prism([-h, 0.45, h - 0.1, 0.45, h, 0.9, h, 2.1, h - 0.22, 3.1, h - 0.5, 3.2, -h + 0.25, 3.2, -h, 3.0], -W, W,
+    { edge: (i, nx, ny, y) => { if (nx > 0.4 && y > 1.2) k.c(C.glass); else if (ny < -0.5) k.c(C.dark) } })
+  k.c(C.glass).box(-h + 0.5, h - 0.9, 1.6, 2.75, -W - 0.02, W + 0.02).box(-h - 0.02, -h + 0.3, 1.9, 2.7, -0.9, 0.9) // windows: sides, rear
+  k.c(C.blue).box(-h + 0.01, h - 0.3, 0.72, 1.0, -W - 0.025, W + 0.025).c(C.yellow).box(-h + 0.01, h - 0.3, 1.08, 1.2, -W - 0.025, W + 0.025)
+  k.c(0xf2a81c).box(h - 0.42, h - 0.2, 2.8, 3.05, -0.85, 0.85) // the destination sign
+  k.c(C.dark).box(h - 0.05, h + 0.1, 0.4, 0.75, -W, W).box(-h - 0.1, -h + 0.05, 0.4, 0.75, -W, W) // bumpers
+  k.c(0xfff2d0).box(h - 0.02, h + 0.03, 0.95, 1.12, 0.7, 1.15).box(h - 0.02, h + 0.03, 0.95, 1.12, -1.15, -0.7)
+  k.c(0xb3121a).box(-h - 0.03, -h + 0.02, 1.2, 1.55, 0.85, 1.15).box(-h - 0.03, -h + 0.02, 1.2, 1.55, -1.15, -0.85)
+  k.c(C.grey).box(L * 0.1, L * 0.36, 3.2, 3.5, -1.0, 1.0, 0.92) // roof equipment
+  for (const x of artic ? [h - 2.9, 0.6, -h + 3.2] : [h - 2.9, -h + 3.4]) for (const s of [-1, 1]) k.c(0x1d1f22).wheel(x, 0.5, s * 1.14, 0.5, 0.3, 6)
+  if (artic) k.c(C.dark).box(1.9, 3.1, 0.5, 3.24, -W - 0.03, W + 0.03) // the bellows
+  if (trolley) {
+    k.c(C.dark).box(-h + 2.6, -h + 4.2, 3.2, 3.55, -0.7, 0.7)
+    for (const z of [-0.3, 0.3]) k.rod([-h + 3.4, 3.5, z], [-h - 2.4, 5.45, z], 0.07, 0.05, 4)
+  }
+  return k.geometry(true)
 }
 
 // trains per line; a trip's train is picked by hashing its start time (TransLink publishes no fleet assignment)
@@ -266,7 +278,7 @@ export default async function transit(city) {
   const group = new THREE.Group()
   group.name = 'transit'
   for (const [k, def] of Object.entries(KINDS)) {
-    const m = new THREE.InstancedMesh(carGeo(THREE, def.parts()), mat, cap[k])
+    const m = new THREE.InstancedMesh(def.geo ? def.geo(THREE) : carGeo(THREE, def.parts()), mat, cap[k])
     m.count = 0; m.frustumCulled = false; m.receiveShadow = true
     m.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
     meshes[k] = m; group.add(m)

@@ -43,4 +43,5 @@ look; PLUGINS.md is the plugin contract. Read the parts you need, not the whole 
 - Drift over a long map session (#548): `node tools/soak.mjs --out /tmp/soak --mins 8` (start vs end shots per view, quality/tiles/GPU log)
 - Perf: `node tools/bench.mjs --dpr 2 --tier high --cpu 4 --secs 20 map|drive|sail` prints one JSON line (p50/p95/p99, over33, tris, calls, gpuMs)
 - Look: `uv run --with pillow python3 tools/sheet.py /tmp/s/sheet.jpg /tmp/s/*.png --cols 3` then view only the sheet
+- Models: `node tools/models.mjs --out /tmp/m --only cars,people --hour 13,22` (the viewer: each code-built model in four views with triangle counts, one PNG per group and hour; groups player, cars, far, people, boats)
 - Both node tools use Playwright from `/Users/borodutch/code/agentboard/`, start their own server, and need `public/tiles` symlinked.

@@ -52,7 +52,6 @@ export function makeVan(THREE, colour = 0xf2a07e) { // colour: the body (a hex n
   // the back: two doors with little windows and a handle
   k.c(DARK).box(-2.17, -2.14, 0.5, 2.0, -0.012, 0.012).c(GLASS).box(-2.17, -2.14, 1.5, 1.92, -0.76, -0.08).box(-2.17, -2.14, 1.5, 1.92, 0.08, 0.76)
   k.c(TRIM).box(-2.18, -2.15, 1.3, 1.34, 0.06, 0.24)
-  k.c(0xd88a1c); for (const s of [-1, 1]) k.box(2.06, 2.16, 0.8, 0.88, s * 0.82, s * 0.9).box(-2.17, -2.13, 0.76, 0.84, s * 0.74, s * 0.86) // indicators
   // the roof rack and parcels strapped to it
   k.c(TRIM); for (const s of [-1, 1]) k.box(-1.8, 0.55, 2.13, 2.2, s * 0.62, s * 0.7)
   for (const x of [-1.6, -0.6, 0.35]) k.box(x, x + 0.06, 2.18, 2.22, -0.7, 0.7)
@@ -66,9 +65,22 @@ export function makeVan(THREE, colour = 0xf2a07e) { // colour: the body (a hex n
   // lamps: headlights and tail lights, their own materials so the drive plugin can turn them up at night
   const [headL, tailL] = lamps(THREE, night)
   const hl = kit(THREE), tl = kit(THREE)
-  for (const s of [-1, 1]) { hl.c(0xffffff).box(2.08, 2.18, 0.86, 1.0, s * 0.42, s * 0.8, 1, 0.92); tl.c(0xffffff).box(-2.19, -2.13, 0.9, 1.3, s * 0.72, s * 0.87) }
+  for (const s of [-1, 1]) { hl.c(0xffffff).box(2.08, 2.18, 0.86, 1.0, s * 0.42, s * 0.8, 1, 0.92); tl.c(0xffffff).box(-2.19, -2.13, 1.14, 1.3, s * 0.72, s * 0.87) }
   add(hl.geometry(true), headL); add(tl.geometry(true), tailL)
   van.userData.lights = [headL, tailL]
+  // the lamps that signal: brake lights (and a high one), reversing lights, indicators (left, right), dark until lit
+  const sig = (hex) => shaded(new THREE.MeshLambertMaterial({ color: hex, emissive: hex, emissiveIntensity: 0.04, flatShading: true }), night)
+  const brakeM = sig(0xff2a1e), revM = sig(0xf4f2e6), indM = [-1, 1].map(() => sig(0xffa21a)), bk = kit(THREE), rk = kit(THREE)
+  bk.c(0xffffff).box(-2.185, -2.15, 2.0, 2.05, -0.3, 0.3)
+  for (const s of [-1, 1]) { bk.box(-2.19, -2.13, 0.98, 1.12, s * 0.72, s * 0.87); rk.c(0xffffff).box(-2.19, -2.13, 0.78, 0.86, s * 0.74, s * 0.86) }
+  add(bk.geometry(true), brakeM); add(rk.geometry(true), revM)
+  for (const [i, s] of [-1, 1].entries()) { const ik = kit(THREE); ik.c(0xffffff).box(2.06, 2.16, 0.8, 0.88, s * 0.82, s * 0.9).box(-2.19, -2.13, 0.88, 0.96, s * 0.74, s * 0.86).box(1.3, 1.36, 1.46, 1.5, s * 1.0, s * 1.065); add(ik.geometry(true), indM[i]) }
+  // c: the van's state (newVan()), t: seconds. Braking, reversing, and indicating into a slow turn
+  van.userData.signal = (c, t) => {
+    const blink = Math.abs(c.steer) > 0.2 && Math.abs(c.speed) < 9 && (t * 1.5) % 1 < 0.5
+    brakeM.emissiveIntensity = c.brk > 0.05 ? 2.2 : 0.04; revM.emissiveIntensity = c.gear < 0 ? 1.8 : 0.04
+    indM[0].emissiveIntensity = blink && c.steer > 0 ? 2 : 0.04; indM[1].emissiveIntensity = blink && c.steer < 0 ? 2 : 0.04
+  }
   // the name on both sides of the cargo box
   const decal = new THREE.MeshLambertMaterial({ map: liveryTexture(THREE), transparent: true, alphaTest: 0.3, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })
   for (const s of [-1, 1]) {
@@ -80,7 +92,8 @@ export function makeVan(THREE, colour = 0xf2a07e) { // colour: the body (a hex n
   const wheels = []
   for (const [x, z] of [[-0.82, -1.35], [0.82, -1.35], [-0.82, 1.35], [0.82, 1.35]]) {
     const w = kit(THREE), o = Math.sign(x)
-    w.c(0x2b2e33).wheel(0, 0, 0, 0.36, 0.24, 12, 'x').c(0xd8d8d2).wheel(o * 0.125, 0, 0, 0.21, 0.02, 8, 'x').c(0x6b7078).wheel(o * 0.14, 0, 0, 0.07, 0.02, 6, 'x')
+    w.c(0x2b2e33).wheel(0, 0, 0, 0.36, 0.24, 12, 'x').c(0x3a3e44).wheel(o * 0.118, 0, 0, 0.25, 0.02, 10, 'x').c(0x6b7078).wheel(o * 0.14, 0, 0, 0.075, 0.03, 6, 'x')
+    w.c(0xd8d8d2); for (let i = 0; i < 5; i++) { const a = w.at(); w.box(o * 0.12, o * 0.145, 0.04, 0.25, -0.035, 0.035, 1, 1.6); w.rot(a, 'x', (i * Math.PI * 2) / 5) } // five spokes, so the spin shows
     const g = w.geometry(true)
     const steer = new THREE.Group(); steer.position.set(x, 0.36, z)
     const spin = new THREE.Group()

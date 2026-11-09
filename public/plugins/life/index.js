@@ -7,13 +7,15 @@
 // It publishes city.traffic (see PLUGINS.md): where the cars, people and signal poles are, obstacles (a player's van)
 // they brake for, and bumps (a car hit stops a moment, a person knocked stumbles or falls over and gets up again).
 
-import { carModels, peopleModels, signalModels, postModel, DETAIL, ARM_Y, ARM_BLADE, POST_BLADES, LENSES, POLE_LENSES, PED_LENSES } from './models.js'
+import { kit } from '../../core/kit.js'
+import { carModels, peopleModels, farModels, lifeMaterial, H, OUTFIT, signalModels, postModel, DETAIL, ARM_Y, ARM_BLADE, POST_BLADES, LENSES, POLE_LENSES, PED_LENSES } from './models.js'
 import { blades } from './blades.js'
-import { kit, SHADE } from '../../core/kit.js'
+
 import { vancouver } from '../../core/util.js'
 import { nearestStreet } from '../../core/streets.js'
 
 const CAR_ZOOM = 0.08, PEOPLE_ZOOM = 0.25
+const MAP_NEAR = 1.4 // the map's zoom from which it draws the detailed models too (a car 40 px long)
 const NEAR = [150, 70, 240, 150], SIG_CAP = 200, POST_CAP = 150 // metres (cars, people, signals, street names): under a perspective camera, the detailed models (models.js) within these, times the quality tier's `near`
 const KEY = 'vancouver.life'
 const MOBILE = matchMedia('(pointer: coarse)').matches || innerWidth < 700
@@ -32,124 +34,8 @@ export default function life(city) {
   const nearRadii = () => { [NEAR_CARS, NEAR_PEOPLE, SIG_NEAR, NAME_NEAR] = NEAR.map((r) => r * (city.quality?.tier.near ?? 1)) }
   nearRadii()
   const nearCars = { value: 0 }, nearPeople = { value: 0 }
-  // boxes: [x0, x1, y0, y1, z half-width, colour (null = the instance's colour), part, taper (top scale), swing, z centre]
-  // parts: cars 0 body, 1 fixed colour, 2 headlight, 3 taillight, 4/5 police beacons, 6 taxi sign, 7/8 left/right blinkers;
-  // people 0 shirt, 1 trousers, 2 skin, 3 hair, 4 fixed, 5 bike frame (the shirt a shade darker), 6 umbrella (models.js).
-  // swing: ±1 legs, ±2 arms (left/right)
-  function model(boxes, plain = false) { // (plain: vertex colours, for a plain material; core/kit.js)
-    const k = kit(THREE)
-    for (const [x0, x1, y0, y1, hw, c, part = c == null ? 0 : 1, taper = 1, swing = 0, zc = 0] of boxes) k.c(c, part, swing).box(x0, x1, y0, y1, zc - hw, zc + hw, taper)
-    return k.geometry(plain)
-  }
-  const TYRE = 0x1d1f22, GLASS = 0x2c3c4e, HEAD = 0xfff2d0, TAIL = 0xb3121a
-  const AMBER = 0xd88a1c
-  // blinker lamps at the four corners: drawn only while that side blinks (collapsed in the shader otherwise)
-  const blinkers = (f, r, y0, y1, z) => [7, 8].flatMap((part) => [f - 0.06, r - 0.04].map((x) => [x, x + 0.1, y0 - 0.02, y1 + 0.02, 0.2, AMBER, part, 1, 0, (part === 7 ? -1 : 1) * (z - 0.18)]))
-  const wheels = (xs, r, side) => xs.flatMap((x) => [-side, side].map((z) => [x - r, x + r, 0, 2 * r, 0.13, TYRE, 1, 1, 0, z]))
-  const sedan = (extra = []) => model([
-    [-2.25, 2.25, 0.3, 0.95, 0.9, null], // body
-    [-1.15, 0.85, 0.95, 1.45, 0.8, GLASS, 1, 0.82], // cabin glass
-    [-1.0, 0.6, 1.45, 1.5, 0.66, null], // roof
-    [2.2, 2.27, 0.62, 0.8, 0.75, HEAD, 2], [-2.27, -2.2, 0.66, 0.84, 0.78, TAIL, 3],
-    ...wheels([-1.38, 1.38], 0.33, 0.8), ...blinkers(2.25, -2.25, 0.62, 0.8, 0.9), ...extra,
-  ])
-  const MODELS = [
-    sedan(),
-    model([ // suv
-      [-2.4, 2.4, 0.38, 1.15, 0.95, null], [-1.95, 1.0, 1.15, 1.78, 0.88, GLASS, 1, 0.9], [-1.85, 0.8, 1.78, 1.84, 0.8, null],
-      [2.35, 2.42, 0.78, 0.98, 0.8, HEAD, 2], [-2.42, -2.35, 0.82, 1.02, 0.82, TAIL, 3], ...wheels([-1.5, 1.5], 0.38, 0.85), ...blinkers(2.4, -2.4, 0.8, 0.98, 0.95),
-    ]),
-    model([ // van
-      [-2.7, 2.7, 0.36, 1.15, 1.0, null], [-2.7, 1.25, 1.15, 2.35, 1.0, null], [1.25, 1.95, 1.15, 2.05, 0.96, GLASS, 1, 0.9],
-      [2.65, 2.72, 0.7, 0.92, 0.85, HEAD, 2], [-2.72, -2.65, 0.8, 1.05, 0.88, TAIL, 3], ...wheels([-1.85, 1.75], 0.36, 0.9), ...blinkers(2.7, -2.7, 0.72, 0.92, 1.0),
-    ]),
-    model([ // truck: cab and a box
-      [-4.3, 4.3, 0.42, 0.9, 1.05, 0x2a2c30, 1], [2.55, 4.3, 0.9, 2.85, 1.2, null], [4.27, 4.33, 1.75, 2.6, 1.05, GLASS, 1],
-      [-4.3, 2.4, 0.9, 3.7, 1.25, 0xeeeee8, 1],
-      [4.28, 4.35, 0.95, 1.2, 0.9, HEAD, 2], [-4.35, -4.28, 1.0, 1.25, 1.0, TAIL, 3], ...wheels([-3.2, -2.1, 3.3], 0.45, 1.0), ...blinkers(4.3, -4.3, 1.0, 1.22, 1.15),
-    ]),
-    sedan([[-0.45, 0.05, 1.5, 1.74, 0.32, 0xfaf6e8, 6]]), // taxi: roof sign
-    sedan([[-1.25, 1.25, 0.36, 0.86, 0.91, 0x15171a, 1], [-0.3, 0.0, 1.5, 1.64, 0.3, 0xff2020, 4, 1, 0, -0.32], [-0.3, 0.0, 1.5, 1.64, 0.3, 0x2050ff, 5, 1, 0, 0.32]]), // police
-  ]
-  const H = 1.08 // people a touch larger than life, so they read at street zoom
-  const person = model([
-    [-0.08, 0.08, 0, 0.86, 0.075, null, 1, 1, 1, 0.1], [-0.08, 0.08, 0, 0.86, 0.075, null, 1, 1, -1, -0.1], // legs
-    [-0.12, 0.12, 0.84, 1.42, 0.2, null, 0, 0.92], // torso
-    [-0.06, 0.06, 0.86, 1.4, 0.06, null, 0, 1, 2, 0.27], [-0.06, 0.06, 0.86, 1.4, 0.06, null, 0, 1, -2, -0.27], // arms
-    [-0.11, 0.11, 1.45, 1.7, 0.1, null, 2], // head
-    [-0.13, 0.1, 1.64, 1.75, 0.115, null, 3], // hair
-  ])
-  person.scale(H, H, H)
-  const bike = model([
-    [-0.85, -0.2, 0, 0.66, 0.03, 0x222428, 4], [0.2, 0.85, 0, 0.66, 0.03, 0x222428, 4], [-0.55, 0.55, 0.55, 0.62, 0.035, null, 5], // wheels, frame
-    [0.45, 0.55, 0.6, 1.0, 0.03, 0x333333, 4], [0.42, 0.5, 1.0, 1.04, 0.3, 0x333333, 4], [-0.35, -0.12, 0.9, 0.95, 0.08, 0x222222, 4], // fork, bars, saddle
-    [-0.08, 0.08, 0.15, 0.95, 0.07, null, 1, 1, 1, 0.12], [-0.08, 0.08, 0.15, 0.95, 0.07, null, 1, 1, -1, -0.12], // legs
-    [-0.38, -0.02, 0.92, 1.5, 0.19, null, 0, 0.85], [-0.27, -0.05, 1.52, 1.76, 0.1, null, 2], [-0.29, -0.07, 1.7, 1.8, 0.11, null, 3],
-    [-0.2, 0.45, 1.25, 1.33, 0.05, null, 0, 1, 0, 0.24], [-0.2, 0.45, 1.25, 1.33, 0.05, null, 0, 1, 0, -0.24], // arms to the bars
-  ])
-
-  // kind: 'car', 'person' or 'bike'; hide: a { value } uniform, the squared radius around uCam within which these
-  // boxes are not drawn (the detailed models are), or null for the detailed models themselves
-  function material(kind, hide = null) {
-    const m = new THREE.MeshLambertMaterial({ color: 0xffffff })
-    m.onBeforeCompile = (s) => {
-      Object.assign(s.uniforms, uni, hide ? { uNear: hide } : {})
-      s.vertexShader = s.vertexShader
-        .replace('#include <common>', `#include <common>
-          attribute vec4 iA, iB; attribute vec3 aCol; attribute float aPart, aSwing; uniform float uNight, uTime, uRain${hide ? ', uNear' : ''}; uniform vec3 uCam;
-          varying vec3 vCol, vEmit; ${SHADE.vars}
-          vec3 unpack(float c) { float r = floor(c / 65536.0), g = floor((c - r * 65536.0) / 256.0), b = c - r * 65536.0 - g * 256.0; return pow(vec3(r, g, b) / 255.0, vec3(2.2)); }
-          vec3 orient(vec3 p, float yaw, float pitch) {
-            float cp = cos(pitch), sp = sin(pitch); p = vec3(p.x * cp - p.y * sp, p.x * sp + p.y * cp, p.z);
-            float cy = cos(yaw), sy = sin(yaw); return vec3(p.x * cy + p.z * sy, p.y, -p.x * sy + p.z * cy);
-          }
-          vec2 rot(vec2 v, vec2 c, float a) { v -= c; return c + vec2(v.x * cos(a) - v.y * sin(a), v.x * sin(a) + v.y * cos(a)); }`)
-        .replace('#include <beginnormal_vertex>', `vec3 P0 = position, N0 = normal; float pitch = 0.0;
-          ${kind === 'car' ? `pitch = iB.x;
-            vec3 col = aPart < 0.5 ? unpack(iB.y) : aCol;
-            vec3 em = vec3(0.0);
-            if (aPart > 1.5 && aPart < 2.5) em = vec3(1.0, 0.85, 0.6) * uNight * 3.0;
-            else if (aPart > 2.5 && aPart < 3.5) em = vec3(1.0, 0.04, 0.02) * (uNight * 1.5 + mod(iB.z, 2.0) * 1.2);
-            else if (aPart > 6.5) {
-              if (abs(floor(iB.z * 0.5 + 0.01) - (aPart - 6.0)) > 0.5) P0 = vec3(0.0);
-              em = vec3(1.0, 0.42, 0.0) * 1.3 * step(0.5, fract(uTime * 1.5 + iB.w * 5.0));
-            }
-            else if (aPart > 3.5 && aPart < 5.5) em = aCol * 2.0 * step(0.5, fract(uTime * 2.2 + iB.w * 7.0 + (aPart > 4.5 ? 0.5 : 0.0)));
-            else if (aPart > 5.5) em = vec3(0.9, 0.75, 0.3) * uNight;` : `
-            float pose = floor(iB.y + 0.001), seed = fract(iB.y) / 0.9;
-            vec3 skin[4] = vec3[](vec3(0.98, 0.80, 0.66), vec3(0.87, 0.65, 0.48), vec3(0.62, 0.43, 0.29), vec3(0.40, 0.27, 0.18));
-            vec3 hair[5] = vec3[](vec3(0.12, 0.09, 0.07), vec3(0.35, 0.22, 0.12), vec3(0.85, 0.70, 0.40), vec3(0.55, 0.55, 0.55), vec3(0.05, 0.05, 0.06));
-            vec3 umbs[4] = vec3[](vec3(0.08, 0.1, 0.16), vec3(0.75, 0.12, 0.14), vec3(0.95, 0.75, 0.15), vec3(0.15, 0.4, 0.6));
-            vec3 col = aPart < 0.5 ? unpack(iB.z) : aPart < 1.5 ? unpack(iB.w) : aPart < 2.5 ? pow(skin[int(seed * 3.99)], vec3(2.2))
-              : aPart < 3.5 ? pow(hair[int(fract(seed * 7.13) * 4.99)], vec3(2.2)) : aPart > 5.5 ? pow(umbs[int(fract(seed * 3.7) * 3.99)], vec3(2.2)) : aPart > 4.5 ? unpack(iB.z) * 0.8 : aCol;
-            vec3 em = vec3(0.0);
-            bool umb = uRain > 0.5 && fract(seed * 7.31) < 0.6 && pose < 1.5; // an umbrella up, walking or waiting
-            if (aPart > 5.5 && !umb) P0 = vec3(0.0);
-            if (aSwing != 0.0) {
-              bool leg = abs(aSwing) < 1.5; float sd = sign(aSwing), a = 0.0;
-              vec2 piv = vec2(0.0, (leg ? ${kind === 'bike' ? '0.95' : '0.86'} : 1.38) * ${kind === 'bike' ? '1.0' : H.toFixed(3)});
-              if (pose < 0.5) a = sin(iB.x) * (leg ? 0.5 : -0.45) * sd;
-              else if (pose > 1.5 && pose < 2.5) a = leg ? 1.5708 : 0.3;
-              else if (pose > 3.5) a = leg ? 0.12 * sd : -0.9 * min(1.0, iB.x * 2.0); // knocked over: arms out
-              else if (pose > 2.5) a = 0.55 + sin(iB.x + (sd > 0.0 ? 0.0 : 3.1416)) * 0.5;
-              if (umb && aSwing > 1.5) a = 0.75; // holding it up
-              P0.xy = rot(P0.xy, piv, a); N0.xy = rot(N0.xy, vec2(0.0), a);
-            }
-            if (pose > 1.5 && pose < 2.5) P0.y -= 0.38;
-            if (pose > 3.5) pitch = iB.x; // tipping back from the feet`}
-          vCol = col; vEmit = em; ${SHADE.vert}
-          vec3 objectNormal = orient(N0, iA.w, pitch);`)
-        .replace('#include <begin_vertex>', `${kind === 'car' ? 'P0 *= 1.0 - floor(iB.w * 0.5) / 15.0; // growing in, shrinking away (worker.js output())' : ''}
-          vec3 transformed = orient(P0, iA.w, pitch) + iA.xyz;
-          ${hide ? 'vec2 dc = iA.xz - uCam.xz; if (dot(dc, dc) < uNear) transformed = vec3(0.0, -1e5, 0.0);' : ''}`)
-      s.fragmentShader = s.fragmentShader
-        .replace('#include <common>', `#include <common>\nvarying vec3 vCol, vEmit; ${SHADE.vars} uniform float uNight;`)
-        .replace('#include <color_fragment>', `diffuseColor.rgb *= vCol; ${SHADE.frag}`) // (and the shared look, kit.js)
-        .replace('#include <emissivemap_fragment>', `totalEmissiveRadiance += vEmit; ${SHADE.rim}`)
-    }
-    m.customProgramCacheKey = () => 'life-' + kind + (hide ? '-far' : '')
-    return m
-  }
+  const { cars: MODELS, person, bike } = farModels(THREE)
+  const material = (kind, hide) => lifeMaterial(THREE, uni, kind, hide)
   const group = new THREE.Group(), glowGroup = new THREE.Group()
   city.scene.add(group); city.overlay.add(glowGroup)
   // instanced meshes whose per-instance data is an 8-float interleaved buffer filled from the worker
@@ -173,7 +59,7 @@ export default function life(city) {
   const peopleNear = peopleModels(THREE).map((g) => instanced(g.scale(H, H, H), personNearMat, MAX_NEAR))
   const allNear = [...carsNear, ...peopleNear]
   const pickCar = MODELS.map((_, k) => (buf, s) => carsNear[DETAIL(k, buf[s + 7] % 2)]) // by kind and seed
-  const pickPerson = (buf, s) => peopleNear[Math.min(2, Math.floor((buf[s + 5] % 1) / 0.3))] // by seed (pose + 0.9 seed)
+  const pickPerson = (buf, s) => peopleNear[OUTFIT((buf[s + 5] % 1) / 0.9)] // by seed (pose + 0.9 seed)
   const bikes = instanced(bike, bikeMat, MAX_BIKES)
   // light on the road at night (overlay, additive): a headlight pool ahead of each car and a red glow behind,
   // sharing the cars' instance buffers. x is metres out from the bumper; z across; w: 0 ahead, 1 behind
@@ -219,6 +105,8 @@ export default function life(city) {
   const armGeo = new THREE.BoxGeometry(1, 0.16, 0.16).translate(0.5, 0, 0)
   const headGeo = new THREE.BoxGeometry(0.42, 1.15, 0.42)
   const lampGeo = new THREE.BoxGeometry(0.14, 0.28, 0.3)
+  // boxes: [x0, x1, y0, y1, z half-width, colour, part, taper (top scale), swing, z centre], as a plain kit geometry
+  const model = (boxes) => { const k = kit(THREE); for (const [x0, x1, y0, y1, hw, c, , taper = 1, , zc = 0] of boxes) k.c(c).box(x0, x1, y0, y1, zc - hw, zc + hw, taper); return k.geometry(true) }
   const benchGeo = model([[-0.24, 0.2, 0.42, 0.5, 0.8, 0x9a6a3a], [-0.26, -0.2, 0.5, 0.95, 0.8, 0x9a6a3a], [-0.2, 0.15, 0, 0.42, 0.04, 0x3a3d42, 1, 1, 0, -0.65], [-0.2, 0.15, 0, 0.42, 0.04, 0x3a3d42, 1, 1, 0, 0.65]], true)
   const greyMat = new THREE.MeshLambertMaterial({ color: 0x6b7178 }), housingMat = new THREE.MeshLambertMaterial({ color: 0xd9a51e })
   const lampMat = new THREE.MeshBasicMaterial({ color: 0xffffff })
@@ -453,8 +341,10 @@ export default function life(city) {
       if (!active) return
       // under a perspective camera the boxes within the near radii are hidden (in their shader, by uCam / uNear)
       // and those things are copied to the detailed models instead
-      const C = city.view.camera, near = !!C.isPerspectiveCamera
-      uni.uCam.value.copy(C.position); nearCars.value = near ? NEAR_CARS ** 2 : 0; nearPeople.value = near ? NEAR_PEOPLE ** 2 : 0
+      // (and on the map zoomed right in, MAP_NEAR: everything in view, about its middle)
+      const C = city.view.camera, persp = !!C.isPerspectiveCamera, close = !persp && C.zoom >= MAP_NEAR, near = persp || close
+      uni.uCam.value.copy(close ? city.controls.target : C.position)
+      nearCars.value = close ? 400 ** 2 : near ? NEAR_CARS ** 2 : 0; nearPeople.value = close ? 400 ** 2 : near ? NEAR_PEOPLE ** 2 : 0
       // the cars: positions and (id, speed), drawn every frame from here (carsAt()); the time of the tick it answers
       if (snap.raw.length < m.cars * 8) { snap.raw = new Float32Array(m.cars * 12); snap.pos = new Float32Array(m.cars * 12); snap.aux = new Float32Array(m.cars * 3) }
       snap.raw.set(m.buf.subarray(0, m.cars * 8)); snap.aux.set(m.buf.subarray(m.base, m.base + m.cars * 2))
@@ -499,7 +389,7 @@ export default function life(city) {
     for (let k = 0, off = 0; k < KINDS; k++) {
       const c = snap.counts[k] || 0, m = Math.min(c, carMeshes[k].cap)
       put(carMeshes[k], P, off, m); pools[k].geometry.instanceCount = m
-      if (near) pickNear(P, off, m, NEAR_CARS, pickCar[k])
+      if (near) pickNear(P, off, m, Math.sqrt(nearCars.value), pickCar[k])
       off += c
     }
     for (const o of carsNear) show(o, o.n)
@@ -513,7 +403,7 @@ export default function life(city) {
     for (const o of peopleNear) o.n = 0
     const np = Math.min(snap.pn, people.cap)
     put(people, Q, 0, np)
-    if (nearPeople.value > 0) pickNear(Q, 0, np, NEAR_PEOPLE, pickPerson)
+    if (nearPeople.value > 0) pickNear(Q, 0, np, Math.sqrt(nearPeople.value), pickPerson)
     for (const o of peopleNear) show(o, o.n)
     put(bikes, Q, snap.pn, Math.min(snap.bn, bikes.cap))
     // the people for city.traffic.people, while a game asks for them: x, y, z, yaw and id

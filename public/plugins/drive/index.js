@@ -1563,6 +1563,7 @@ export default function drive(city) {
       V.rotation.set(0, 0, 0)
       V.rotateY(car.yaw); V.rotateX(car.pitch + car.bp); V.rotateZ(car.roll + car.br - car.kneel * 0.025)
       for (const w of U.wheels) { w.spin.rotation.x = -car.spin; if (w.front) w.steer.rotation.y = car.steer }
+      U.signal?.(car, performance.now() / 1000)
       if (U.rear) U.rear.rotation.y = wrap(car.tyaw - car.yaw)
       blob.position.set(car.x, car.h + 0.06, -car.y); blob.rotation.set(0, car.yaw, 0)
       if (nsec === 2) { blob2.position.set(secs[1].x, car.h + 0.06, -secs[1].y); blob2.rotation.set(0, car.tyaw, 0) }

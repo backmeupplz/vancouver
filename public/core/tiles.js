@@ -66,12 +66,15 @@ function poleGeo() {
   g.userData.shared = true
   return g
 }
-// a parked car, forward +x, on the ground: a body, a glass cabin under a roof in the paint (the instance colour)
+// a parked car, forward +x, on the ground: one side profile in the paint (the instance colour) with glass where it
+// slopes, side windows, and a dark block under it for the wheels (44 triangles: there are thousands)
 function carGeo() {
   const k = kit(THREE)
-  k.c(null).box(-2.25, 2.25, 0.22, 0.85, -0.9, 0.9)
-  k.c(0x2b3a4a).box(-1.25, 1.05, 0.85, 1.32, -0.84, 0.84, 0.84, 0.86)
-  k.c(null).box(-1.05, 0.8, 1.32, 1.4, -0.7, 0.7)
+  k.c(null).prism([-2.2, 0.26, 2.2, 0.26, 2.25, 0.8, 1.15, 0.94, 0.45, 1.38, -0.85, 1.4, -1.6, 0.98, -2.25, 0.92], -0.88, 0.88,
+    { edge: (i, nx, ny, y) => { if (y > 0.95 && Math.abs(nx) > 0.4 && ny > 0.15) k.c(0x2b3a4a) } })
+  k.c(0x2b3a4a)
+  for (const s of [-1, 1]) { const z = s * 0.89, p = [[-1.45, 1.02, z], [1.0, 1.02, z], [0.5, 1.32, z], [-0.9, 1.34, z]]; if (s < 0) p.reverse(); k.quad(...p) }
+  k.c(0x1d1f22).box(-1.75, 1.75, 0, 0.3, -0.86, 0.86)
   const g = k.geometry(true)
   g.userData.shared = true
   return g

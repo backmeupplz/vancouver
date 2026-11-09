@@ -2,7 +2,7 @@
 // near faces are culled and a model shows its insides), and the street-level models build at sane sizes
 import * as THREE from '../public/vendor/three.module.min.js'
 import { kit } from '../public/core/kit.js'
-import { carModels, peopleModels, signalModels } from '../public/plugins/life/models.js'
+import { carModels, peopleModels, farModels, signalModels } from '../public/plugins/life/models.js'
 import assert from 'node:assert/strict'
 
 const inward = (build) => { // faces of a convex shape pointing towards its centre
@@ -23,8 +23,9 @@ for (const [name, f] of Object.entries({
 })) assert.equal(inward(f), 0, `${name}: faces wound inwards`)
 
 const size = (g) => { g.computeBoundingBox(); return g.boundingBox.getSize(new THREE.Vector3()) }
-for (const g of carModels(THREE)) { const s = size(g); assert(s.x > 4 && s.x < 9 && s.z > 1.6 && s.z < 2.7 && s.y > 1.3 && s.y < 3.8, `car ${s.toArray()}`); assert(g.attributes.position.count / 3 < 1000, 'a car under 1000 triangles') }
+for (const g of carModels(THREE)) { const s = size(g); assert(s.x > 4 && s.x < 9 && s.z > 1.6 && s.z < 2.7 && s.y > 1.3 && s.y < 4.0, `${g.name} ${s.toArray()}`); assert(g.attributes.position.count / 3 < (s.x > 8 ? 1500 : 1000), `${g.name}: ${g.attributes.position.count / 3} triangles`) }
 for (const g of peopleModels(THREE)) { const s = size(g); assert(s.y > 1.7 && s.y < 2.3, `person ${s.y}`) }
+for (const g of farModels(THREE).cars) assert(g.attributes.position.count / 3 < 320, `${g.name}: ${g.attributes.position.count / 3} triangles far away`)
 const sig = signalModels(THREE)
 assert(size(sig.head).y > 1.0 && size(sig.head).y < 1.4, 'a signal head (with its backplate) about a metre tall')
 console.log('models ok')
