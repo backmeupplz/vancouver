@@ -549,7 +549,7 @@ function roads(t, terr, lines, level, ps, R) {
     const S = terr.size, edgeAt = (x, y) => Math.abs(x) < 0.05 ? [0, 0] : Math.abs(x - S) < 0.05 ? [0, S] : Math.abs(y) < 0.05 ? [1, 0] : Math.abs(y - S) < 0.05 ? [1, S] : null
     const edges = [edgeAt(xs[0], ys[0]), edgeAt(xs[m - 1], ys[m - 1])]
     if (zs) for (const [i, j, e] of [[0, 1, 0], [m - 1, m - 2, 1]]) { // a deck's ends 5 cm on, under the next deck's (no hairline where two meet at a slant)
-      if (mitre?.[e]) continue // (one row with the next deck's there)
+      if (mitre?.[e] || edges[e]) continue // (one row with the next deck's there; on the tile's edge, the next tile's piece goes on from it)
       const dx = xs[i] - xs[j], dy = ys[i] - ys[j], l = Math.hypot(dx, dy)
       if (l > 0.2) { xs[i] += (dx / l) * 0.05; ys[i] += (dy / l) * 0.05 }
     }
@@ -562,8 +562,8 @@ function roads(t, terr, lines, level, ps, R) {
       const e = i === 0 ? edges[0] : i === m - 1 ? edges[1] : null
       if (e) { // on the tile's edge: both points slid along the strip onto it
         const j = i ? i - 1 : 1, dx = xs[i] - xs[j], dy = ys[i] - ys[j], d = e[0] ? dy : dx, l = Math.hypot(dx, dy) || 1
-        if (Math.abs(d / l) > 0.2) {
-          const slide = (px, py) => { const u = Math.max(-3 * half, Math.min(3 * half, (e[1] - (e[0] ? py : px)) / (d / l))); return [px + (dx / l) * u, py + (dy / l) * u] };
+        if (Math.abs(d / l) > 0.7) { // (only where it crosses the edge steeply: along it, the slide would skew the row metres along the strip)
+          const slide = (px, py) => { const u = Math.max(-1.5 * half, Math.min(1.5 * half, (e[1] - (e[0] ? py : px)) / (d / l))); return [px + (dx / l) * u, py + (dy / l) * u] };
           [lx, ly] = slide(lx, ly); [rx, ry] = slide(rx, ry)
         }
       }

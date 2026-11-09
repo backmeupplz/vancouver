@@ -35,7 +35,8 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    on from a footbridge's end down on the ground (OpenStreetMap maps no stairs there) gets stairs down along it. Then one
    solve per structure (`deck_solve`: a linear program over every deck, approach and tunnel beside them, on 4 m samples)
    gives each its one height profile: as near the LiDAR as it can, one height where ways meet, one surface where decks are
-   drawn over each other (else stacked 3.2 m apart), no steeper than its grade, on the ground where a street goes on at
+   drawn over each other (else stacked 3.2 m apart; where the LiDAR's call can't hold, a MILP over the structure decides
+   which), tunnels joined where they meet a deck, no steeper than its grade, on the ground where a street goes on at
    grade (and at a road's or rail's dead end), never under the ground, 3 m clear over the streets under it. The deck,
    its paint, the traffic and the van all read that profile. Roads up on a building (a mall's rooftop
    parking, a parkade's top deck: layer or level 1 and up, mostly over a footprint, the LiDAR well above the ground) are

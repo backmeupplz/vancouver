@@ -299,7 +299,7 @@ def _through(tile):
     index, the street's strip in it, its highest drawn surface there)]"""
     P, tree = _polys(tile)
     B, out = tile['builds'], []
-    for L in tile.get('lines', ()):
+    for L in [*tile.get('lines', ()), *tile.get('over', ())]:  # (over: the next cells' decks reaching over this one's buildings)
         if L.get('tube') or len(L['pts']) < 2 or L.get('roof'): continue
         deck = bool(L['z'])
         if not deck and not (L.get('drive') and L['kind'] in ROADS or L['kind'] in ('rail', 'lightrail')) or L.get('crossing'): continue
