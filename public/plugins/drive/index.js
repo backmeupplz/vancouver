@@ -83,7 +83,22 @@ export default function drive(city) {
         for (let k = 0; k <= n; k++) { const f = k / n || 0; put(rg, ckey(Math.floor((s.x0 + (s.x1 - s.x0) * f) / CELL), Math.floor((s.y0 + (s.y1 - s.y0) * f) / CELL)), id) }
       }
     }
-    const fp = t.footprints, bb = []
+    // footprints; then the raised parts of buildings (overhangs, skybridges: tile-worker.js overhangs), solid from the
+    // height lo[r] up; then the landmarks' outlines (the rings plugins draw their own buildings in, core/tiles.js
+    // masks: the generic buildings there, and their footprints, are left out), each in the tile its first corner is in
+    const F = t.footprints, O = t.overhangs, nF = F ? F.start.length - 1 : 0, nO = O ? O.lo.length : 0, bb = []
+    const M = (city.tiles?.masks || NONE).filter((r) => r[0][0] >= t.ox && r[0][0] < t.ox + 1024 && r[0][1] >= t.oy && r[0][1] < t.oy + 1024)
+    let fp = F, lo = null
+    if (nO || M.length) {
+      const nM = M.reduce((n, r) => n + r.length * 2, 0), o1 = F ? F.pts.length : 0, o2 = o1 + (O ? O.pts.length : 0)
+      const pts = new Float32Array(o2 + nM), start = new Uint32Array(nF + nO + M.length + 1)
+      if (F) { pts.set(F.pts); start.set(F.start) }
+      if (O) { pts.set(O.pts, o1); for (let i = 1; i <= nO; i++) start[nF + i] = o1 + O.start[i] }
+      let q = o2, k = nF + nO
+      for (const r of M) { for (const [x, y] of r) { pts[q++] = x; pts[q++] = y } start[++k] = q }
+      fp = { pts, start }; lo = new Float32Array(start.length - 1).fill(-Infinity)
+      if (O) lo.set(O.lo, nF)
+    }
     if (fp) for (let r = 0; r < fp.start.length - 1; r++) {
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
       for (let q = fp.start[r]; q < fp.start[r + 1]; q += 2) { const x = fp.pts[q], y = fp.pts[q + 1]; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y) }
@@ -92,7 +107,8 @@ export default function drive(city) {
     }
     let bx0 = t.ox, by0 = t.oy, bx1 = t.ox + 1024, by1 = t.oy + 1024 // what its roads cover: a long bridge sticks out of its tile
     for (const s of segs) { bx0 = Math.min(bx0, s.x0, s.x1); by0 = Math.min(by0, s.y0, s.y1); bx1 = Math.max(bx1, s.x0, s.x1); by1 = Math.max(by1, s.y0, s.y1) }
-    const b = { t, segs, rg, fg, fp, bb, box: [bx0, by0, bx1, by1], segSeen: new Uint32Array(segs.length), fpSeen: new Uint32Array(bb.length / 4) }
+    for (let r = 0; r < bb.length; r += 4) { bx0 = Math.min(bx0, bb[r]); by0 = Math.min(by0, bb[r + 1]); bx1 = Math.max(bx1, bb[r + 2]); by1 = Math.max(by1, bb[r + 3]) } // (a landmark's outline too)
+    const b = { t, segs, rg, fg, fp, lo, bb, box: [bx0, by0, bx1, by1], segSeen: new Uint32Array(segs.length), fpSeen: new Uint32Array(bb.length / 4) }
     furniture(b)
     return b
   }
@@ -219,8 +235,9 @@ export default function drive(city) {
       }
     })
   }
-  // push a circle out of building footprints: returns the summed push (x, y) or null
-  function collide(x, y, rad) {
+  // push a circle out of building footprints: returns the summed push (x, y) or null. h: the height it is at (the
+  // camera's), when the raised parts of buildings that reach down to there are solid too
+  function collide(x, y, rad, h = -Infinity) {
     let px = 0, py = 0, hit = false
     const mark = ++stamp
     for (const b of tilesNear(x, y, rad)) {
@@ -229,6 +246,7 @@ export default function drive(city) {
         for (const r of b.fg.get(ckey(cx, cy)) || NONE) {
           if (b.fpSeen[r] === mark) continue
           b.fpSeen[r] = mark
+          if (b.lo && b.lo[r] > h) continue
           if (x + rad < b.bb[r * 4] || x - rad > b.bb[r * 4 + 2] || y + rad < b.bb[r * 4 + 1] || y - rad > b.bb[r * 4 + 3]) continue
           const P = b.fp.pts, s0 = b.fp.start[r], s1 = b.fp.start[r + 1]
           let inside = false, bd = Infinity, bx = 0, by = 0
@@ -249,8 +267,8 @@ export default function drive(city) {
     return hit ? { x: px, y: py } : null
   }
   const insideBuilding = (x, y) => !!collide(x, y, 0.01)
-  // the first building wall on the way from (x0, y0) to (x1, y1): the fraction of the way (1 = none)
-  function wallHit(x0, y0, x1, y1) {
+  // the first building wall on the way from (x0, y0) to (x1, y1): the fraction of the way (1 = none); h as collide's
+  function wallHit(x0, y0, x1, y1, h = -Infinity) {
     let best = 1
     const mark = ++stamp, dx = x1 - x0, dy = y1 - y0
     const lx = Math.min(x0, x1), hx = Math.max(x0, x1), ly = Math.min(y0, y1), hy = Math.max(y0, y1)
@@ -260,6 +278,7 @@ export default function drive(city) {
         for (const r of b.fg.get(ckey(cx, cy)) || NONE) {
           if (b.fpSeen[r] === mark) continue
           b.fpSeen[r] = mark
+          if (b.lo && b.lo[r] > h) continue
           if (hx < b.bb[r * 4] || lx > b.bb[r * 4 + 2] || hy < b.bb[r * 4 + 1] || ly > b.bb[r * 4 + 3]) continue
           const P = b.fp.pts, s0 = b.fp.start[r], s1 = b.fp.start[r + 1]
           for (let q = s0, w = s1 - 2; q < s1; w = q, q += 2) {
@@ -975,15 +994,17 @@ export default function drive(city) {
     if (tube) chase.pos.y = Math.min(chase.pos.y, P.roof - 0.7)
     // keep the camera out of buildings, every frame and after the smoothing (so it never glides through a wall):
     // on the line from the player to the camera, stop short of the first wall; then step off walls beside it
-    const cx = chase.pos.x, cy = -chase.pos.z, k0 = tube ? 1 : wallHit(P.x, P.y, cx, cy)
+    // (a metre clear: cornices, awnings and balconies stand out from the footprint. At the camera's height, so the
+    // parts of buildings over an arcade or a passage, which the van drives under, are walls to it too)
+    const cx = chase.pos.x, cy = -chase.pos.z, ch = chase.pos.y + 0.5, k0 = tube ? 1 : wallHit(P.x, P.y, cx, cy, ch)
     if (k0 < 1) {
-      const len = Math.hypot(cx - P.x, cy - P.y) || 1, k = Math.max(0, k0 - 0.7 / len)
+      const len = Math.hypot(cx - P.x, cy - P.y) || 1, k = Math.max(0, k0 - 1 / len)
       chase.pos.x = P.x + (cx - P.x) * k; chase.pos.z = -(P.y + (cy - P.y) * k)
     }
-    const side = !tube && collide(chase.pos.x, -chase.pos.z, 0.6)
+    const side = !tube && collide(chase.pos.x, -chase.pos.z, 1, ch)
     if (side) { chase.pos.x += side.x; chase.pos.z -= side.y }
     // the near plane comes in when a wall is close, so it never cuts through one
-    const wall = !tube && collide(chase.pos.x, -chase.pos.z, 2.5)
+    const wall = !tube && collide(chase.pos.x, -chase.pos.z, 2.5, ch)
     chase.near = wall ? clamp((2.5 - Math.hypot(wall.x, wall.y)) * 0.6, 0.2, nearPlane()) : nearPlane()
     const ahead = onFoot ? 3 : doors ? car.V.hl - 3 : 6 + big * 0.3, right = doors ? car.V.hw + 1.2 : 0
     v4.set(P.x + fwdX(P.yaw) * ahead + fwdY(P.yaw) * right, P.h + lift + (onFoot ? 1.3 : 1.0), -(P.y + fwdY(P.yaw) * ahead - fwdX(P.yaw) * right))
@@ -1562,7 +1583,15 @@ export default function drive(city) {
       V.position.set(car.x, car.h + (car.lift || 0) - 0.02 + car.hz - car.kneel * 0.06, -car.y) // (a bus kneels at the kerb, doors open; a cab flies)
       V.rotation.set(0, 0, 0)
       V.rotateY(car.yaw); V.rotateX(car.pitch + car.bp); V.rotateZ(car.roll + car.br - car.kneel * 0.025)
-      for (const w of U.wheels) { w.spin.rotation.x = -car.spin; if (w.front) w.steer.rotation.y = car.steer }
+      // the wheels stay on the road while the body dips under braking, leans in a turn, bounces or kneels (the whole
+      // model turns with the body: a wheel 1.6 m from the middle went 20 cm into the road, the other as far off it)
+      const bz = car.bp, bx = car.br - car.kneel * 0.025, by = car.kneel * 0.06 - car.hz
+      for (const w of U.wheels) {
+        w.spin.rotation.x = -car.spin; if (w.front) w.steer.rotation.y = car.steer
+        const s = w.steer, o = s.parent === V ? 0 : s.parent.position.z // (a bendy bus's rear wheels: in its rear section)
+        s.userData.y0 ??= s.position.y
+        s.position.y = s.userData.y0 + clamp(-s.position.x * bx + (s.position.z + o) * bz + by, -0.3, 0.3)
+      }
       U.signal?.(car, performance.now() / 1000)
       if (U.rear) U.rear.rotation.y = wrap(car.tyaw - car.yaw)
       blob.position.set(car.x, car.h + 0.06, -car.y); blob.rotation.set(0, car.yaw, 0)
@@ -1607,6 +1636,7 @@ export default function drive(city) {
     for (const b of tilesNear(x, y, r1)) {
       if (!b.fp) continue
       for (let r = 0; r < b.fp.start.length - 1; r++) {
+        if (b.lo && b.lo[r] > -Infinity) continue // (a raised part is no address)
         const w = b.bb[r * 4 + 2] - b.bb[r * 4], h = b.bb[r * 4 + 3] - b.bb[r * 4 + 1], cx = b.bb[r * 4] + w / 2, cy = b.bb[r * 4 + 1] + h / 2
         if (w * h < 45 || w * h > 4000) continue
         const d = Math.hypot(cx - x, cy - y)

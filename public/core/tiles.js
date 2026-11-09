@@ -455,7 +455,7 @@ export class Tiles {
     g.visible = t.visible
     t.terrain = res.terrain
     t.graph = res.graph
-    t.footprints = res.footprints || null
+    t.footprints = res.footprints || null; t.overhangs = res.overhangs || null
     t.signs = res.signs || null
     t.water = res.water || null
     t.carriage = res.carriage || null

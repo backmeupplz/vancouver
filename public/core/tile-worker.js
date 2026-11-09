@@ -89,7 +89,7 @@ function build(t, level) {
     out.water = water(t); out.carriage = carriage; out.boats = boats(t, terr); out.lights = lights(t, terr, lines, ps, b, carriage, S)
     out.signs = signs(t, b.fronts)
     out.parked = parked(t, terr, lines, ps, b.footprints, S)
-    out.footprints = withCars(b.footprints, out.parked.lot, t)
+    out.footprints = withCars(b.footprints, out.parked.lot, t); out.overhangs = b.overhangs
     out.beach = beach(t, terr)
     if (out.beach) out.footprints = withBoxes(out.footprints, out.beach.solid, t)
   }
@@ -1091,6 +1091,7 @@ function buildings(t, terr, level, lines, carriage) {
   const s = t.sections.BLDG
   const W = { pos: [], nor: [], col: [], win: [], fac: [] }, Bal = { pos: [], nor: [], col: [], win: [], fac: [] }
   const fp = [], fpStart = [0] // footprints: world x, north pairs; ring i is fp[fpStart[i]..fpStart[i+1])
+  const oh = [], ohStart = [0], ohLo = [] // the parts left out of them (you can drive under): the same, and the height of each one's underside (a chase camera is up there)
   const fronts = [] // storefront walls that face a street: ax, ay, px, py, ground height (for the shop signs)
   const spill = [] // tile-local x, north: where a lit shop window throws light on the sidewalk
   const AO = { P: [], T: [], I: [] } // the shade on the ground round the walls' feet (skirt)
@@ -1136,6 +1137,7 @@ function buildings(t, terr, level, lines, carriage) {
       if (!grid.get(gk(Math.floor(ix / G), Math.floor(iy / G)))?.some((b) => b !== rec && b.mn < 0.5 && inPoly(ix, iy, b.pts))) post(W, ix, iy, groundOut(terr, ix, iy), base + mn)
     }
     if (detail && mn < 2.5) { for (const [x, y] of pts) fp.push(x + t.ox, y + t.oy); fpStart.push(fp.length) } // parts you can drive under are left out
+    else if (detail && h - mn > 0.7) { for (const [x, y] of pts) oh.push(x + t.ox, y + t.oy); ohStart.push(oh.length); ohLo.push(base + mn) }
     if (!gid) gid = (Math.imul(Math.round(pts[0][0] * 10 + t.ox), 73856093) ^ Math.imul(Math.round(pts[0][1] * 10 + t.oy), 19349663)) >>> 0 || 1
     if (area(pts) < 0) pts.reverse() // counter-clockwise (y north)
     const gr = mulberry(gid), pick = (a) => a[Math.floor(gr() * a.length)]
@@ -1205,6 +1207,10 @@ function buildings(t, terr, level, lines, carriage) {
       }
       if (plinth && foot === y0) quad(W, [a[0], lo, -a[1]], [p[0], lo, -p[1]], [p[0], y0, -p[1]], [a[0], y0, -a[1]], plC, [nx, 0, nz], [0, 0, 0, seed], [0, len, 0, seed], [0, len, 0, seed], [0, 0, 0, seed])
     }
+    if (detail && mn > 1.5) { // a raised part's underside (an overhang, a skybridge, a canopy): from under it you looked up into it
+      const tris = earcut2(pts), c = shade(roofC, 0.62), w = ROOFW(seed)
+      for (let i = 0; i < tris.length; i += 3) { const A = pts[tris[i]], B = pts[tris[i + 1]], C = pts[tris[i + 2]]; tri(W, [A[0], y0, -A[1]], [B[0], y0, -B[1]], [C[0], y0, -C[1]], c, [0, -1, 0], w) }
+    }
     const flat = !roofShape || !ridge || ridge <= h
     if (flat) {
       // a planted roof (the bake's bit 4: the orthophoto or OSM; else a green roof colour) gets its planting drawn
@@ -1247,6 +1253,7 @@ function buildings(t, terr, level, lines, carriage) {
   }
   return { fronts, walls: pack(W), balconies: Bal.pos.length ? pack(Bal) : null,
     footprints: fpStart.length > 1 ? { pts: new Float32Array(fp), start: new Uint32Array(fpStart) } : null, spill,
+    overhangs: ohLo.length ? { pts: new Float32Array(oh), start: new Uint32Array(ohStart), lo: new Float32Array(ohLo) } : null,
     ao: AO.P.length ? { position: new Float32Array(AO.P), t: new Float32Array(AO.T), index: AO.P.length / 3 > 65535 ? new Uint32Array(AO.I) : new Uint16Array(AO.I) } : null }
 }
 // ambient occlusion where the walls meet the ground: a strip 3 m out from the foot of every wall, darkest at the wall

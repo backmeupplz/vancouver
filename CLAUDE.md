@@ -42,6 +42,7 @@ look; PLUGINS.md is the plugin contract. Read the parts you need, not the whole 
 - Shots: `node tools/shoot.mjs --out /tmp/s --dpr 1 --weather rain --hour 18 map=#13645,11243,0.1295 van=drive:49.2838,-123.1185 sail=sail:49.286,-123.16` (also `walk:`, `taxi:`, `bus:ROUTE:DIR`; `--size phone`, `--tier low`); one line per shot
 - Drift over a long map session (#548): `node tools/soak.mjs --out /tmp/soak --mins 8` (start vs end shots per view, quality/tiles/GPU log)
 - Perf: `node tools/bench.mjs --dpr 2 --tier high --cpu 4 --secs 20 map|drive|sail` prints one JSON line (p50/p95/p99, over33, tris, calls, gpuMs)
+- Clipping at play time (#587): `node tools/clip_check.mjs [--routes downtown-van,beach-walk] [--secs 45] [--shots dir] [--out f.json]` an autopilot in each third-person mode over a dozen places; counts frames with the camera inside geometry, the player in buildings / trunks / cars, wheels and feet off the ground, simulated cars and people in things
 - Look: `uv run --with pillow python3 tools/sheet.py /tmp/s/sheet.jpg /tmp/s/*.png --cols 3` then view only the sheet
 - Models: `node tools/models.mjs --out /tmp/m --only cars,people --hour 13,22` (the viewer: each code-built model in four views with triangle counts, one PNG per group and hour; groups player, cars, far, people, boats)
 - Both node tools use Playwright from `/Users/borodutch/code/agentboard/`, start their own server, and need `public/tiles` symlinked.

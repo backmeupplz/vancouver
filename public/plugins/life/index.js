@@ -469,7 +469,7 @@ export default function life(city) {
       const P = snap.ppos, r2 = r * r
       for (let i = 0; i < snap.np; i++) {
         const q = i * 5, dx = P[q] - x, dz = P[q + 2] - z
-        if (dx * dx + dz * dz > r2) continue
+        if (!(dx * dx + dz * dz <= r2)) continue // (not a NaN one either)
         const o = rec('people', out.length)
         o.id = P[q + 4]; o.x = P[q]; o.y = P[q + 1]; o.z = P[q + 2]; o.heading = P[q + 3] + Math.PI / 2; o.r = 0.3
         out.push(o)
