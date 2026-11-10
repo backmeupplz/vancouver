@@ -553,6 +553,8 @@ export default function drive(city) {
       .dlv-how h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #ffc9b5; }
       .dlv-how ol { margin: 0; padding-left: 20px; font-size: 14px; line-height: 1.45 } .dlv-how li { margin: 3px 0 }
       .dlv-how .k { margin-top: 8px; font-size: 11.5px; color: #d9cbbb }
+      @media (max-height: 520px) { /* a small embed, a phone held sideways: at the top and tighter, so the van shows under it; no keys line where the strip at the bottom has them */
+        .dlv-how { top: calc(var(--st) + 4px); transform: translateX(-50%); padding: 10px 14px; } .dlv-how ol { font-size: 12.5px; line-height: 1.35; } body:not(.dlv-touchy) .dlv-how .k { display: none; } }
       .dlv-sheet .stars { font-size: 20px; letter-spacing: 3px; color: #ffd38a; }
       .dlv-sheet dl { display: grid; grid-template-columns: 1fr auto; gap: 4px 14px; text-align: left; margin: 12px 0 10px; font-variant-numeric: tabular-nums; }
       .dlv-sheet dt { color: #d9cbbb } .dlv-sheet dd { margin: 0; font-weight: 650; text-align: right }
@@ -609,7 +611,7 @@ export default function drive(city) {
       .compact .dlv-touch .act { right: var(--sr); height: 44px; border-radius: 22px; }
       .compact body.dlv-on .lofi { padding: 0 } .compact body.dlv-on .lofi-name, .compact body.dlv-on .lofi canvas { display: none }
       .compact body.dlv-on.dlv-touchy .lofi { bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 112px) !important; } /* over Brake (--bh 96px) */
-      @media (orientation: portrait) { .compact body.dlv-on.dlv-touchy .toast { bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 264px); width: max-content; } } /* over the E button */
+      @media (orientation: portrait) { .compact body.dlv-on.dlv-touchy #toasts { bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 264px); } } /* over the E button */
       @media (orientation: landscape) {
         /* landscape: the short screen keeps the old heights, so the stack over Go ends where it did; the pedals
            grow wide instead, up to the music player centred between the two clusters (138px wide) */
@@ -632,7 +634,7 @@ export default function drive(city) {
     const act = el('dlv dlv-act card', '')
     const pop = el('dlv dlv-pop card', '<div class="big" data-b></div><div class="q" data-q></div>')
     const pickEl = el('dlv dlv-pick card', `<span data-pt></span><button data-cancel>Cancel</button>`)
-    const sheet = el('dlv dlv-sheet card', '')
+    const sheet = el('dlv dlv-sheet card', ''); sheet.dataset.results = '' // (the progress plugin adds its name prompt to a results card)
     const flash = el('dlv dlv-flash', '')
     const photo = el('dlv dlv-photo', '')
     const aboard = document.createElement('div'); aboard.className = 'aboard'; job.lastElementChild.append(aboard)
@@ -685,8 +687,9 @@ export default function drive(city) {
     ui.how.innerHTML = `<h3>${title}</h3><ol>${lines.map((l) => `<li>${l}</li>`).join('')}</ol><div class="k">${keysLine}</div>`
     ui.how.hidden = false; ui.how.classList.remove('fade')
     clearTimeout(howT); howT = setTimeout(hideHowTo, 10000)
+    howHold?.(); howHold = city.ui.hold?.() // toasts (wet roads, lane assist) wait for the card
   }
-  function hideHowTo() { if (ui.how.hidden || ui.how.classList.contains('fade')) return; clearTimeout(howT); ui.how.classList.add('fade'); setTimeout(() => { ui.how.hidden = true; if (!onFoot && state === 'play') assistHint() }, 400) } // (the hint once the card has faded: over it on a phone held sideways, #591)
+  function hideHowTo() { if (ui.how.hidden || ui.how.classList.contains('fade')) return; clearTimeout(howT); ui.how.classList.add('fade'); setTimeout(() => { ui.how.hidden = true; howHold?.(); if (!onFoot && state === 'play') assistHint() }, 400) } // (the hint once the card has faded: over it on a phone held sideways, #591)
   function showHelp() { // the keys, for a few seconds after each change between van and feet (always while delivering)
     ui.help.textContent = taxi ? taxi.help() : game ? 'W gas · S brake (a tap is gentle, hold for more) · A D steer · E doors · H horn · R back on the route · Esc end the shift'
       : hike ? 'WASD or arrows to walk · Shift to push on (it tires you; each quarter mark is a second wind) · the trail guides you when you let go · Esc to the map'
@@ -734,7 +737,7 @@ export default function drive(city) {
   assistLabel()
   const keys = new Set()
   let feel = null // feel.js: tyre marks, sparks, speed lines, squeal (while something is driven)
-  let howT = 0, drift = { m: 0, t: 0, show: 0, text: '' } // a free-roam drift under way: metres so far
+  let howT = 0, howHold = null, drift = { m: 0, t: 0, show: 0, text: '' } // a free-roam drift under way: metres so far
   let autopilot = null, probe = null // ?drivedebug (tools/drive_check.mjs): the input instead of the keys; told of every hit
 
   const button = city.ui.addButton({ label: 'Explore', icon: '🧭', title: 'Explore the streets by van, bus, cab or on foot, deliver parcels (D), hike a trail', panel: true, dock: true })
@@ -745,6 +748,8 @@ export default function drive(city) {
     <button data-m="bus"><span>🚌</span><div>Drive a bus<small>Real TransLink routes on their timetable: stops, riders, the bell</small></div></button>
     <button data-m="hike"><span>🥾</span><div>Hike a trail<small>Grouse Grind, Quarry Rock, Lynn Canyon and more</small></div></button>
     <button data-m="taxi"><span>🚕</span><div>Rush Fare<small>Arcade cabs against the clock: fares across town, stunts, nitro</small></div></button></div>`
+  city.ui.addStart?.({ icon: '🚐', label: 'Drive', sub: 'van, bus, cab', order: 1, onClick: () => button.button.click() })
+  city.ui.addStart?.({ icon: '🚶', label: 'Walk', sub: 'any street', order: 3, onClick: () => startPick('foot') })
   const menuEl = button.panel.querySelector('.dlv-menu'), menuHTML = menuEl.innerHTML
   function hikeLog() { try { return JSON.parse(localStorage.getItem('drive.hikes') || '{}') } catch { return {} } }
   const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
@@ -942,7 +947,7 @@ export default function drive(city) {
     if (game && !force && (game.S.carried || game.S.km > 0.3)) return summary()
     game?.dispose()
     taxi?.dispose(); taxi = null
-    ui.sheet.hidden = true; ui.photo.classList.remove('on'); ui.how.hidden = true
+    ui.sheet.hidden = true; ui.photo.classList.remove('on'); ui.how.hidden = true; howHold?.(); city.ui.clearToasts?.()
     fromPose = poseOf(chase.pos, chase.look, pcam.fov)
     state = 'out'; t0 = performance.now()
     if (city.tiles?.baseMesh) city.tiles.baseMesh.position.y = 0 // (sunk in a tunnel)
@@ -1959,7 +1964,7 @@ export default function drive(city) {
       const sp = Math.abs(P.speed) * 3.6, gear = onFoot ? '' : ` · ${car.gear < 0 ? 'R' : `D${car.gear}`}`
       const dr = onFoot ? '' : drift.m > 4 ? ` <span class="gain">· Drift ${Math.round(drift.m)} m</span>` : performance.now() < drift.show ? ` <span class="gain">· ${drift.text}</span>` : ''
       ui.read.innerHTML = `<b>${Math.round(sp)}</b> km/h${gear}${dr}${name ? ` <span class="st">· ${esc(name)}</span>` : ''}`
-      const c = onFoot && !man.board && foot.card() // a free walk: the photo walk's card
+      const c = onFoot && !man.board && !city.fishing?.active && foot.card() // a free walk: the photo walk’s card (not over a rod in hand)
       ui.job.hidden = !c
       if (c) { ui.w.textContent = c.title; ui.p.textContent = c.line; ui.s.textContent = c.sub; ui.d.textContent = ui.t.textContent = ''; compass(c.target) }
       return

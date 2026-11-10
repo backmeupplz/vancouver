@@ -73,7 +73,11 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.ui.hud` | the row at the top right of a game's screen (wide screens; on phones its children keep their own places): append your game's row of buttons (Back to map, sound) to it rather than to `body`, and anything another plugin adds while a game is on (the chat button) lines up to their left instead of landing on your panels. Put your panels below 56 px |
 | `city.ui.inMenu(el, home)` | on phones, move your on-screen element `el` into the ⋯ sheet (back where it was on a wide screen); its own CSS and `hidden` still apply there, and it is listed only while `home` (default: its parent) is on screen, so a game's secondary toggles (sound, lane assist) show only in that game. The sheet also holds the music, graphics quality, a frame rate switch, About and the credits |
 | `city.ui.sheet(el, close)`, `.closeAll()`, `.onCloseAll(fn)`, `.compact` | your own panel behaving like the toolbar's (close button, drag down to close on phones; only one open at a time); `compact` is true in the phone layout (`html.compact` in CSS) |
-| `city.ui.toast(text)` | a short message |
+| `city.ui.toast(text, ms)` | a short message. One at a time: it waits for the one on screen (which makes way once it has been read), and the same text isn't queued twice |
+| `city.ui.hold()` → `release()` | keep toasts waiting while something of yours asks for attention (a how-to card); call `release()` when it is gone |
+| `city.ui.clearToasts()` | drop the toast on screen and those waiting (your game ended: its hints are stale) |
+| `city.ui.toasts` | the column toasts show in; put your own pops in it and they never land on a toast (the progress plugin does) |
+| `city.ui.addStart({ icon, label, sub, onClick, order })` | an entry on the first visit's start card (Drive, Sail, Walk, Today). The card is gone for good once it is closed or used, or a game has started (`localStorage['vancouver.started']`) |
 | `city.ui.credit(text, href)` | a line in the credits strip at the bottom of the page (on phones: in the ⋯ sheet, with a short © OpenStreetMap link left on screen); a link with `href`; `.set(text, href)`, `.remove()` |
 | `city.traffic` | the simulated cars, from the life plugin (see below); `undefined` without it |
 | `city.quality.tier` | graphics quality (`core/quality.js`): `name` `'high'` or `'low'` and its knobs, e.g. `life` and `weather` (the share of agents / particles to draw) and `detail`; `city.on('quality', tier)` fires when it changes (the viewer's About → Graphics, or Auto dropping to low on a slow GPU). Scale your counts by it |
@@ -230,6 +234,9 @@ throws). Everything is kept in `localStorage` (`progress.v1`); no accounts. **Th
   `bus` a bus shift's score, `sail` a race's points, `hike` metres climbed in one hike, `fish` the biggest fish in mm; new ones just appear in the
   panel). An integer 0–10 000 000, **higher is better** (for a time, pass points that fall with the seconds). Call it
   once, when the run ends. The best is kept locally and sent to the live server (name from the multiplayer plugin).
+  Give your results card the attribute `data-results`: the first score posted under a generated name ("Heron 44")
+  adds one line there offering to choose a username (`city.multiplayer.profile()`; `.chosen` says whether one is set).
+  The username prompt never opens by itself during play: the chat, the progress panel and that line offer it.
 - `city.progress.stat(name, delta = 1)` → the new lifetime total. A counter of your own (`'taxi.combo'`,
   `'sail.gybes'`); totals show in the panel when a daily challenge or unlock uses them. Distances are counted for you
   from `city.player` (`km.car`, `km.bus`, `km.foot`, `km.boat`, and `climb` in metres on foot): don't report those.

@@ -14,7 +14,7 @@ import { makeModels } from './models.js'
 const KEY = 'fish.v1'
 const CSS = `
 .fs, .fs-card { left: 50%; transform: translateX(-50%); box-sizing: border-box; width: min(340px, calc(100% - 24px)); z-index: 30; font-size: 13px; color: var(--text); }
-.fs, .fs-card { bottom: calc(var(--sb, 0px) + 18px); padding: 10px 12px; }
+.fs, .fs-card { bottom: calc(var(--sb, 0px) + 32px); padding: 10px 12px; }
 .fs.boat, .fs.boat + .fs-card { bottom: auto; top: calc(var(--st, 0px) + 118px); }
 .fs[hidden], .fs-card[hidden], .fs-chips[hidden], .fs-chips button[hidden] { display: none; }
 .fs-top { display: flex; align-items: baseline; gap: 8px; }

@@ -70,7 +70,7 @@ export const CSS = `
   .dlv-gps > div { min-width: 0 }
   .dlv-gps.warn { background: rgba(120, 40, 20, .7) }
   @media (max-width: 1000px) { .dlv-gps { top: 74px; max-width: calc(100vw - 24px) } .dlv-strip { top: 128px } }
-  .compact .dlv-bus { left: var(--sl); top: var(--st); min-height: 44px; padding: 5px 10px; min-width: 0; max-width: calc(100% - var(--sl) - var(--sr) - 94px); }
+  .compact .dlv-bus { left: var(--sl); top: var(--st); min-height: 44px; padding: 5px 10px; min-width: 0; max-width: calc(100% - var(--sl) - var(--sr) - 140px); } /* clear of ⋯ and Map */
   .compact .dlv-bus .st { gap: 8px; margin-top: 1px; font-size: 12px }
   .compact .dlv-gps { top: calc(var(--st) + 56px); left: var(--sl); right: var(--sr); transform: none; max-width: none; padding: 5px 10px 5px 6px; }
   .compact .dlv-gps svg { width: 30px; height: 30px } .compact .dlv-gps .a { font-size: 15px }

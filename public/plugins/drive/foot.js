@@ -57,7 +57,8 @@ export function makeFoot(THREE, city, api) {
     .ft-frame { position: fixed; inset: 112px 5% 196px; z-index: 5; pointer-events: none; border: 2px solid rgba(255,255,255,.75); border-radius: 6px; box-shadow: 0 0 0 100vmax rgba(0,0,0,.28); }
     .ft-frame::after { content: attr(data-t); position: absolute; left: 0; right: 0; bottom: 8px; text-align: center; color: #fff; font: 600 13px system-ui, sans-serif; text-shadow: 0 1px 3px #000; }
     @media (max-height: 600px) { .ft-frame { inset: 92px 5% 56px; } }
-    @media (min-width: 720px) { .ft-btns { bottom: 96px; } .ft-frame { inset: 9% 8%; } }`
+    @media (min-width: 720px) { .ft-btns { bottom: 96px; } .ft-frame { inset: 9% 8%; } }
+    @media (max-height: 420px) { body:not(.dlv-touchy) .ft-btns { bottom: 96px; } }` // (the 360 px embed with a keyboard: under the photo walk's card)
   const btns = document.createElement('div'); btns.className = 'ft-btns'; btns.hidden = true
   btns.innerHTML = '<button data-f="photo" aria-label="Camera" title="Camera: frame a landmark (P)">📷</button><button data-f="sit" aria-label="Sit down" title="Sit down a while (C)">Sit</button><button data-f="pet" title="Pet the dog (G)" hidden>🐶 Pet</button>'
   const frameEl = document.createElement('div'); frameEl.className = 'ft-frame'; frameEl.hidden = true

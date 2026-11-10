@@ -127,7 +127,7 @@ export default function multiplayer(city) {
     .live-mark[hidden], .live-tag[hidden], .live-menu[hidden] { display: none }
     /* phones: the chat is a full-height sheet that stays above the on-screen keyboard (--vv-*, index.html) */
     .compact .live-stats { margin: 0 2px } .compact .live-stats .more { display: none }
-    .compact .live-chat { left: 0; right: 0; width: auto; top: calc(var(--vv-top) + var(--st) + 4px); height: calc(var(--vv-h) - var(--st) - 4px); max-height: none; z-index: 28;
+    .compact .live-chat { left: 0; right: 0; width: auto; top: calc(var(--vv-top) + var(--st) + 4px); height: calc(var(--vv-h) - var(--st) - 4px); max-height: none; z-index: 31; /* over a game's cards (its results card offers the profile) */
       border-radius: 16px 16px 0 0; border-width: 1px 0 0; background: rgba(13, 19, 26, .94); font-size: 14px;
       padding: 26px max(14px, env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)); animation: sheet-in .22s ease-out; }
     .compact.kb .live-chat { padding-top: 6px; padding-bottom: 8px; border-radius: 0; } /* typing: every pixel above the keyboard counts */
@@ -233,7 +233,7 @@ export default function multiplayer(city) {
   city.ui.sheet?.(panel, () => toggleChat(false))
   city.ui.onCloseAll?.(() => { if (!panel.hidden) toggleChat(false) })
 
-  let tab = 'g', unread = 0, statusT = 0, prompt = null // prompt: why the username prompt is open ('chat' | 'play')
+  let tab = 'g', unread = 0, statusT = 0, prompt = null // prompt: the username prompt is open (the first time the chat opens; never by itself in a game)
   const lines = { g: [], n: [] }
   const tell = (t) => (panel.hidden ? city.ui.toast(t) : setStatus(t)) // a toast would cover the open sheet
   function setStatus(t, err) { status.textContent = t; status.classList.toggle('err', !!err); clearTimeout(statusT); if (t) statusT = setTimeout(() => (status.textContent = ''), 4500) }
@@ -268,7 +268,7 @@ export default function multiplayer(city) {
       if (!matchMedia('(pointer: coarse)').matches) input.focus()
     }
   }
-  function endPrompt() { const why = prompt; prompt = null; if (why === 'play') toggleChat(false); else showView('chat') }
+  function endPrompt() { prompt = null; showView('chat') }
   document.getElementById('tools')?.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b && b !== tool.button) toggleChat(false) })
   chip.onclick = () => showView('profile')
   back.onclick = () => showView('chat')
@@ -330,14 +330,6 @@ export default function multiplayer(city) {
     for (const b of swatches.children) b.setAttribute('aria-checked', String(b.dataset.c === me.colour))
     idCode.textContent = me.id || ''
   }
-  // the prompt also comes up the first time someone starts driving or walking (once the dive is over)
-  let askT = 0
-  function askOnPlay() {
-    clearTimeout(askT)
-    if (!city.player || me.chosen || asked()) return
-    askT = setTimeout(() => { if (city.player && connected && !me.chosen && !asked() && panel.hidden) { prompt = 'play'; toggleChat(true, 'profile') } }, 3000)
-  }
-
   // a small menu for a person: block / unblock (a sheet at the bottom on phones)
   const menu = h('div', 'panel live-menu'); menu.hidden = true; menu.setAttribute('role', 'menu')
   document.body.append(menu)
@@ -481,7 +473,7 @@ export default function multiplayer(city) {
         lines.g = m.chat.map((l) => ({ ...l, ch: 'g' }))
         for (const l of m.chat) if (blocked.get(l.id) === '') blocked.set(l.id, l.name)
         setConnected(true); showStats(m.stats); render()
-        if (city.player) { sendState(true); askOnPlay() }
+        if (city.player) { sendState(true) }
         break
       }
       case 'join': join(m); break
@@ -559,7 +551,7 @@ export default function multiplayer(city) {
   }
   function onPlayer() {
     clearInterval(sendT)
-    if (city.player) { sendState(true); sendT = setInterval(sendState, SEND_MS); askOnPlay() }
+    if (city.player) { sendState(true); sendT = setInterval(sendState, SEND_MS) }
     else { sendState(true); lastSent = null; for (const p of roster.values()) drop3d(p); render() }
     wakeMarks() // markers off while playing, back on after
   }
@@ -715,6 +707,8 @@ export default function multiplayer(city) {
     },
     get connected() { return connected },
     get name() { return me.name },
+    get chosen() { return !!me.chosen }, // false: still the generated name
+    profile() { toggleChat(true, 'profile') }, // the profile view, where the username is chosen (the progress plugin offers it)
     send: out, // a message for the live server (the progress plugin's scores)
   }
 
@@ -724,7 +718,7 @@ export default function multiplayer(city) {
   return {
     dispose() {
       disposed = true
-      clearTimeout(retryT); clearTimeout(hiddenT); clearInterval(sendT); clearTimeout(checkT); clearTimeout(askT); cancelAnimationFrame(raf)
+      clearTimeout(retryT); clearTimeout(hiddenT); clearInterval(sendT); clearTimeout(checkT); cancelAnimationFrame(raf)
       if (ws) { ws.onclose = null; ws.close() }
       for (const p of roster.values()) drop3d(p)
       anim?.()

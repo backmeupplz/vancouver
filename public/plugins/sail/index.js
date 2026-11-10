@@ -201,7 +201,8 @@ export default function sail(city) {
     html:not(.compact) body.sail-on.sl-touchy .sl-learn { bottom: 224px; } /* tablets: over the steering buttons and the music */
     body.sail-on #bar, body.sail-on #hint, body.sail-on #about, body.sail-on #tools, body.sail-on .tool-panel, body.sail-on #credits { display: none !important }
     @media (max-width: 640px) { .sl-btns .opt { display: none } .sl-pick { font-size: 13px; white-space: nowrap; top: 64px } }
-    .compact .sl-read { left: var(--sl); top: var(--st); padding: 4px 10px 4px 4px; gap: 7px; }
+    .compact .sl-read { left: var(--sl); top: var(--st); padding: 4px 10px 4px 4px; gap: 7px; max-width: calc(100% - var(--sl) - var(--sr) - 140px); box-sizing: border-box; } /* clear of ⋯ and Map */
+    .compact .sl-read .sub { white-space: normal }
     .compact .sl-gauge { width: 54px; height: 54px }
     .compact .sl-trim .bar { min-width: 70px }
     .compact .sl-btns { right: var(--sr); top: var(--st); flex-direction: column; align-items: flex-end; }
@@ -296,6 +297,7 @@ export default function sail(city) {
   let tgtNow = null, auto = null // tests (?drivedebug): the computer steers the player round the course
 
   const button = city.ui.addButton({ label: 'Sail', icon: '⛵', title: 'Sail a small boat on the real water, in the real wind', onClick: () => startPick(), dock: true })
+  city.ui.addStart?.({ icon: '⛵', label: 'Sail', sub: 'the real wind', order: 2, onClick: () => startPick() })
 
   // ---------------------------------------------------------------- pick where to start
   const picker = mapPicker(city, 'sl-picking', (x, z) => {
