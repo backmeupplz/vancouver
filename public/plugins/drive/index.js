@@ -31,7 +31,7 @@ import { makeProps, LAMP, STOP, YIELD, BUS, BOLLARD, BENCH } from './props.js'
 import { makeKerbs } from './kerbs.js'
 import { makeFeel } from './feel.js'
 import { deliveryGame } from './deliver.js'
-import { clamp, smooth, wrap, esc, vancouver, circleBox } from '../../core/util.js'
+import { clamp, smooth, wrap, esc, vancouver, circleBox, gores, stripped, GORE } from '../../core/util.js'
 import { cellsNear, nearestStreet, abbr } from '../../core/streets.js'
 import { typing, buzz, MOVE_KEYS, mapPicker, mapCameraPose, poseOf, dive, streetSky, touchButtons, orbitLook, audioContext, tone as toneInto } from '../../core/play.js'
 
@@ -64,9 +64,10 @@ export default function drive(city) {
 
   // ================================================================ the street index (detail tiles, lazily)
   const infos = new Map(), overview = new Map(), built = new Map() // ckey(i, j) -> tile info / its index
+  let gen = 0 // counts the detail tiles coming and going (what is kept of the decks beside a deck: gored())
   const offTiles = [
-    city.world.eachTile((t) => { const k = ckey(t.i, t.j); if (t.level === 0) { infos.set(k, t); built.delete(k) } else overview.set(k, t) }),
-    city.on('tile:unload', (t) => { const k = ckey(t.i, t.j); if (t.level === 0) { infos.delete(k); built.delete(k) } else overview.delete(k) }),
+    city.world.eachTile((t) => { const k = ckey(t.i, t.j); if (t.level === 0) { infos.set(k, t); built.delete(k); gen++ } else overview.set(k, t) }),
+    city.on('tile:unload', (t) => { const k = ckey(t.i, t.j); if (t.level === 0) { infos.delete(k); built.delete(k); gen++ } else overview.delete(k) }),
   ]
   const walkable = (p) => p.kind <= WALK_MAX_KIND && p.kind > 1 // not motorways or trunk roads
   const drivable = (p) => p.drive && p.kind <= DRIVE_MAX_KIND
@@ -108,7 +109,7 @@ export default function drive(city) {
     let bx0 = t.ox, by0 = t.oy, bx1 = t.ox + 1024, by1 = t.oy + 1024 // what its roads cover: a long bridge sticks out of its tile
     for (const s of segs) { bx0 = Math.min(bx0, s.x0, s.x1); by0 = Math.min(by0, s.y0, s.y1); bx1 = Math.max(bx1, s.x0, s.x1); by1 = Math.max(by1, s.y0, s.y1) }
     for (let r = 0; r < bb.length; r += 4) { bx0 = Math.min(bx0, bb[r]); by0 = Math.min(by0, bb[r + 1]); bx1 = Math.max(bx1, bb[r + 2]); by1 = Math.max(by1, bb[r + 3]) } // (a landmark's outline too)
-    const b = { t, segs, rg, fg, fp, lo, bb, m0: M.length ? nF + nO : Infinity, box: [bx0, by0, bx1, by1], segSeen: new Uint32Array(segs.length), fpSeen: new Uint32Array(bb.length / 4) }
+    const b = { t, segs, rg, fg, decks: t.graph.pieces.filter(stripped), fp, lo, bb, m0: M.length ? nF + nO : Infinity, box: [bx0, by0, bx1, by1], segSeen: new Uint32Array(segs.length), fpSeen: new Uint32Array(bb.length / 4) }
     furniture(b)
     return b
   }
@@ -185,7 +186,7 @@ export default function drive(city) {
   // the nearest road segment point within r metres: drivable ones, or walkable ones (walk), or any road with bus-only
   // ones (bus); deck: bridge decks only
   // atZ (decks): of the decks right under (x, y), stacked or side by side, the one nearest that height
-  function nearestRoad(x, y, r, deck = false, walk = false, bus = false, atZ = null) {
+  function nearestRoad(x, y, r, deck = false, walk = false, bus = false, atZ = null, not = null) {
     let best = null, bd = r
     const mark = ++stamp
     for (const b of tilesNear(x, y, r)) {
@@ -198,12 +199,33 @@ export default function drive(city) {
           const dx = s.x1 - s.x0, dy = s.y1 - s.y0, L2 = dx * dx + dy * dy || 1
           const t = ((x - s.x0) * dx + (y - s.y0) * dy) / L2, u = clamp(t, 0, 1), px = s.x0 + dx * u, py = s.y0 + dy * u
           const d = Math.hypot(x - px, y - py) - s.p.w / 2, z = s.z0 == null ? null : s.z0 + (s.z1 - s.z0) * u
-          const key = atZ != null && z != null && d < 1.2 ? Math.abs(z - atZ) - 1000 : d
+          if (not && (s.p === not || d > 0 || t < 0 || t > 1 || Math.abs(z - atZ) < GORE[0] || Math.abs(z - atZ) > GORE[1])) continue // (gored(): a deck beside `not`, its strip here)
+          const key = not ? d + s.p.w / 2 : atZ != null && z != null && d < 1.2 ? Math.abs(z - atZ) - 1000 : d
           if (key < bd) { bd = key; best = { s, u, px, py, d: Math.max(0, d), dist: Math.hypot(x - px, y - py), z, dir: Math.atan2(dy, dx), w: s.p.w, over: (t < 0 ? -t : t > 1 ? t - 1 : 0) * Math.sqrt(L2) } }
         }
       }
     }
     return best
+  }
+  // where the deck r (nearestRoad's) isn't drawn at (x, north), trimmed at the line between it and a deck beside it at
+  // another height (core/util.js gores(), as tile-worker.js draws its strip, and its sidewalks'): the deck drawn there
+  // (nearestRoad's answer for it), else null. The van and the walker stand on the surface that is drawn
+  const goreOf = new WeakMap() // a deck's piece -> { gen, trim: gores()'s for it }
+  function gored(r, x, y, walk) {
+    const p = r.s.p
+    if (!stripped(p)) return null
+    let c = goreOf.get(p)
+    if (c?.gen !== gen) { // the decks round the whole piece, anew when a tile came or went
+      const P = p.pts, n = P.length - 2, mx = (P[0] + P[n]) / 2, my = (P[1] + P[n + 1]) / 2
+      let rad = 0
+      for (let i = 0; i <= n; i += 2) rad = Math.max(rad, Math.hypot(P[i] - mx, P[i + 1] - my))
+      goreOf.set(p, (c = { gen, trim: gores(tilesNear(mx, my, rad + 16).flatMap((b) => b.decks))(p) }))
+    }
+    if (!c.trim) return null
+    const dx = r.s.x1 - r.s.x0, dy = r.s.y1 - r.s.y0, l = Math.hypot(dx, dy) || 1, nx = -dy / l, ny = dx / l, o = (x - r.px) * nx + (y - r.py) * ny
+    const cut = (half) => { const e = c.trim(r.px, r.py, nx, ny, 1, half, r.z); return o > 0 ? o > e[0] : -o > e[1] }
+    if (!cut(p.w / 2) || (p.band && !cut(p.w / 2 + 2))) return null
+    return nearestRoad(x, y, 16, true, walk, false, r.z, p) // (the one whose centre line is nearest)
   }
   // the nearest road (bus-only ones too) running along (dx, dy) within r of (x, y): { px, py, dist, w, dir (its way,
   // atan2), along (±1: with or against its points), z (a deck's height or null) }. Rather one lined up within 25° and
@@ -1270,13 +1292,15 @@ export default function drive(city) {
   // In a tunnel: its road, under the ground, and roof the height of its ceiling
   function surface(x, y, curY) {
     const g = city.world.heightAt(x, -y) + 0.2 + (taxi ? taxi.rampAt(x, y) : 0) // (a Rush Fare stunt ramp)
-    const r = nearestRoad(x, y, 16, true, false, false, curY - 0.58)
+    let r = nearestRoad(x, y, 16, true, false, false, curY - 0.58)
     if (!r) return { y: g, deck: false, end: false }
+    let q = null // (the deck beside it, where this one is trimmed at their gore: a step of up to GORE[1]; and that one's)
+    for (let n = 0, o; n < 3 && (o = gored(r, x, y, false)); n++) r = q = o
     const P = r.s.p.pts, m = P.length - 2, end = Math.min(Math.hypot(x - P[0], y - P[1]), Math.hypot(x - P[m], y - P[m + 1])) < 10
     const dz = r.z + 0.58
     if (r.over > 0.8 && !joined(r)) return { y: g, deck: false, end } // past a deck's end where nothing raised goes on: the street (not a disc of deck round its end)
     const rp = r.d < (r.s.p.band ? 2.2 : 1.2) ? -1 : railPast(x, y, curY) // (a deck goes on to its railings: a wheel by the rail of a wide bridge is on it, not over the ground far below)
-    if (rp < 0 && rp > -Infinity && Math.abs(dz - curY) < (end ? 4 : 1.2)) return r.s.p.tunnel ? { y: dz, deck: true, end, roof: r.z + r.s.p.tunnel } : { y: Math.max(g, dz), deck: dz - g > 1.2, end }
+    if (rp < 0 && rp > -Infinity && Math.abs(dz - curY) < (end ? 4 : q ? GORE[1] + 1.2 : 1.2)) return r.s.p.tunnel ? { y: dz, deck: true, end, roof: r.z + r.s.p.tunnel } : { y: Math.max(g, dz), deck: dz - g > 1.2, end }
     return { y: g, deck: false, end }
   }
   // does another deck go on from the end of r's piece that (x, y) is past (a joint, not an abutment)
@@ -1485,10 +1509,12 @@ export default function drive(city) {
   // the surface under a walker: the ground, or a bridge deck (its sidewalks too) when already up on it
   function footSurface(x, y, curY) {
     const g = city.world.heightAt(x, -y) + 0.15
-    const r = nearestRoad(x, y, 16, true, true, false, curY - 0.5)
+    let r = nearestRoad(x, y, 16, true, true, false, curY - 0.5)
     if (!r) return { y: g, deck: false }
+    let q = null
+    for (let n = 0, o; n < 3 && (o = gored(r, x, y, true)); n++) r = q = o
     const dz = r.z + 0.5, reach = r.s.p.band ? 5 : 1
-    if (r.d < reach && Math.abs(dz - curY) < 2.2) return r.s.p.tunnel ? { y: dz, deck: true, roof: r.z + r.s.p.tunnel } : { y: Math.max(g, dz), deck: dz - g > 1.2 }
+    if (r.d < reach && Math.abs(dz - curY) < (q ? GORE[1] + 1.2 : 2.2)) return r.s.p.tunnel ? { y: dz, deck: true, roof: r.z + r.s.p.tunnel } : { y: Math.max(g, dz), deck: dz - g > 1.2 }
     return { y: g, deck: false }
   }
   // a hike's pace: slower the steeper (and steep downhill too), slower off the trail, a push on tires you

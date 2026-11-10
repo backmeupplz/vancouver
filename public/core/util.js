@@ -110,6 +110,44 @@ export function sampleTerr(T, x, y) {
   return g + at(i, j) * (1 - u) * (1 - v) + at(i + 1, j) * u * (1 - v) + at(i, j + 1) * (1 - u) * v + at(i + 1, j + 1) * u * v
 }
 
+// Two decks side by side at different heights (ramps parting at a gore, carriageways mapped closer than they are
+// wide) are each drawn to their own side of the line halfway between their centre lines: one surface under each
+// lane and a step between them, not one strip through or over the other's. gores(the decks)(L) -> (row's centre, its normal
+// (scaled k), half width, height) => [the left edge's distance out, the right one's], or null (no deck near L)
+// Roads among themselves, and paths: a stair or a walkway beside a road deck is beside it, whatever its height.
+// (tile-worker.js draws them so; the drive plugin's van and walker stand on what is drawn. Kinds: tile-worker.js KIND,
+// 7: living street, the last road)
+export function gores(DK) {
+  return (L) => {
+    const box = (Q) => Q.box || (Q.box = (() => { let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9; for (let i = 0; i < Q.pts.length; i += 2) { x0 = Math.min(x0, Q.pts[i]); x1 = Math.max(x1, Q.pts[i]); y0 = Math.min(y0, Q.pts[i + 1]); y1 = Math.max(y1, Q.pts[i + 1]) } const r = Q.w / 2 + 2; return [x0 - r, y0 - r, x1 + r, y1 + r] })())
+    const b = box(L), near = DK.filter((Q) => Q !== L && !(Q.a === L.a && Q.b === L.b) && (Q.kind <= 7) === (L.kind <= 7) && box(Q)[0] < b[2] && box(Q)[2] > b[0] && box(Q)[1] < b[3] && box(Q)[3] > b[1])
+    if (!near.length) return null
+    const at = (Q, x, y) => { // the nearest point of Q's centre line: [distance, height, its direction, at Q's end?]
+      const P = Q.pts, m = P.length / 2 - 2; let best = [1e9, 0, 1, 0, false]
+      for (let i = 0; i < P.length / 2 - 1; i++) {
+        const ax = P[i * 2], ay = P[i * 2 + 1], dx = P[i * 2 + 2] - ax, dy = P[i * 2 + 3] - ay, l2 = dx * dx + dy * dy || 1, u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)), d = Math.hypot(x - ax - dx * u, y - ay - dy * u)
+        if (d < best[0]) { const l = Math.sqrt(l2); best = [d, Q.z[i] + (Q.z[i + 1] - Q.z[i]) * u, dx / l, dy / l, (i === 0 && u === 0) || (i === m && u === 1)] }
+      }
+      return best
+    }
+    const w0 = L.w / 2
+    return (cx, cy, nx, ny, k, half, z) => {
+      const out = [half, half]
+      for (const Q of near) for (const [e, sg] of [[0, 1], [1, -1]]) {
+        const [d, zq, tx, ty, end] = at(Q, cx + nx * sg * half * k, cy + ny * sg * half * k), dz = Math.abs(zq - z)
+        if (end || d >= half || d > Q.w / 2 || dz < GORE[0] || dz > GORE[1] || Math.abs(tx * ny - ty * nx) < 0.77) continue // (its edge on Q's strip, nearer Q's centre line, Q alongside: not going on from this one's end)
+        if (at(Q, cx, cy)[0] < Math.min(half, Q.w / 2, w0)) continue // (one over the other, not beside it: a ramp under its deck)
+        let lo = 0, hi = half // as far as the line between them, or Q's edge if that comes first
+        for (let n = 0; n < 10; n++) { const m = (lo + hi) / 2; if (at(Q, cx + nx * sg * m * k, cy + ny * sg * m * k)[0] > Math.min(m, Q.w / 2)) lo = m; else hi = m }
+        out[e] = Math.min(out[e], lo)
+      }
+      return out
+    }
+  }
+}
+export const stripped = (L) => L.z && !L.tunnel && L.kind <= 15 // the decks tile-worker.js roads() draws a strip for (.. track, rail, light rail)
+export const GORE = [0.1, 3] // metres apart in height two decks side by side are trimmed at the line between them (nearer: one surface, unstack(); further: one over the other)
+
 // a circle (x, y, r) against a box (centre cx, cy, unit forward fx, fy, half length hl and width hw; right is
 // (fy, -fx)): how to push the circle out { x, y } (one reused object: read it before asking again), or null
 const PUSH = { x: 0, y: 0 }

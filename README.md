@@ -51,7 +51,10 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    round the road, so traffic, walkers and the van go through (no trees in a box; twin tubes mapped closer than they are
    wide share the wall between them). Where OpenStreetMap's portal is short of the mouth the LiDAR shows (the road on
    from it runs on the tunnel's cover, then drops off it into its cut: the George Massey tunnel's north end), the tunnel
-   goes on to that mouth (`tunnel_mouths`). Raised decks have railings along their edges. The terrain
+   goes on to that mouth (`tunnel_mouths`). Raised decks have railings along their edges. Two decks drawn
+   side by side at different heights (ramps parting at a gore, carriageways mapped closer than they are wide) are each
+   drawn to their own side of the line halfway between their centre lines (the deck-stack rule knows it), so each lane has its own deck under it and the step runs between them (`gores()` in `core/util.js`: the drive
+   plugin's van and walker stand on the deck drawn there). The terrain
    is an 8 m grid in detail tiles (plus, under the streets where it can't follow them, 2 m offsets: section TFIN), so
    streets sit on their embankments and in their cuts, fitted to the streets and
    rail lines (where an 8 m point lands in the cut, ravine or yard beside a street, the grid round it moves so the

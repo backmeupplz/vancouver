@@ -7,7 +7,7 @@
 # fixed, in place. A tile: dict(builds=[parts as tiles.py's buildings() makes them: ring, base, mn, h, ridge;
 # tagmn for a mapped min height, lid for one stood on a tunnel's box], decks=[(points, deck heights, width)], ground=f(x, y) -> the
 # drawn ground under numpy arrays of points), lines=[road pieces as tiles.py's road_pieces() makes them] when baking.
-import json, os, sys
+import json, math, os, sys
 from collections import namedtuple
 import numpy as np
 import shapely
@@ -870,8 +870,29 @@ def _stack(tile, tol=0.15):
                 PB = np.array(B['pts'], float); sB = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(PB, axis=0).T))])
                 pr = shapely.line_locate_point(geo[b], pts)
                 dz = za - (np.interp(pr, sB, B['z']) + _top(B))
-                for k in np.nonzero(inside & (np.abs(dz) > tol) & (np.abs(dz) < CLEAR))[0]: out.append((A, ss[k], B, pr[k], float(dz[k]), qx[k], qy[k]))
+                for k in np.nonzero(inside & (np.abs(dz) > tol) & (np.abs(dz) < CLEAR))[0]:
+                    if not _trimmed(B, geo[b], pr[k], A, geo[a], (qx[k], qy[k]), abs(o) * A['w'], dz[k]): out.append((A, ss[k], B, pr[k], float(dz[k]), qx[k], qy[k]))
     return out
+
+
+GORE = (0.1, 3.0)  # tile-worker.js GORE
+
+
+def _trimmed(B, gb, sb, A, ga, p, da, dz):
+    """is deck B's strip trimmed off point p, which is da from A's centre line (the page's tile-worker.js gore(): two
+    decks side by side GORE apart in height are each drawn to their own side of the line halfway between their centre
+    lines, where B's edge lies on A's strip)? sb: p along B"""
+    c = gb.interpolate(sb); db = math.hypot(p[0] - c.x, p[1] - c.y)
+    if not (GORE[0] <= abs(dz) <= GORE[1]) or da >= db or db < 1e-6 or (B['kind'] in ROADS) != (A['kind'] in ROADS): return False  # (roads among themselves, and paths)
+    hb = B['w'] / 2
+    e = shapely.Point(c.x + (p[0] - c.x) / db * hb, c.y + (p[1] - c.y) / db * hb)  # B's edge on p's side
+    sa = ga.project(e); d = ga.distance(e)
+    if sa < 1e-6 or sa > ga.length - 1e-6 or d >= hb or d > A['w'] / 2: return False  # (A goes on from B's end; B's edge off A)
+    if ga.distance(c) < min(hb, A['w'] / 2): return False  # (one over the other, not beside it)
+    ta, tb = ga.interpolate(min(sa + 1, ga.length)), gb.interpolate(min(sb + 1, gb.length))
+    ua, ub = ga.interpolate(max(sa - 1, 0)), gb.interpolate(max(sb - 1, 0))
+    va, vb = (ta.x - ua.x, ta.y - ua.y), (tb.x - ub.x, tb.y - ub.y)
+    return abs(va[0] * vb[0] + va[1] * vb[1]) >= 0.77 * math.hypot(*va) * math.hypot(*vb)  # alongside each other
 
 
 FOOTWAYS = ('footway', 'path', 'cycleway', 'pedestrian', 'track')
@@ -993,6 +1014,11 @@ def deck_selftest():
     d4 = dict(kind='service', pts=[(0, 200), (50, 200)], z=[3.0, 13.0], a=10, b=11, w=5)
     r = apply_rules(dict(builds=[], decks=[], lines=[deck, on, d2, d3, d4], ground=flat), fix=False)
     assert [len(r[k][1]) for k in ('deck-air', 'deck-joint', 'deck-steep')] == [1, 1, 1], r
+    # two ramps side by side 5 m apart, 1 m apart in height: each drawn to its own side of the line between them (the
+    # page's gores()), their lanes on their own decks; one 1 m beside the other (over it): both whole, stacked
+    g = lambda y, z, a: dict(kind='service', pts=[(0, y), (60, y)], z=[z, z], w=6, drive=True, a=a, b=a + 1)
+    n = [len(_stack(dict(lines=[g(300, 5.0, 20), g(300 + d, 6.0, 22)]))) for d in (5, 1)]
+    assert n == [0, 60], n
 
 
 if __name__ == '__main__':

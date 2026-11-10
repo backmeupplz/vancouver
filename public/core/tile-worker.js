@@ -3,7 +3,7 @@
 // Walls by what they face and the single-arm street lights follow Slop Toronto's rules (MIT, © 2026 Mr.doob, © 2026 John
 // Fewell; THIRD_PARTY.md).
 import earcut, { refine as delaunay } from '../vendor/earcut.js'
-import { mulberry32 as mulberry, inPoly, sampleGrid, sampleTerr, wallGrid, wallHeight } from './util.js'
+import { mulberry32 as mulberry, inPoly, sampleGrid, sampleTerr, wallGrid, wallHeight, gores, stripped } from './util.js'
 const GROUND_LIFT = 0 // the ground is one non-overlapping layer (tools/tiles.py), so no class needs lifting
 const KIND = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living', 'pedestrian', 'footway', 'cycleway',
   'path', 'steps', 'track', 'rail', 'lightrail', 'runway', 'taxiway']
@@ -625,7 +625,8 @@ function roads(t, terr, lines, level, ps, R) {
   const surf = Object.assign(mk(), { runs: [] }), paint = mk()
   // jA, jB: how far from each end the junction box there reaches (null: no junction, no stop line)
   const ext = terr.ext, decalH = (x, y) => groundOut(terr, x, y)
-  const strip = (T, pts, zs, half, lift, kind, extra, w, jA, jB, mitre = null) => {
+  const DK = [], gore = gores(DK)
+  const strip = (T, pts, zs, half, lift, kind, extra, w, jA, jB, mitre = null, trim = null) => {
     if (T === surf) T.runs.push({ i0: T.I.length, i1: T.I.length, kind, ...cur }) // (unstack(): which triangles are whose)
     const xs = [], ys = [], zz = []
     for (let i = 0; i < pts.length / 2 - 1; i++) {
@@ -653,7 +654,7 @@ function roads(t, terr, lines, level, ps, R) {
     for (let i = 1; i < m; i++) { s += Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]); cum.push(s) }
     const len = s
     let rows = 0
-    const row = (i, lx, ly, rx, ry) => { // one row across: its left and right points
+    const row = (i, lx, ly, rx, ry, al = half, ar = half) => { // one row across: its left and right points (and how far out they are)
       const e = i === 0 ? edges[0] : i === m - 1 ? edges[1] : null
       if (e) { // on the tile's edge: both points slid along the strip onto it
         const j = i ? i - 1 : 1, dx = xs[i] - xs[j], dy = ys[i] - ys[j], d = e[0] ? dy : dx, l = Math.hypot(dx, dy) || 1
@@ -665,7 +666,7 @@ function roads(t, terr, lines, level, ps, R) {
       for (const [side, px, py] of [[-1, rx, ry], [1, lx, ly]]) {
         const y = zz[i] ?? decalH(px, py) // decals follow the ground under each edge, not the centre line
         T.P.push(px, y + lift, -py)
-        T.A.push(cum[i], side * half, w, kind)
+        T.A.push(cum[i], side < 0 ? -ar : al, w, kind)
         T.B.push(extra, jA == null ? 999 : cum[i] - jA, jB == null ? 999 : len - cum[i] - jB, len)
       }
       if (rows) { const b = T.nv + (rows - 1) * 2; T.I.push(b, b + 2, b + 1, b + 1, b + 2, b + 3) }
@@ -694,7 +695,8 @@ function roads(t, terr, lines, level, ps, R) {
         }
         k = 1 / Math.max(0.5, Math.abs(-ay * nx + ax * ny))
       }
-      row(i, cx + nx * half * k, cy + ny * half * k, cx - nx * half * k, cy - ny * half * k)
+      const [al, ar] = trim ? trim(cx, cy, nx, ny, k, half, zz[i]) : [half, half]
+      row(i, cx + nx * al * k, cy + ny * al * k, cx - nx * ar * k, cy - ny * ar * k, al, ar)
     }
     T.nv += rows * 2
     if (T === surf) T.runs.at(-1).i1 = T.I.length
@@ -718,6 +720,8 @@ function roads(t, terr, lines, level, ps, R) {
   }
   const ends = level === 0 ? carEnds(lines) : null
   const box = (L, e) => setback(ends, L, e)
+  const xdck = level === 0 ? readLines(t, 'XDCK').filter(stripped) : []
+  DK.push(...lines.filter(stripped), ...xdck)
   for (const L of order) {
     const ja = (deg.get(L.a) || 0) >= 3, jb = (deg.get(L.b) || 0) >= 3
     if (L.z) { // bridges: the whole surface, raised
@@ -729,8 +733,9 @@ function roads(t, terr, lines, level, ps, R) {
         let c = caps.get(id); if (!c) caps.set(id, (c = []))
         c.push({ x: P[e * 2], y: P[e * 2 + 1], h: L.z[e] + lift, a: Math.atan2(dy / dl, dx / dl), half: L.w / 2, kind: L.kind, mitred: !!mitreAt(L, id, e === 0) })
       }
-      if (L.band) { const bl = L.kind === K.residential || L.kind === K.tertiary ? 0 : 0, walk = 2.0; strip(surf, L.pts, L.z, L.w / 2 + walk, 0.3, 100, bl * 256 + walk * 16, L.w, null, null) }
-      strip(surf, L.pts, L.z, L.w / 2, lift, L.kind, L.lanes + (L.oneway ? 32 : 0), L.w, ja ? 0 : null, jb ? 0 : null, [mitreAt(L, L.a, true), mitreAt(L, L.b, false)])
+      const trim = gore(L)
+      if (L.band) { const bl = L.kind === K.residential || L.kind === K.tertiary ? 0 : 0, walk = 2.0; strip(surf, L.pts, L.z, L.w / 2 + walk, 0.3, 100, bl * 256 + walk * 16, L.w, null, null, null, trim) }
+      strip(surf, L.pts, L.z, L.w / 2, lift, L.kind, L.lanes + (L.oneway ? 32 : 0), L.w, ja ? 0 : null, jb ? 0 : null, [mitreAt(L, L.a, true), mitreAt(L, L.b, false)], trim)
       continue
     }
     if (level !== 0) continue // the overview shows surfaces only
@@ -741,11 +746,11 @@ function roads(t, terr, lines, level, ps, R) {
       strip(paint, L.pts, null, 1.3, 0.05, L.kind, 0, L.w, null, null)
     }
   }
-  if (level === 0) for (const L of readLines(t, 'XDCK')) { // the next tiles' decks over this one: their strips as theirs draw them, not drawn here (unstack())
-    if (!L.z || L.tunnel || (L.kind > K.track && L.kind !== K.rail && L.kind !== K.lightrail)) continue
+  for (const L of xdck) { // the next tiles' decks over this one: their strips as theirs draw them, not drawn here (unstack())
     cur = { a: L.a, b: L.b, foreign: true }
-    if (L.band) strip(surf, L.pts, L.z, L.w / 2 + 2.0, 0.3, 100, 2.0 * 16, L.w, null, null)
-    strip(surf, L.pts, L.z, L.w / 2, 0.36 + (18 - L.kind) * 0.004 + (L.kind >= K.pedestrian ? 0.05 : 0), L.kind, L.lanes + (L.oneway ? 32 : 0), L.w, null, null)
+    const trim = gore(L)
+    if (L.band) strip(surf, L.pts, L.z, L.w / 2 + 2.0, 0.3, 100, 2.0 * 16, L.w, null, null, null, trim)
+    strip(surf, L.pts, L.z, L.w / 2, 0.36 + (18 - L.kind) * 0.004 + (L.kind >= K.pedestrian ? 0.05 : 0), L.kind, L.lanes + (L.oneway ? 32 : 0), L.w, null, null, null, trim)
   }
   cur = {}
   for (const c of caps.values()) { // between one deck's end and the next round the node, where they open apart: a fan of plain deck
@@ -1514,9 +1519,11 @@ function lights(t, terr, lines, ps, b, R, S) {
   const poles = [] // tile-local x, ground, z, the arm's heading (about +y from +x; NaN: a post-top lamp)
   for (const p of ps) if (p.kind === 3) { const f = offRoad(R, p.x - t.ox, p.y - t.oy, clear); if (!f) continue; const [x, y] = f; if (x < 0 || y < 0 || x >= size || y >= size) continue; const g = heightAt(terr, x, y); pos.push(x, g, -y, 0.8); poles.push(x, g, -y, NaN); mapped.set(key(x, y), 1); S?.addDisc(x, y, 0.15) }
   const taken = (x, y) => { for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) if (mapped.has(key(x + di * 14, y + dj * 14))) return true; return false }
+  const gore = gores([...lines.filter(stripped), ...readLines(t, 'XDCK').filter(stripped)])
   for (const L of lines) {
     const lit = LAMP[L.kind]
     if (!lit || L.layer < 0 || L.tunnel || L.crossing) continue
+    const trim = L.z && stripped(L) ? gore(L) : null
     const P = L.pts, big = L.kind <= K.primary, [bright, step] = lit
     let s = L.a % step, k = 0, run = 0 // the same lamps whichever tile draws the street
     for (let i = 0; i < P.length / 2 - 1; i++) {
@@ -1528,7 +1535,7 @@ function lights(t, terr, lines, ps, b, R, S) {
         const cx = x0 + (x1 - x0) * f, cy = y0 + (y1 - y0) * f, up = L.z && L.z[i] + (L.z[i + 1] - L.z[i]) * f - heightAt(terr, cx, cy) > 1
         const off = L.w / 2 + (up && !L.band ? -0.4 : 1.2) // (up on a deck: on it, by its railing)
         const f_ = up ? [cx - ey * off * side, cy + ex * off * side] : offRoad(R, cx - ey * off * side, cy + ex * off * side, clear)
-        if (!f_) continue
+        if (!f_ || (up && trim && trim(cx, cy, -ey, ex, 1, L.w / 2, L.z[i] + (L.z[i + 1] - L.z[i]) * f)[side > 0 ? 0 : 1] < off)) continue // (none where the deck is trimmed at a gore)
         const [x, y] = f_
         if (x < 0 || y < 0 || x >= size || y >= size || taken(x, y) || (!big && !near(x, y))) continue
         const z = up ? L.z[i] + (L.z[i + 1] - L.z[i]) * f : heightAt(terr, x, y), ax = ey * side, ay = -ex * side // the arm reaches over the kerb lane
