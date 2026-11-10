@@ -11,7 +11,7 @@ const HEAD = 6.5 // lamp head height
 
 export class StreetLights {
   constructor() {
-    this.scene = new THREE.Scene() // the discs, one mesh per detail tile (Tiles adds them)
+    this.scene = new THREE.Scene(); this.scene.name = 'lights' // the discs, one mesh per detail tile (Tiles adds them)
     this.cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 2e4)
     this.cam.up.set(0, 0, -1) // screen right = east, up = north: the texture's u, v (materials.js poolLight)
     this.size = 2048

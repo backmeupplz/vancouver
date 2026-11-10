@@ -21,9 +21,51 @@ globalThis.onmessage = async ({ data }) => { // (globalThis: tools/crosswalk_che
     const t = parse(buf)
     const out = build(t, level)
     for (const g of [out.ground, out.roads, out.paint, out.buildings, out.balconies, out.ao]) if (g?.position) g.box = box(g.position)
+    const size = level ? 4096 : 1024
+    if (out.ground?.index) { out.ground.cells = cells(out.ground, 'index', size); if (out.ground.coarse) out.ground.coarseCells = cells(out.ground, 'coarse', size) }
+    if (out.buildings?.position.length) out.buildings.cells = cells(out.buildings, null, size)
     if (out.lights) out.lights.box = box(out.lights.pos, 4)
     postMessage({ id, ...out }, transferables(out))
   } catch (e) { postMessage({ id, error: String(e) }) }
+}
+
+// A mesh's triangles sorted by the cell of a 4 x 4 grid over the tile that all three corners lie in (the ones across a
+// border last), so the page draws each cell as a mesh of its own (core/tiles.js cellMeshes) and the camera culls the
+// ones it doesn't see: a street-level view drew every tile it touched whole. g[key]: the index to sort (null: the
+// mesh has none, its vertices are moved). Returns, per cell that has any: cell (16: the border's), first, count (in
+// indices, or vertices), then its bounds (min x, y, z, max x, y, z).
+function cells(g, key, size) {
+  const n = 4, N = n * n, c = size / n, p = g.position, ix = key && g[key], nt = (ix ? ix.length : p.length / 3) / 3
+  const of = new Uint8Array(nt), cnt = new Uint32Array(N + 2), order = new Uint32Array(nt)
+  const cell = (v) => Math.min(n - 1, Math.max(0, Math.floor(p[v * 3] / c))) + n * Math.min(n - 1, Math.max(0, Math.floor(-p[v * 3 + 2] / c)))
+  for (let t = 0; t < nt; t++) {
+    const a = ix ? ix[t * 3] : t * 3, b = ix ? ix[t * 3 + 1] : a + 1, d = ix ? ix[t * 3 + 2] : a + 2, k = cell(a)
+    cnt[(of[t] = k === cell(b) && k === cell(d) ? k : N) + 1]++
+  }
+  for (let k = 0; k <= N; k++) cnt[k + 1] += cnt[k]
+  const at = cnt.slice()
+  for (let t = 0; t < nt; t++) order[at[of[t]]++] = t
+  if (ix) {
+    const o = new ix.constructor(ix.length)
+    for (let i = 0; i < nt; i++) { const t = order[i] * 3; o[i * 3] = ix[t]; o[i * 3 + 1] = ix[t + 1]; o[i * 3 + 2] = ix[t + 2] }
+    g[key] = o
+  } else {
+    const nv = p.length / 3
+    for (const [k, a] of Object.entries(g)) {
+      if (k === 'box' || !ArrayBuffer.isView(a) || a.length % nv) continue
+      const s = (a.length / nv) * 3, o = new a.constructor(a.length)
+      for (let i = 0; i < nt; i++) { const f = order[i] * s; for (let j = 0; j < s; j++) o[i * s + j] = a[f + j] }
+      g[k] = o
+    }
+  }
+  const P = g.position, I = key && g[key], out = []
+  for (let k = 0; k <= N; k++) {
+    if (cnt[k + 1] === cnt[k]) continue
+    const b = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity]
+    for (let i = cnt[k] * 3; i < cnt[k + 1] * 3; i++) { const v = (I ? I[i] : i) * 3; for (let j = 0; j < 3; j++) { const x = P[v + j]; if (x < b[j]) b[j] = x; if (x > b[j + 3]) b[j + 3] = x } }
+    out.push(k, cnt[k] * 3, (cnt[k + 1] - cnt[k]) * 3, ...b)
+  }
+  return new Float64Array(out)
 }
 
 // bounds of a position buffer, so the page doesn't loop over it (min x, y, z, max x, y, z)

@@ -18,7 +18,7 @@ addEventListener('error', (e) => { if (/WebGL unavailable/.test(e.message)) retu
 
 let city = null // the plugin host (city.js)
 let dirty = true // render on demand: only when something changed
-let shadowStale = false, lastShadow = 0 // new tiles refresh the shadow map, at most twice a second
+let shadowStale = false, lampsStale = false, lastShadow = 0 // new tiles refresh the shadow map, at most twice a second
 const mobile = matchMedia('(pointer: coarse)').matches || innerWidth < 700
 
 // No WebGL (hardware acceleration off, an old or locked-down browser): say so plainly and stop
@@ -53,6 +53,7 @@ const scene = new THREE.Scene()
 scene.background = new THREE.Color(0x0e1620)
 const treeScene = new THREE.Scene() // billboards, drawn after the ink pass
 const overlay = new THREE.Scene() // plugins' effects, drawn last without outlines
+scene.name = 'scene'; treeScene.name = 'trees'; overlay.name = 'overlay' // (names: tools/bench.mjs's GPU time per pass)
 
 // ---------- light ----------
 const hemi = new THREE.HemisphereLight(0xe8eef8, 0x8a8070, 2.0)
@@ -81,7 +82,9 @@ let lightStale = true
 const tiles = new Tiles({
   scene, treeScene, mats, farMats, lights,
   // shadows follow new tiles at most twice a second; a tile that loads hidden changes neither them nor the picture
-  onChange: (shown = true) => { dirty = true; if (shown) { shadowStale = true; trees3d?.changed() } },
+  // (t: the tile that came or went; one outside the shadow map's square, with room for a tower's shadow, leaves the shadows be:
+  // a street-level view's overview tiles kept redrawing them, and the night lights with them, twice a second)
+  onChange: (shown = true, t) => { dirty = true; if (shown) { if (!t || nearShadows(t)) shadowStale = true; else if (!t.level) lampsStale = true; trees3d?.changed() } }, // (a detail tile brings its lamps)
   onLoad: (t) => city?.emit('tile:load', tileInfo(t)),
   onUnload: (t) => { trees3d?.changed(); city?.emit('tile:unload', tileInfo(t)) },
 })
@@ -200,6 +203,10 @@ const ownCamera = {
 
 // ---------- shadows: a sharp shadow map over what is on screen, refitted only when the view moves past it ----------
 const sh = { x: NaN, y: 0, z: 0, r: 0 }
+function nearShadows(t) {
+  const s = t.level ? 4096 : 1024, m = sh.r + 400
+  return !(sh.x >= -1e9) || (t.ox < sh.x + m && t.ox + s > sh.x - m && t.oy < -sh.z + m && t.oy + s > -sh.z - m)
+}
 function updateShadows() {
   if (own?.camera.isPerspectiveCamera) return perspectiveShadows(own.camera, own.opts.shadowRadius ?? 300)
   const r = own ? own.opts.shadowRadius ?? 300 : Math.hypot(innerWidth, innerHeight * 2) / K / cam.zoom / 2 + 80
@@ -422,6 +429,7 @@ const fxaa = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMater
 }))
 fxaa.frustumCulled = false
 const fxaaScene = new THREE.Scene()
+fxaaScene.name = 'fxaa'; postScene.name = 'ink'
 fxaaScene.add(fxaa)
 let aaMode = quality.tier.aa
 function setAA(mode) { aaMode = mode; dirty = true } // the quality tier's aa
@@ -510,14 +518,14 @@ function draw(scale = res) {
 // at full resolution (twice as long each time it had to drop again soon after, #548). When the view stops and nothing animates,
 // one last frame is drawn at full resolution, so a still map is sharp; a view that stops while things animate (traffic,
 // ships, weather) goes straight back to full resolution half a second later, and stays there while its frames are on time.
-let res = 1, loadedAt = 0, lateMs = 0, onTimeMs = 0, probeMs = 3000, upMs = 20000, promotedAt = -1e9, streamAt = -1e9, probedAt = -1e9, settleAt = Infinity, floorLate = 0, stillAt = 0, seenZoom = 0, probeFrom = 1
+let res = 1, pinned = false, loadedAt = 0, lateMs = 0, onTimeMs = 0, probeMs = 3000, upMs = 20000, promotedAt = -1e9, streamAt = -1e9, probedAt = -1e9, settleAt = Infinity, floorLate = 0, stillAt = 0, seenZoom = 0, probeFrom = 1
 const seen = new THREE.Matrix4()
 function settle() { settleAt = performance.now() + 2500; lateMs = onTimeMs = 0; dirty = true } // a new camera or tier compiles shaders: no measure
 // ms: since the last frame; cpu: the main thread's own work in it (a frame late from building a tile is not one a
 // lower resolution would help)
 function adaptResolution(ms, cpu, now, C) {
   if (!seen.equals(C.matrixWorld) || seenZoom !== C.zoom) { seen.copy(C.matrixWorld); seenZoom = C.zoom; stillAt = now }
-  if (document.hidden || now < settleAt || ms > 250 || cpu > 10) return // nor is a stall (a hidden tab, a long task)
+  if (pinned || document.hidden || now < settleAt || ms > 250 || cpu > 10) return // nor is a stall (a hidden tab, a long task)
   // nor are frames while tiles stream in: their uploads' GPU time lands in them, and a lower resolution would not help.
   // It used to step the resolution down to the floor on every load and stay there for a minute (#557); after a
   // load the next probe back up comes soon
@@ -544,7 +552,8 @@ function applyQuality(t) { // a new tier (core/quality.js)
   define('NOINK', t.ink === 'off')
   tiles.cached = t.cached; trees3d.share = t.trees3d; trees3d.fine = t.detail; trees3d.changed(); mats.ao.visible = t.detail
   lightStale = true
-  res = 1; settle()
+  if (!pinned) res = 1
+  settle()
   city?.emit('quality', t)
 }
 
@@ -582,9 +591,10 @@ function loop(now) {
   const pl = own?.camera.isPerspectiveCamera && city?.player, oc = pl && OCCLUDER[pl.mode]
   if (oc) occluder.value.set(pl.x, pl.y + oc[0], pl.z, oc[1]); else occluder.value.w = 0
   updateShadows()
-  if (shadowStale && now - lastShadow > 500) { shadowStale = false; lastShadow = now; renderer.shadowMap.needsUpdate = true; lightStale = true }
+  if ((shadowStale || lampsStale) && now - lastShadow > 500) { if (shadowStale) renderer.shadowMap.needsUpdate = true; shadowStale = lampsStale = false; lastShadow = now; lightStale = true }
+  trees3d.all(renderer.shadowMap.needsUpdate) // (every 3D tree casts its shadow; else only those in view are drawn)
   updateLights()
-  if (shadowStale) dirty = true // come back for it
+  if (shadowStale || lampsStale) dirty = true // come back for it
   draw()
   cpu = performance.now() - t0
 }
@@ -615,7 +625,7 @@ function showQuality() {
 }
 for (const b of document.querySelectorAll('#gfx [data-q]')) b.onclick = () => { quality.set(b.dataset.q); showQuality() }
 city.on('quality', showQuality); showQuality()
-window.view = { cam, controls, setView, zAt, renderer, tiles, trees3d, setAA, quality, get res() { return res }, set res(v) { res = v; settleAt = Infinity } } // (res: tools pin the adaptive resolution)
+window.view = { cam, controls, setView, zAt, renderer, tiles, trees3d, setAA, quality, get res() { return res }, set res(v) { res = v; pinned = true } } // (res: tools pin the adaptive resolution)
 
 // ---------- loading screen: until what's on screen has arrived ----------
 await new Promise((ok) => {

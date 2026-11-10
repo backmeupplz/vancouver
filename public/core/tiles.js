@@ -348,6 +348,10 @@ export class Tiles {
       const a = t.i - H.x, b = t.j - H.y
       if (a >= 0 && b >= 0 && a < H.z && b < H.w) next[b * H.z + a] = 255
     }
+    for (const t of this.tiles.values()) if (t.cells) for (const [m, a, b] of t.cells) { // an overview tile's 1 km cells: not drawn under a detail tile
+      const x = t.i * 4 + a - H.x, y = t.j * 4 + b - H.y
+      m.visible = !(x >= 0 && y >= 0 && x < H.z && y < H.w && next[y * H.z + x])
+    }
     const tex = holes.holeMap.value
     if (tex && next.some((v, k) => v !== tex.image.data[k])) { tex.image.data.set(next); tex.needsUpdate = true }
   }
@@ -368,7 +372,7 @@ export class Tiles {
     if (t.visible === on) return
     t.visible = on
     if (t.group && t.state !== 'warming') this.showAll(t, on) // else once uploaded
-    this.onChange?.()
+    this.onChange?.(true, t)
   }
 
   async load(t) {
@@ -393,7 +397,7 @@ export class Tiles {
     if (!this.made.length && !this.warming.length) return
     if (!this.warmScene) { // a 1×1 target and a plain material: drawing a mesh there uploads all its buffers
       // (one material per kind of mesh: a shared one would be recompiled between instanced and plain meshes)
-      this.warmScene = new THREE.Scene(); this.warmMats = [0, 1, 2].map(() => new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, depthTest: false }))
+      this.warmScene = new THREE.Scene(); this.warmScene.name = 'warm'; this.warmMats = [0, 1, 2].map(() => new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, depthTest: false }))
       this.warmTarget = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: false }); this.warmCam = new THREE.Camera()
     }
     const alive = (t) => this.tiles.get(this.key(t.level, t.i, t.j)) === t
@@ -412,7 +416,7 @@ export class Tiles {
         t.state = 'ready'; t.warm = null
         this.showAll(t, t.visible)
         this.onLoad?.(t)
-        this.onChange?.(t.visible) // a tile that shows changes the picture (and the shadows); a hidden one only the plan
+        this.onChange?.(t.visible, t) // a tile that shows changes the picture (and the shadows); a hidden one only the plan
         if (!this.rush) return
       }
       const n = this.made.splice(this.made.indexOf(this.first(this.made)), 1)[0] // else make the next tile (as warming); its buffers go up from the next frame
@@ -463,19 +467,33 @@ export class Tiles {
     const free = (geo, b) => {
       if (b) { geo.boundingBox = new THREE.Box3(v0.fromArray(b), new THREE.Vector3().fromArray(b, 3)); geo.boundingSphere = geo.boundingBox.getBoundingSphere(new THREE.Sphere()) } else { geo.computeBoundingSphere(); geo.computeBoundingBox() }
       for (const a of [...Object.values(geo.attributes), geo.index]) if (a) a.onUpload(function () { this.array = null }) }
-    const add = (geo, mat, opts = {}, b) => { free(geo, b); const m = new THREE.Mesh(geo, mat); Object.assign(m, opts); m.matrixAutoUpdate = false; m.updateMatrix(); g.add(m); return m }
+    const add = (geo, mat, opts = {}, b, to = g) => { free(geo, b); const m = new THREE.Mesh(geo, mat); Object.assign(m, opts); m.matrixAutoUpdate = false; m.updateMatrix(); to.add(m); return m }
+    // mk(first, count, bounds) per cell of the tile's 4 x 4 grid -> its mesh(es): culled by the camera each on its
+    // own, and an overview tile's hidden where a detail tile shows (t.cells, updateHoles: their fragments were all
+    // discarded there, after the vertex work; the triangles across a cell's border, cell 16, always draw)
+    const cellMeshes = (cells, mk) => {
+      for (let i = 0; i < cells.length; i += 9) for (const m of [mk(cells[i + 1], cells[i + 2], cells.subarray(i + 3, i + 9))].flat()) if (t.level && cells[i] < 16) (t.cells ||= []).push([m, cells[i] & 3, cells[i] >> 2])
+    }
     if (res.ground) {
       const geo = new THREE.BufferGeometry()
       geo.setAttribute('position', new THREE.BufferAttribute(res.ground.position, 3))
       geo.setAttribute('cls', new THREE.BufferAttribute(res.ground.cls, 1))
-      geo.setIndex(new THREE.BufferAttribute(res.ground.index, 1))
       geo.setAttribute('normal', new THREE.BufferAttribute(res.ground.normal, 3, true))
-      t.ground = add(geo, mt.ground, { receiveShadow: true }, res.ground.box)
+      // a mesh per cell of the tile (tile-worker.js cells), all on the one vertex and index buffer
+      const ground = (index, cells) => {
+        const ia = new THREE.BufferAttribute(index, 1), G = new THREE.Group()
+        cellMeshes(cells, (first, count, b) => {
+          const cg = new THREE.BufferGeometry()
+          for (const k of ['position', 'cls', 'normal']) cg.setAttribute(k, geo.attributes[k])
+          cg.setIndex(ia); cg.setDrawRange(first, count)
+          return add(cg, mt.ground, { receiveShadow: true }, b, G)
+        })
+        g.add(G)
+        return G
+      }
+      t.ground = ground(res.ground.index, res.ground.cells)
       if (res.ground.coarse) { // the same vertices, fewer triangles: the map further out (setDetail)
-        const cg = new THREE.BufferGeometry()
-        for (const k of ['position', 'cls', 'normal']) cg.setAttribute(k, geo.attributes[k])
-        cg.setIndex(new THREE.BufferAttribute(res.ground.coarse, 1))
-        t.coarse = add(cg, mt.ground, { receiveShadow: true }, res.ground.box)
+        t.coarse = ground(res.ground.coarse, res.ground.coarseCells)
         t.ground.visible = this.fine; t.coarse.visible = !this.fine
       }
     }
@@ -498,15 +516,19 @@ export class Tiles {
       geo.setAttribute('aFac', new THREE.BufferAttribute(b.aFac, 4))
       return geo
     }
-    // in pieces of ~1.5 MB: pump() uploads a few MB a frame, and an overview tile's buildings (20+ MB) in one piece
-    // cost a 70 ms frame (each piece keeps the tile's bounds)
+    // a cell at a time, in pieces of ~1.5 MB: pump() uploads a few MB a frame, and an overview tile's buildings (20+ MB)
+    // in one piece cost a 70 ms frame
     if (res.buildings?.position.length) {
-      const B = res.buildings, nv = B.position.length / 3, arrays = Object.entries(B).filter(([k, a]) => k !== 'box' && ArrayBuffer.isView(a))
+      const B = res.buildings, nv = B.position.length / 3, arrays = Object.entries(B).filter(([k, a]) => k !== 'box' && k !== 'cells' && ArrayBuffer.isView(a))
       const step = Math.ceil(1.5e6 / (arrays.reduce((s, [, a]) => s + a.byteLength, 0) / nv) / 3) * 3 // whole triangles
-      for (let v = 0; v < nv; v += step) {
-        const e = Math.min(nv, v + step), part = Object.fromEntries(arrays.map(([k, a]) => [k, a.subarray(v * a.length / nv, e * a.length / nv)]))
-        add(bgeo(part), mt.building, { castShadow: true, receiveShadow: true }, B.box)
-      }
+      cellMeshes(B.cells, (first, count, b) => {
+        const ms = []
+        for (let v = first; v < first + count; v += step) {
+          const e = Math.min(first + count, v + step), part = Object.fromEntries(arrays.map(([k, a]) => [k, a.subarray(v * a.length / nv, e * a.length / nv)]))
+          ms.push(add(bgeo(part), mt.building, { castShadow: true, receiveShadow: true }, b))
+        }
+        return ms
+      })
     }
     if (res.balconies) { t.balcony = add(bgeo(res.balconies), mt.building, { castShadow: true, receiveShadow: true }, res.balconies.box); t.balcony.visible = this.balconies }
     if (res.ao) { // after the paint

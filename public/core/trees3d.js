@@ -13,6 +13,7 @@ const R0 = PHONE ? 140 : 190 // metres around the camera (times the quality tier
 const MAX = PHONE ? 1200 : 3000 // trees drawn in 3D at most (the nearest; the circle shrinks in dense parks)
 const STEP = 8 // the camera moves this far before the set is rebuilt
 const CELL = 64 // per-tile grid of trees, metres
+const TURN = 0.2 // radians the camera turns before the set is rebuilt
 const LOD = 60 // metres (times the share): the nearer trees get the finer forms, the rest (and all on Low) the coarse
 export class Trees3D {
   constructor({ scene, tiles, treeMaterial }) {
@@ -64,13 +65,20 @@ export class Trees3D {
   // per frame while a perspective camera draws the map; off() when it doesn't
   update(camera) {
     if (!this.group.parent) this.scene.add(this.group)
-    const cx = camera.position.x, cz = camera.position.z
-    if (Math.hypot(cx - this.at.x, cz - this.at.z) < STEP && !this.dirty) return false
+    const cx = camera.position.x, cz = camera.position.z, e = camera.matrixWorld.elements
+    // the trees in view come first in each mesh and only they are drawn (a street-level camera sees a sixth of the
+    // circle; they were most of its triangles), all of them in a frame that redraws the shadow map (main.js: all(on)).
+    // In view: within the camera's horizontal field and TURN more each side (it turns that far before the next
+    // rebuild), or right by it (a crown overhead, a steep look down)
+    const yaw = Math.atan2(-e[8], -e[10]), half = Math.atan(Math.tan(camera.fov * Math.PI / 360) * Math.max(1, camera.aspect)) + 2 * TURN
+    const turned = Math.abs(Math.atan2(Math.sin(yaw - this.yaw), Math.cos(yaw - this.yaw))) > TURN || Math.abs(half - this.half) > 0.02
+    if (Math.hypot(cx - this.at.x, cz - this.at.z) < STEP && !turned && !this.dirty) return false
     this.dirty = false
-    this.at.set(cx, 0, cz)
+    this.at.set(cx, 0, cz); this.yaw = yaw; this.half = half
     this.rebuild(cx, cz)
     return true
   }
+  all(on) { if (on === this.whole) return; this.whole = on; this.meshes.forEach((m) => { m.count = on ? m.userData.all : m.userData.seen }) }
   off() {
     if (!this.group.parent) return
     this.group.removeFromParent()
@@ -121,22 +129,28 @@ export class Trees3D {
       R = Math.sqrt(near[MAX][0]); n = MAX
     }
     const counts = this.meshes.map(() => 0), { M, q, s, p, c } = this, L2 = this.fine ? (LOD * this.share) ** 2 : -1
-    for (let k = 0; k < n; k++) {
-      const [d2, t, e] = near[k], A = t.trees.geometry.attributes
-      const shape = Math.min(FORMS - 1, A.iVar.array[e] | 0), m = shape * 2 + (d2 < L2 ? 0 : 1), mesh = this.meshes[m], h = A.iSize.array[e * 2 + 1] / 0.866
-      const w = A.iSize.array[e * 2], x = A.iPos.array[e * 3], y = A.iPos.array[e * 3 + 1], z = A.iPos.array[e * 3 + 2]
-      const seed = (x * 0.37 + z * 0.73) % 6.283 // (the billboards turn and deepen their pictures alike, materials.js)
-      p.set(t.ox + x, y - 0.1, -t.oy + z)
-      q.setFromAxisAngle(UP, seed)
-      s.set(w, h, w * (0.88 + 0.24 * Math.abs(Math.sin(seed * 3.1))))
-      const i = counts[m]++
-      mesh.setMatrixAt(i, M.compose(p, q, s))
-      mesh.geometry.attributes.iBase.setXY(i, mesh.userData.b0, A.iClear.array[e]) // pruned up (tiles.js makeTrees)
-      c.fromArray(A.iCol.array, e * 3) // the billboard's colour
-      mesh.setColorAt(i, c)
+    const fx = Math.sin(this.yaw), fz = Math.cos(this.yaw), cosH = Math.cos(Math.min(Math.PI, this.half))
+    const inView = (t, e, d2) => { const P = t.trees.geometry.attributes.iPos.array, dx = t.ox + P[e * 3] - cx, dz = -t.oy + P[e * 3 + 2] - cz; return d2 < 900 || dx * fx + dz * fz > cosH * Math.sqrt(d2) }
+    for (let pass = 0; pass < 2; pass++) { // in view, then the rest
+      if (pass) this.meshes.forEach((m, i) => { m.userData.seen = counts[i] })
+      for (let k = 0; k < n; k++) {
+        const [d2, t, e] = near[k], A = t.trees.geometry.attributes
+        if (inView(t, e, d2) === !!pass) continue
+        const shape = Math.min(FORMS - 1, A.iVar.array[e] | 0), m = shape * 2 + (d2 < L2 ? 0 : 1), mesh = this.meshes[m], h = A.iSize.array[e * 2 + 1] / 0.866
+        const w = A.iSize.array[e * 2], x = A.iPos.array[e * 3], y = A.iPos.array[e * 3 + 1], z = A.iPos.array[e * 3 + 2]
+        const seed = (x * 0.37 + z * 0.73) % 6.283 // (the billboards turn and deepen their pictures alike, materials.js)
+        p.set(t.ox + x, y - 0.1, -t.oy + z)
+        q.setFromAxisAngle(UP, seed)
+        s.set(w, h, w * (0.88 + 0.24 * Math.abs(Math.sin(seed * 3.1))))
+        const i = counts[m]++
+        mesh.setMatrixAt(i, M.compose(p, q, s))
+        mesh.geometry.attributes.iBase.setXY(i, mesh.userData.b0, A.iClear.array[e]) // pruned up (tiles.js makeTrees)
+        c.fromArray(A.iCol.array, e * 3) // the billboard's colour
+        mesh.setColorAt(i, c)
+      }
     }
     this.meshes.forEach((m, i) => { // upload only what is drawn
-      m.count = counts[i]; m.visible = counts[i] > 0
+      m.userData.all = counts[i]; m.count = this.whole ? counts[i] : m.userData.seen; m.visible = counts[i] > 0
       for (const a of [m.instanceMatrix, m.instanceColor, m.geometry.attributes.iBase]) { a.clearUpdateRanges(); a.addUpdateRange(0, counts[i] * a.itemSize); a.needsUpdate = true }
     })
     // the billboards inside the circle step aside; over its last stretch they fade in over the 3D trees (and the camera

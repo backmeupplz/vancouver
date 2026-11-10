@@ -60,7 +60,7 @@ export class Bloom {
   // its uniforms
   constructor(prefilter, uniforms) {
     this.levels = []
-    this.scene = new THREE.Scene(); this.cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+    this.scene = new THREE.Scene(); this.scene.name = 'bloom'; this.cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
     this.mesh = new THREE.Mesh(quad); this.mesh.frustumCulled = false; this.scene.add(this.mesh)
     this.pre = new THREE.ShaderMaterial({
       uniforms: { ...uniforms, threshold: look.threshold }, vertexShader: VS, depthTest: false, depthWrite: false,
