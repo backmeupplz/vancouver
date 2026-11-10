@@ -350,6 +350,38 @@ export function farModels(THREE) {
   return { cars: FAR.map((fn, i) => build(THREE, fn, true, 'far ' + i)), person: k.geometry().scale(H, H, H), bike: bikeModel(THREE) }
 }
 
+// The cheapest models, for what is a few pixels on the screen (#604): a car as two blocks in the main colours of its
+// lower and upper halves (taken from its far model `cars[k]`) with a lamp strip at each end, 144 vertices for 432; a
+// person as legs, body and head, 108 for 252.
+export function dotModels(THREE, cars) {
+  const col = new THREE.Color()
+  const main = (g, y0, y1) => { // [colour, part] of most of the surface between two heights
+    const P = g.attributes.position.array, C = g.attributes.aCol.array, A = g.attributes.aPart.array, sum = new Map()
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
+    for (let i = 0; i < P.length / 3; i += 3) {
+      a.fromArray(P, i * 3); b.fromArray(P, i * 3 + 3); c.fromArray(P, i * 3 + 6)
+      const y = (a.y + b.y + c.y) / 3
+      if (y < y0 || y >= y1 || A[i] > 1.5) continue // (not the lamps)
+      const key = A[i] < 0.5 ? 'body' : col.setRGB(C[i * 3], C[i * 3 + 1], C[i * 3 + 2]).getHex()
+      sum.set(key, (sum.get(key) || 0) + b.sub(a).cross(c.sub(a)).length())
+    }
+    const best = [...sum].sort((p, q) => q[1] - p[1])[0]?.[0] ?? 'body'
+    return best === 'body' ? [null, 0] : [best, 1]
+  }
+  const car = (g, i) => {
+    g.computeBoundingBox()
+    const { min, max } = g.boundingBox, k = kit(THREE), L = max.x - min.x, ym = min.y + (max.y - min.y) * 0.55
+    k.c(...main(g, min.y + 0.3, ym)).box(min.x, max.x, min.y + 0.2, ym, min.z, max.z)
+    k.c(...main(g, ym, max.y + 1)).box(min.x + L * 0.12, max.x - L * 0.22, ym, max.y, min.z * 0.9, max.z * 0.9)
+    k.c(0xfff2cc, 2).box(max.x, max.x + 0.04, 0.6, 0.74, min.z, max.z).c(0xb01010, 3).box(min.x - 0.04, min.x, 0.62, 0.76, min.z, max.z)
+    const o = k.geometry(); o.name = 'dot ' + i
+    return o
+  }
+  const k = kit(THREE)
+  k.c(null, 1).box(-0.09, 0.09, 0, 0.86, -0.17, 0.17).c(null, 0).box(-0.13, 0.13, 0.84, 1.44, -0.24, 0.24).c(null, 2).box(-0.11, 0.11, 1.45, 1.74, -0.1, 0.1)
+  return { cars: cars.map(car), person: k.geometry().scale(H, H, H) }
+}
+
 // kind: 'car', 'person' or 'bike'; hide: a { value } uniform, the squared radius around uCam within which these
 // boxes are not drawn (the detailed models are), or null for the detailed models themselves
 export function lifeMaterial(THREE, uni, kind, hide = null) {

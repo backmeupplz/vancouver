@@ -8,7 +8,7 @@
 // they brake for, and bumps (a car hit stops a moment, a person knocked stumbles or falls over and gets up again).
 
 import { kit } from '../../core/kit.js'
-import { carModels, peopleModels, farModels, lifeMaterial, H, OUTFIT, signalModels, postModel, DETAIL, ARM_Y, ARM_BLADE, POST_BLADES, LENSES, POLE_LENSES, PED_LENSES } from './models.js'
+import { carModels, peopleModels, farModels, dotModels, lifeMaterial, H, OUTFIT, signalModels, postModel, DETAIL, ARM_Y, ARM_BLADE, POST_BLADES, LENSES, POLE_LENSES, PED_LENSES } from './models.js'
 import { blades } from './blades.js'
 
 import { vancouver } from '../../core/util.js'
@@ -54,6 +54,9 @@ export default function life(city) {
   const carNearMat = material('car'), personNearMat = material('person')
   const carMeshes = MODELS.map((g) => instanced(g, carMat, MAX_CARS))
   const people = instanced(person, personMat, MAX_PEOPLE)
+  // and the cheapest ones, for those a few pixels long (put())
+  const DOTS = dotModels(THREE, MODELS)
+  const carDots = DOTS.cars.map((g) => instanced(g, carMat, MAX_CARS)), peopleDots = instanced(DOTS.person, personMat, MAX_PEOPLE)
   // the detailed models near a perspective camera, filled from the same buffer (pickNear())
   const carsNear = carModels(THREE).map((g) => instanced(g, carNearMat, MAX_NEAR))
   const peopleNear = peopleModels(THREE).map((g) => instanced(g.scale(H, H, H), personNearMat, MAX_NEAR))
@@ -68,12 +71,13 @@ export default function life(city) {
   poolGeo.setAttribute('position', new THREE.Float32BufferAttribute([...quad(0, 10, 0.9, 3.4, 0), ...quad(0, 3, 0.9, 1.4, 1)], 3))
   const HALF = MODELS.map((g) => { g.computeBoundingBox(); return g.boundingBox.max.x })
   const WIDE = MODELS.map((g) => g.boundingBox.max.z * 2)
-  const pools = carMeshes.map(({ ib }, k) => {
+  const carAll = [...carMeshes, ...carDots, ...carsNear] // (each with its pool: the nearest cars are in none of the others' buffers)
+  const pools = carAll.map(({ ib, m: { geometry: G } }) => {
     const g = new THREE.InstancedBufferGeometry().copy(poolGeo)
     g.setAttribute('iA', new THREE.InterleavedBufferAttribute(ib, 4, 0)); g.setAttribute('iB', new THREE.InterleavedBufferAttribute(ib, 4, 4))
     g.instanceCount = 0
     const mat = new THREE.ShaderMaterial({
-      uniforms: { ...uni, uHalf: { value: HALF[k] } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      uniforms: { ...uni, uHalf: { value: (G.computeBoundingBox(), G.boundingBox.max.x) } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
       vertexShader: `attribute vec4 iA, iB; uniform float uHalf; varying float vF, vRear, vBrake;
         void main() {
           vRear = position.z; vBrake = mod(iB.z, 2.0);
@@ -344,9 +348,7 @@ export default function life(city) {
       // under a perspective camera the boxes within the near radii are hidden (in their shader, by uCam / uNear)
       // and those things are copied to the detailed models instead
       // (and on the map zoomed right in, MAP_NEAR: everything in view, about its middle)
-      const C = city.view.camera, persp = !!C.isPerspectiveCamera, close = !persp && C.zoom >= MAP_NEAR, near = persp || close
-      uni.uCam.value.copy(close ? city.controls.target : C.position)
-      nearCars.value = close ? 400 ** 2 : near ? NEAR_CARS ** 2 : 0; nearPeople.value = close ? 400 ** 2 : near ? NEAR_PEOPLE ** 2 : 0
+      sight()
       // the cars: positions and (id, speed), drawn every frame from here (carsAt()); the time of the tick it answers
       if (snap.raw.length < m.cars * 8) { snap.raw = new Float32Array(m.cars * 12); snap.pos = new Float32Array(m.cars * 12); snap.aux = new Float32Array(m.cars * 3) }
       snap.raw.set(m.buf.subarray(0, m.cars * 8)); snap.aux.set(m.buf.subarray(m.base, m.base + m.cars * 2))
@@ -390,11 +392,12 @@ export default function life(city) {
     for (const o of carsNear) o.n = 0
     for (let k = 0, off = 0; k < KINDS; k++) {
       const c = snap.counts[k] || 0, m = Math.min(c, carMeshes[k].cap)
-      put(carMeshes[k], P, off, m); pools[k].geometry.instanceCount = m
+      put(carMeshes[k], P, off, m, SEE.car, carDots[k])
       if (near) pickNear(P, off, m, Math.sqrt(nearCars.value), pickCar[k])
       off += c
     }
     for (const o of carsNear) show(o, o.n)
+    for (let i = 0; i < pools.length; i++) pools[i].geometry.instanceCount = carAll[i].m.geometry.instanceCount
   }
   // the people and cyclists at clock time t, moved on from the latest snapshot like the cars (drawn as they came, they
   // moved only on the frames an answer arrived: a stutter whenever the worker answered a frame late)
@@ -404,10 +407,10 @@ export default function life(city) {
     if (e > 0) for (let i = 0; i < n; i++) { Q[i * 8] += V[i * 2] * e; Q[i * 8 + 2] += V[i * 2 + 1] * e }
     for (const o of peopleNear) o.n = 0
     const np = Math.min(snap.pn, people.cap)
-    put(people, Q, 0, np)
+    put(people, Q, 0, np, SEE.person, peopleDots)
     if (nearPeople.value > 0) pickNear(Q, 0, np, Math.sqrt(nearPeople.value), pickPerson)
     for (const o of peopleNear) show(o, o.n)
-    put(bikes, Q, snap.pn, Math.min(snap.bn, bikes.cap))
+    put(bikes, Q, snap.pn, Math.min(snap.bn, bikes.cap), SEE.bike)
     // the people for city.traffic.people, while a game asks for them: x, y, z, yaw and id
     snap.np = 0
     if (performance.now() - snap.asked < 2000) {
@@ -416,7 +419,41 @@ export default function life(city) {
       snap.np = snap.pn
     }
   }
-  function put(o, buf, off, n) { o.ib.array.set(buf.subarray(off * 8, (off + n) * 8)); show(o, n) }
+  // Only what the camera can see is drawn (#604: every simulated car and person was, whether in view or not, 540 000
+  // triangles a frame at a busy hour): not what is behind it or off to the side, nor what is too far to make out
+  // (a person past 320 m, a car in the fog), and what is a few pixels long as the cheapest model (dotModels()).
+  // SEE, per kind: the radius of its ball against the view's sides, and the squared distances from uCam within which
+  // the detailed models draw it instead (near), from which it is a dot (dot) and past which nothing (far).
+  const SEE = { car: { r: 12, near: 0, dot: Infinity, far: Infinity }, person: { r: 4, near: 0, dot: Infinity, far: Infinity }, bike: { r: 4, near: 0, dot: Infinity, far: Infinity } }
+  const frustum = new THREE.Frustum(), ball = new THREE.Sphere()
+  function sight() {
+    // under a perspective camera the boxes within the near radii are left out
+    // and those things are copied to the detailed models instead
+    // (and on the map zoomed right in, MAP_NEAR: everything in view, about its middle)
+    const C = city.view.camera, persp = !!C.isPerspectiveCamera, close = !persp && C.zoom >= MAP_NEAR, near = persp || close
+    uni.uCam.value.copy(close ? city.controls.target : C.position)
+    nearCars.value = close ? 400 ** 2 : near ? NEAR_CARS ** 2 : 0; nearPeople.value = close ? 400 ** 2 : near ? NEAR_PEOPLE ** 2 : 0
+    frustum.setFromProjectionMatrix(vp.multiplyMatrices(C.projectionMatrix, C.matrixWorldInverse))
+    const fog = city.scene.fog?.far || 1500, sq = (x) => x * x
+    Object.assign(SEE.car, { near: nearCars.value, dot: persp ? sq(NEAR_CARS * 2.4) : close || C.zoom > 0.5 ? Infinity : -1, far: persp ? sq(Math.min(fog, 1500)) : Infinity })
+    Object.assign(SEE.person, { near: nearPeople.value, dot: persp ? sq(NEAR_PEOPLE * 2.2) : close || C.zoom > 0.9 ? Infinity : -1, far: persp ? sq(Math.min(fog, 320)) : Infinity })
+    Object.assign(SEE.bike, { far: persp ? sq(Math.min(fog, 450)) : Infinity })
+  }
+  // n things of buf from off into o's instances, or (from see.dot on) into dots': those the camera can see
+  function put(o, buf, off, n, see, dots) {
+    const c = uni.uCam.value, A = o.ib.array, D = dots?.ib.array
+    let a = 0, d = 0
+    for (let i = 0; i < n; i++) {
+      const s = (off + i) * 8, dx = buf[s] - c.x, dz = buf[s + 2] - c.z, d2 = dx * dx + dz * dz
+      if (d2 < see.near || d2 > see.far) continue
+      ball.center.set(buf[s], buf[s + 1], buf[s + 2]); ball.radius = see.far < Infinity ? see.r + 0.06 * Math.sqrt(d2) : see.r // (the camera may turn before the frame is drawn)
+      if (!frustum.intersectsSphere(ball)) continue
+      if (D && d2 > see.dot) { if (d < dots.cap) { const j = d++ * 8; for (let k = 0; k < 8; k++) D[j + k] = buf[s + k] } }
+      else if (a < o.cap) { const j = a++ * 8; for (let k = 0; k < 8; k++) A[j + k] = buf[s + k] }
+    }
+    show(o, a)
+    if (dots) show(dots, d)
+  }
   function show(o, n) { o.ib.clearUpdateRanges(); o.ib.addUpdateRange(0, n * 8); o.ib.needsUpdate = true; o.m.geometry.instanceCount = n }
   // the n things in buf at off within r of the camera (the same test as the boxes' shader) into the detailed model
   // pick(buf, s) chooses for each
@@ -425,6 +462,8 @@ export default function life(city) {
     for (let i = 0; i < n; i++) {
       const s = (off + i) * 8, dx = buf[s] - c.x, dz = buf[s + 2] - c.z
       if (dx * dx + dz * dz >= r2) continue
+      ball.center.set(buf[s], buf[s + 1], buf[s + 2]); ball.radius = 12 + 0.06 * Math.sqrt(dx * dx + dz * dz)
+      if (!frustum.intersectsSphere(ball)) continue // (not in view)
       const d = pick(buf, s)
       if (d.n < d.cap) { const A = d.ib.array, j = d.n++ * 8; for (let k = 0; k < 8; k++) A[j + k] = buf[s + k] }
     }
@@ -597,8 +636,8 @@ export default function life(city) {
     const want = set.on && !document.hidden && z >= CAR_ZOOM && (set.cars || (set.people && z >= PEOPLE_ZOOM))
     const ppl = want && set.people && z >= PEOPLE_ZOOM
     if (ppl !== peopleOn) { peopleOn = ppl; if (benchMesh) benchMesh.visible = ppl }
-    for (const o of carMeshes) o.m.visible = want && set.cars
-    people.m.visible = bikes.m.visible = ppl
+    for (const o of [...carMeshes, ...carDots]) o.m.visible = want && set.cars
+    people.m.visible = peopleDots.m.visible = bikes.m.visible = ppl
     for (const o of peopleNear) o.m.visible = ppl
     if (want !== active) {
       active = want
@@ -625,12 +664,13 @@ export default function life(city) {
     for (const p of pools) p.visible = city.light.night > 0.08
     if (sig.glow) { glowMat.size = Math.max(3, 2.6 * 6 * city.view.zoom) * city.renderer.getPixelRatio(); glowMat.opacity = glowNear.opacity = 0.45 + 0.55 * city.light.night }
     accDt += dt; elapsed += dt
+    sight()
     if (snap.n) carsAt(elapsed)
     if (snap.pn || snap.bn) peopleAt(elapsed)
     if (!busy) {
       busy = true; sentT = elapsed
-      const C = city.view.camera // what it sees: no car or person appears or vanishes there (worker.js seen())
-      worker.postMessage({ type: 'tick', dt: accDt, buf: spare, view: [...vp.multiplyMatrices(C.projectionMatrix, C.matrixWorldInverse).elements] }, spare ? [spare.buffer] : [])
+      // (the view: no car or person appears or vanishes in it, worker.js seen())
+      worker.postMessage({ type: 'tick', dt: accDt, buf: spare, view: [...vp.elements] }, spare ? [spare.buffer] : []) // (vp: sight())
       spare = null; accDt = 0
     }
     updateSignals(simT + (performance.now() - simAt) / 1000)
@@ -672,7 +712,7 @@ export default function life(city) {
       stopAnim?.()
       worker.terminate()
       group.removeFromParent(); glowGroup.removeFromParent()
-      for (const o of [...carMeshes, people, bikes, ...allNear]) o.m.geometry.dispose()
+      for (const o of [...carMeshes, ...carDots, people, peopleDots, bikes, ...allNear]) o.m.geometry.dispose()
       for (const m of [...pools, ...sig.meshes]) m.geometry?.dispose()
       benchMesh?.dispose(); names.mesh?.dispose(); names.words?.dispose(); postGeo.dispose()
       for (const m of [carMat, personMat, bikeMat, carNearMat, personNearMat, ...pools.map((p) => p.material), greyMat, housingMat, lampMat, benchMat, glowMat, glowNear]) m.dispose()
