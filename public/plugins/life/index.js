@@ -8,7 +8,8 @@
 // they brake for, and bumps (a car hit stops a moment, a person knocked stumbles or falls over and gets up again).
 
 import { kit } from '../../core/kit.js'
-import { carModels, peopleModels, farModels, lifeMaterial, H, OUTFIT, signalModels, postModel, DETAIL, ARM_Y, ARM_BLADE, POST_BLADES, LENSES, POLE_LENSES, PED_LENSES } from './models.js'
+import { smoother } from './smooth.js'
+import { carModels, peopleModels, farModels, dotModels, lifeMaterial, H, OUTFIT, signalModels, postModel, DETAIL, ARM_Y, ARM_BLADE, POST_BLADES, LENSES, POLE_LENSES, PED_LENSES } from './models.js'
 import { blades } from './blades.js'
 
 import { vancouver } from '../../core/util.js'
@@ -54,6 +55,9 @@ export default function life(city) {
   const carNearMat = material('car'), personNearMat = material('person')
   const carMeshes = MODELS.map((g) => instanced(g, carMat, MAX_CARS))
   const people = instanced(person, personMat, MAX_PEOPLE)
+  // and the cheapest ones, for those a few pixels long (put())
+  const DOTS = dotModels(THREE, MODELS)
+  const carDots = DOTS.cars.map((g) => instanced(g, carMat, MAX_CARS)), peopleDots = instanced(DOTS.person, personMat, MAX_PEOPLE)
   // the detailed models near a perspective camera, filled from the same buffer (pickNear())
   const carsNear = carModels(THREE).map((g) => instanced(g, carNearMat, MAX_NEAR))
   const peopleNear = peopleModels(THREE).map((g) => instanced(g.scale(H, H, H), personNearMat, MAX_NEAR))
@@ -68,12 +72,13 @@ export default function life(city) {
   poolGeo.setAttribute('position', new THREE.Float32BufferAttribute([...quad(0, 10, 0.9, 3.4, 0), ...quad(0, 3, 0.9, 1.4, 1)], 3))
   const HALF = MODELS.map((g) => { g.computeBoundingBox(); return g.boundingBox.max.x })
   const WIDE = MODELS.map((g) => g.boundingBox.max.z * 2)
-  const pools = carMeshes.map(({ ib }, k) => {
+  const carAll = [...carMeshes, ...carDots, ...carsNear] // (each with its pool: the nearest cars are in none of the others' buffers)
+  const pools = carAll.map(({ ib, m: { geometry: G } }) => {
     const g = new THREE.InstancedBufferGeometry().copy(poolGeo)
     g.setAttribute('iA', new THREE.InterleavedBufferAttribute(ib, 4, 0)); g.setAttribute('iB', new THREE.InterleavedBufferAttribute(ib, 4, 4))
     g.instanceCount = 0
     const mat = new THREE.ShaderMaterial({
-      uniforms: { ...uni, uHalf: { value: HALF[k] } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      uniforms: { ...uni, uHalf: { value: (G.computeBoundingBox(), G.boundingBox.max.x) } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
       vertexShader: `attribute vec4 iA, iB; uniform float uHalf; varying float vF, vRear, vBrake;
         void main() {
           vRear = position.z; vBrake = mod(iB.z, 2.0);
@@ -276,8 +281,10 @@ export default function life(city) {
     names.words.end()
   }
 
-  let benchMesh = null
+  let benchMesh = null, benchList = []
+  const DOG = 5 // models.js OUTFITS
   function buildBenches(b) {
+    benchList = b
     if (benchMesh) { benchMesh.removeFromParent(); benchMesh.dispose() }
     benchMesh = null
     const n = b.length / 4
@@ -334,28 +341,16 @@ export default function life(city) {
   let debugCb = null
   let busy = false, accDt = 0, spare = null, simT = 0, simAt = 0, stats = { cars: 0, people: 0 }
   const vp = new THREE.Matrix4()
-  let elapsed = 0, sentT = 0 // the frames' dt summed (the ticks' time), and the clock when the tick in flight was sent
+  // the clock: `elapsed` is the frames' dt summed; a tick sent at `sentT` is answered with the world at that time, and
+  // every frame draws between the last two answers (smooth.js)
+  const sm = smoother()
+  let elapsed = 0, sentT = 0, drawnT = 0
   worker.onmessage = ({ data: m }) => {
     if (m.type === 'frame') {
       busy = false; spare = m.buf
       if (!active) return
-      // under a perspective camera the boxes within the near radii are hidden (in their shader, by uCam / uNear)
-      // and those things are copied to the detailed models instead
-      // (and on the map zoomed right in, MAP_NEAR: everything in view, about its middle)
-      const C = city.view.camera, persp = !!C.isPerspectiveCamera, close = !persp && C.zoom >= MAP_NEAR, near = persp || close
-      uni.uCam.value.copy(close ? city.controls.target : C.position)
-      nearCars.value = close ? 400 ** 2 : near ? NEAR_CARS ** 2 : 0; nearPeople.value = close ? 400 ** 2 : near ? NEAR_PEOPLE ** 2 : 0
-      // the cars: positions and (id, speed), drawn every frame from here (carsAt()); the time of the tick it answers
-      if (snap.raw.length < m.cars * 8) { snap.raw = new Float32Array(m.cars * 12); snap.pos = new Float32Array(m.cars * 12); snap.aux = new Float32Array(m.cars * 3) }
-      snap.raw.set(m.buf.subarray(0, m.cars * 8)); snap.aux.set(m.buf.subarray(m.base, m.base + m.cars * 2))
-      snap.n = m.cars; snap.counts = m.counts; snap.t = sentT
-      carsAt(elapsed) // (now: city.traffic.nearby pairs these ids with positions)
-      // the people and cyclists likewise (peopleAt()), with their velocities, and the people's ids
-      const nb = m.nPeople + m.nBikes
-      if (snap.praw.length < nb * 8) { snap.praw = new Float32Array(nb * 12); snap.pq = new Float32Array(nb * 12); snap.pv = new Float32Array(nb * 3); snap.pid = new Float32Array(nb * 1.5) }
-      snap.praw.set(m.buf.subarray(m.cars * 8, (m.cars + nb) * 8)); snap.pv.set(m.buf.subarray(m.vbase, m.vbase + nb * 2)); snap.pid.set(m.buf.subarray(m.pbase, m.pbase + m.nPeople))
-      snap.pn = m.nPeople; snap.bn = m.nBikes
-      peopleAt(elapsed)
+      sm.push(m, sentT)
+      draw(drawnT) // (now: city.traffic.nearby pairs these ids with positions)
       simT = m.simT; simAt = performance.now()
       stats = m
       if (window.lifeDebug) { const a = (window.lifeMs ||= []); a.push(m.ms); if (a.length > 600) a.shift(); window.lifeAt = performance.now() }
@@ -370,51 +365,75 @@ export default function life(city) {
       city.requestRender()
     }
   }
-  // the cars at clock time t (the dt the ticks were sent with, summed): the latest snapshot moved on along each
-  // car's heading at its speed for the time since the frame that asked for it. The worker answers a frame or so
-  // later, sometimes two (a long tick, a busy main thread); drawn as they came, the cars lagged the camera by a
-  // frame and stood still for one now and then, then jumped two (a stutter beside a moving van). Over a frame or two
-  // a car's curve and braking are millimetres; never more than half a second on.
-  function carsAt(t) {
-    const n = snap.n, R = snap.raw, P = snap.pos, A = snap.aux, e = Math.min(0.5, Math.max(0, t - snap.t))
-    P.set(R.subarray(0, n * 8))
-    if (e > 0) for (let i = 0, s = 0; i < n; i++, s += 8) {
-      const d = A[i * 2 + 1] * e
-      if (!d) continue
-      const h = d * Math.cos(R[s + 4])
-      P[s] += Math.cos(R[s + 3]) * h; P[s + 1] += Math.sin(R[s + 4]) * d; P[s + 2] -= Math.sin(R[s + 3]) * h
-    }
+  // everything as it is at clock time t, into the instance buffers
+  function draw(t) {
+    drawnT = t
+    sight()
     const near = nearCars.value > 0
+    const B = sm.b, n = B.n, np = B.pn + B.bn
+    if (snap.pos.length < n * 8) snap.pos = new Float32Array(n * 12)
+    if (snap.pq.length < np * 8) snap.pq = new Float32Array(np * 12)
+    const P = snap.pos, Q = snap.pq
+    sm.cars(P, t)
     for (const o of carsNear) o.n = 0
-    for (let k = 0, off = 0; k < KINDS; k++) {
-      const c = snap.counts[k] || 0, m = Math.min(c, carMeshes[k].cap)
-      put(carMeshes[k], P, off, m); pools[k].geometry.instanceCount = m
-      if (near) pickNear(P, off, m, Math.sqrt(nearCars.value), pickCar[k])
+    for (let j = 0, off = 0; j < KINDS; j++) {
+      const c = B.counts[j] || 0, m = Math.min(c, carMeshes[j].cap)
+      put(carMeshes[j], P, off, m, SEE.car, carDots[j])
+      if (near) pickNear(P, off, m, Math.sqrt(nearCars.value), pickCar[j])
       off += c
     }
     for (const o of carsNear) show(o, o.n)
-  }
-  // the people and cyclists at clock time t, moved on from the latest snapshot like the cars (drawn as they came, they
-  // moved only on the frames an answer arrived: a stutter whenever the worker answered a frame late)
-  function peopleAt(t) {
-    const n = snap.pn + snap.bn, R = snap.praw, Q = snap.pq, V = snap.pv, e = Math.min(0.5, Math.max(0, t - snap.t))
-    Q.set(R.subarray(0, n * 8))
-    if (e > 0) for (let i = 0; i < n; i++) { Q[i * 8] += V[i * 2] * e; Q[i * 8 + 2] += V[i * 2 + 1] * e }
+    for (let i = 0; i < pools.length; i++) pools[i].geometry.instanceCount = carAll[i].m.geometry.instanceCount
+    sm.people(Q, t)
     for (const o of peopleNear) o.n = 0
-    const np = Math.min(snap.pn, people.cap)
-    put(people, Q, 0, np)
-    if (nearPeople.value > 0) pickNear(Q, 0, np, Math.sqrt(nearPeople.value), pickPerson)
+    const pn = Math.min(B.pn, people.cap)
+    put(people, Q, 0, pn, SEE.person, peopleDots)
+    if (nearPeople.value > 0) pickNear(Q, 0, pn, Math.sqrt(nearPeople.value), pickPerson)
     for (const o of peopleNear) show(o, o.n)
-    put(bikes, Q, snap.pn, Math.min(snap.bn, bikes.cap))
-    // the people for city.traffic.people, while a game asks for them: x, y, z, yaw and id
+    put(bikes, Q, B.pn, Math.min(B.bn, bikes.cap), SEE.bike)
+    // the people for city.traffic.people, while a game asks for them: x, y, z, yaw, id and pose + seed
     snap.np = 0
     if (performance.now() - snap.asked < 2000) {
-      if (snap.ppos.length < snap.pn * 5) snap.ppos = new Float32Array(snap.pn * 8)
-      for (let i = 0; i < snap.pn; i++) { const q = i * 5, o = i * 8; snap.ppos[q] = Q[o]; snap.ppos[q + 1] = Q[o + 1]; snap.ppos[q + 2] = Q[o + 2]; snap.ppos[q + 3] = Q[o + 3]; snap.ppos[q + 4] = snap.pid[i] }
-      snap.np = snap.pn
+      if (snap.ppos.length < B.pn * 6) snap.ppos = new Float32Array(B.pn * 9)
+      for (let i = 0; i < B.pn; i++) { const q = i * 6, o = i * 8; snap.ppos[q] = Q[o]; snap.ppos[q + 1] = Q[o + 1]; snap.ppos[q + 2] = Q[o + 2]; snap.ppos[q + 3] = Q[o + 3]; snap.ppos[q + 4] = B.pid[i]; snap.ppos[q + 5] = Q[o + 5] }
+      snap.np = B.pn
     }
   }
-  function put(o, buf, off, n) { o.ib.array.set(buf.subarray(off * 8, (off + n) * 8)); show(o, n) }
+  // Only what the camera can see is drawn (#604: every simulated car and person was, whether in view or not, 540 000
+  // triangles a frame at a busy hour): not what is behind it or off to the side, nor what is too far to make out
+  // (a person past 320 m, a car in the fog), and what is a few pixels long as the cheapest model (dotModels()).
+  // SEE, per kind: the radius of its ball against the view's sides, and the squared distances from uCam within which
+  // the detailed models draw it instead (near), from which it is a dot (dot) and past which nothing (far).
+  const SEE = { car: { r: 12, near: 0, dot: Infinity, far: Infinity }, person: { r: 4, near: 0, dot: Infinity, far: Infinity }, bike: { r: 4, near: 0, dot: Infinity, far: Infinity } }
+  const frustum = new THREE.Frustum(), ball = new THREE.Sphere()
+  function sight() {
+    // under a perspective camera the boxes within the near radii are left out
+    // and those things are copied to the detailed models instead
+    // (and on the map zoomed right in, MAP_NEAR: everything in view, about its middle)
+    const C = city.view.camera, persp = !!C.isPerspectiveCamera, close = !persp && C.zoom >= MAP_NEAR, near = persp || close
+    uni.uCam.value.copy(close ? city.controls.target : C.position)
+    nearCars.value = close ? 400 ** 2 : near ? NEAR_CARS ** 2 : 0; nearPeople.value = close ? 400 ** 2 : near ? NEAR_PEOPLE ** 2 : 0
+    frustum.setFromProjectionMatrix(vp.multiplyMatrices(C.projectionMatrix, C.matrixWorldInverse))
+    const fog = city.scene.fog?.far || 1500, sq = (x) => x * x
+    Object.assign(SEE.car, { near: nearCars.value, dot: persp ? sq(NEAR_CARS * 2.4) : close || C.zoom > 0.5 ? Infinity : -1, far: persp ? sq(Math.min(fog, 1500)) : Infinity })
+    Object.assign(SEE.person, { near: nearPeople.value, dot: persp ? sq(NEAR_PEOPLE * 2.2) : close || C.zoom > 0.9 ? Infinity : -1, far: persp ? sq(Math.min(fog, 320)) : Infinity })
+    Object.assign(SEE.bike, { far: persp ? sq(Math.min(fog, 450)) : Infinity })
+  }
+  // n things of buf from off into o's instances, or (from see.dot on) into dots': those the camera can see
+  function put(o, buf, off, n, see, dots) {
+    const c = uni.uCam.value, A = o.ib.array, D = dots?.ib.array
+    let a = 0, d = 0
+    for (let i = 0; i < n; i++) {
+      const s = (off + i) * 8, dx = buf[s] - c.x, dz = buf[s + 2] - c.z, d2 = dx * dx + dz * dz
+      if (d2 < see.near || d2 > see.far) continue
+      ball.center.set(buf[s], buf[s + 1], buf[s + 2]); ball.radius = see.far < Infinity ? see.r + 0.06 * Math.sqrt(d2) : see.r // (the camera may turn before the frame is drawn)
+      if (!frustum.intersectsSphere(ball)) continue
+      if (D && d2 > see.dot) { if (d < dots.cap) { const j = d++ * 8; for (let k = 0; k < 8; k++) D[j + k] = buf[s + k] } }
+      else if (a < o.cap) { const j = a++ * 8; for (let k = 0; k < 8; k++) A[j + k] = buf[s + k] }
+    }
+    show(o, a)
+    if (dots) show(dots, d)
+  }
   function show(o, n) { o.ib.clearUpdateRanges(); o.ib.addUpdateRange(0, n * 8); o.ib.needsUpdate = true; o.m.geometry.instanceCount = n }
   // the n things in buf at off within r of the camera (the same test as the boxes' shader) into the detailed model
   // pick(buf, s) chooses for each
@@ -423,14 +442,16 @@ export default function life(city) {
     for (let i = 0; i < n; i++) {
       const s = (off + i) * 8, dx = buf[s] - c.x, dz = buf[s + 2] - c.z
       if (dx * dx + dz * dz >= r2) continue
+      ball.center.set(buf[s], buf[s + 1], buf[s + 2]); ball.radius = 12 + 0.06 * Math.sqrt(dx * dx + dz * dz)
+      if (!frustum.intersectsSphere(ball)) continue // (not in view)
       const d = pick(buf, s)
       if (d.n < d.cap) { const A = d.ib.array, j = d.n++ * 8; for (let k = 0; k < 8; k++) A[j + k] = buf[s + k] }
     }
   }
 
   // ---------------------------------------------------------------- city.traffic, for games
-  const snap = { raw: new Float32Array(0), pos: new Float32Array(0), aux: new Float32Array(0), n: 0, counts: [], t: 0, ppos: new Float32Array(0), np: 0, asked: 0, praw: new Float32Array(0), pq: new Float32Array(0), pv: new Float32Array(0), pid: new Float32Array(0), pn: 0, bn: 0 }
-  const pools2 = { people: [], poles: [] } // reused result objects, so a game can ask every frame without garbage
+  const snap = { pos: new Float32Array(0), pq: new Float32Array(0), ppos: new Float32Array(0), np: 0, asked: 0 } // as drawn: cars, people and cyclists; the people for people()
+  const pools2 = { people: [], poles: [], dogs: [], benches: [] } // reused result objects, so a game can ask every frame without garbage
   const rec = (k, i) => pools2[k][i] || (pools2[k][i] = { id: 0, x: 0, y: 0, z: 0, heading: 0, r: 0 })
   const obstacles = new Map()
   let obsT = 0, obsAt = 0
@@ -443,12 +464,13 @@ export default function life(city) {
     nearby(x, z, r) {
       const out = [], r2 = r * r, p = snap.pos
       if (!active) return out
-      let k = 0, end = snap.counts[0] || 0
-      for (let i = 0; i < snap.n; i++) {
-        while (i >= end && k < KINDS - 1) end += snap.counts[++k]
+      const B = sm.b
+      let k = 0, end = B.counts[0] || 0
+      for (let i = 0; i < B.n; i++) {
+        while (i >= end && k < KINDS - 1) end += B.counts[++k]
         const o = i * 8, dx = p[o] - x, dz = p[o + 2] - z
         if (dx * dx + dz * dz > r2) continue
-        out.push({ id: snap.aux[i * 2], x: p[o], y: p[o + 1], z: p[o + 2], heading: p[o + 3] + Math.PI / 2, length: HALF[k] * 2, width: WIDE[k], speed: snap.aux[i * 2 + 1] })
+        out.push({ id: B.aux[i * 2], x: p[o], y: p[o + 1], z: p[o + 2], heading: p[o + 3] + Math.PI / 2, length: HALF[k] * 2, width: WIDE[k], speed: B.aux[i * 2 + 1] })
       }
       return out
     },
@@ -468,10 +490,43 @@ export default function life(city) {
       if (!active || !peopleOn) return out
       const P = snap.ppos, r2 = r * r
       for (let i = 0; i < snap.np; i++) {
-        const q = i * 5, dx = P[q] - x, dz = P[q + 2] - z
+        const q = i * 6, dx = P[q] - x, dz = P[q + 2] - z
         if (!(dx * dx + dz * dz <= r2)) continue // (not a NaN one either)
         const o = rec('people', out.length)
         o.id = P[q + 4]; o.x = P[q]; o.y = P[q + 1]; o.z = P[q + 2]; o.heading = P[q + 3] + Math.PI / 2; o.r = 0.3
+        out.push(o)
+      }
+      return out
+    },
+    // the dogs within r metres of (x, z), into `out` like people(): { id (its walker's, as in people()), x, y, z,
+    // heading }: where the dog itself is drawn, on its lead ahead of its walker to their right (models.js 'dog')
+    dogs(x, z, r, out = []) {
+      out.length = 0
+      snap.asked = performance.now()
+      if (!active || !peopleOn) return out
+      const P = snap.ppos, r2 = r * r
+      for (let i = 0; i < snap.np; i++) {
+        const q = i * 6, f = P[q + 5]
+        if (OUTFIT((f % 1) / 0.9) !== DOG || Math.floor(f) === 4) continue // (not while their walker lies knocked over)
+        const c = Math.cos(P[q + 3]), s = Math.sin(P[q + 3]), dx = P[q] + c * 0.95 + s * 0.45 - x, dz = P[q + 2] - s * 0.95 + c * 0.45 - z
+        if (!(dx * dx + dz * dz <= r2)) continue
+        const o = rec('dogs', out.length)
+        o.id = P[q + 4]; o.x = x + dx; o.y = P[q + 1]; o.z = z + dz; o.heading = P[q + 3] + Math.PI / 2; o.r = 0.3
+        out.push(o)
+      }
+      return out
+    },
+    // the benches within r metres of (x, z), into `out` like people(): { id, x, y (the ground under it), z, heading
+    // (the way someone on it faces) }; two seats, 0.45 m either side of the middle along the bench
+    benches(x, z, r, out = []) {
+      out.length = 0
+      const B = benchList, r2 = r * r
+      if (!active || !peopleOn) return out
+      for (let i = 0; i < B.length; i += 4) {
+        const dx = B[i] - x, dz = -B[i + 1] - z
+        if (dx * dx + dz * dz > r2) continue
+        const o = rec('benches', out.length)
+        o.id = i / 4; o.x = B[i]; o.y = B[i + 2]; o.z = -B[i + 1]; o.heading = B[i + 3] + Math.PI / 2; o.r = 0.8
         out.push(o)
       }
       return out
@@ -549,11 +604,13 @@ export default function life(city) {
   }
 
   // ---------------------------------------------------------------- on / off, settings, time of day
+  // how wet it is out, 0 to 1: rain, drizzle and storms by how hard, snow a little less (fewer people walk and ride)
+  const wetness = () => { const w = city.weather; return !w ? 0 : /rain|storm|drizzle/.test(w.kind) ? +w.intensity.toFixed(1) : w.kind === 'snow' ? +(0.7 * w.intensity).toFixed(1) : 0 }
   const vanHour = () => vancouver(Date.now()).sec / 3600
   let active = false, peopleOn = false, stopAnim = null, lastOpts = ''
   function sendOpts() {
     const k = city.quality?.tier.life ?? 1 // graphics quality: fewer cars and people on a weaker GPU
-    const o = { cars: set.cars, people: peopleOn, bikes: set.bikes, density: set.density * k, hour: +(city.weather?.hour ?? vanHour()).toFixed(1), maxCars: Math.round(MAX_CARS * k), maxPeople: Math.round(MAX_PEOPLE * k) }
+    const o = { cars: set.cars, people: peopleOn, bikes: set.bikes, density: set.density * k, hour: +(city.weather?.hour ?? vanHour()).toFixed(1), weekend: /^S/.test(vancouver(Date.now()).wd), wet: wetness(), maxCars: Math.round(MAX_CARS * k), maxPeople: Math.round(MAX_PEOPLE * k) }
     const s = JSON.stringify(o)
     if (s !== lastOpts) { lastOpts = s; worker.postMessage({ type: 'opts', opts: o }) }
   }
@@ -562,8 +619,8 @@ export default function life(city) {
     const want = set.on && !document.hidden && z >= CAR_ZOOM && (set.cars || (set.people && z >= PEOPLE_ZOOM))
     const ppl = want && set.people && z >= PEOPLE_ZOOM
     if (ppl !== peopleOn) { peopleOn = ppl; if (benchMesh) benchMesh.visible = ppl }
-    for (const o of carMeshes) o.m.visible = want && set.cars
-    people.m.visible = bikes.m.visible = ppl
+    for (const o of [...carMeshes, ...carDots]) o.m.visible = want && set.cars
+    people.m.visible = peopleDots.m.visible = bikes.m.visible = ppl
     for (const o of peopleNear) o.m.visible = ppl
     if (want !== active) {
       active = want
@@ -590,12 +647,12 @@ export default function life(city) {
     for (const p of pools) p.visible = city.light.night > 0.08
     if (sig.glow) { glowMat.size = Math.max(3, 2.6 * 6 * city.view.zoom) * city.renderer.getPixelRatio(); glowMat.opacity = glowNear.opacity = 0.45 + 0.55 * city.light.night }
     accDt += dt; elapsed += dt
-    if (snap.n) carsAt(elapsed)
-    if (snap.pn || snap.bn) peopleAt(elapsed)
+    const at = sm.step(elapsed, dt)
+    if (sm.b.t >= 0) draw(at)
     if (!busy) {
       busy = true; sentT = elapsed
-      const C = city.view.camera // what it sees: no car or person appears or vanishes there (worker.js seen())
-      worker.postMessage({ type: 'tick', dt: accDt, buf: spare, view: [...vp.multiplyMatrices(C.projectionMatrix, C.matrixWorldInverse).elements] }, spare ? [spare.buffer] : [])
+      // (the view: no car or person appears or vanishes in it, worker.js seen())
+      worker.postMessage({ type: 'tick', dt: accDt, buf: spare, view: [...vp.elements] }, spare ? [spare.buffer] : []) // (vp: sight())
       spare = null; accDt = 0
     }
     updateSignals(simT + (performance.now() - simAt) / 1000)
@@ -611,7 +668,7 @@ export default function life(city) {
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" data-k="people"> People</label>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" data-k="bikes"> Cyclists</label>
       <label style="display:flex;gap:8px;align-items:center">Busy <input type="range" min="0.2" max="2" step="0.1" data-d style="flex:1"></label>
-      <div style="font-size:11px;color:var(--muted);line-height:1.35">Simulated, busier at rush hour (Vancouver time). Cars from neighbourhood zoom, people up close. Streets, signals, crossings, benches and stops © OpenStreetMap contributors.</div>
+      <div style="font-size:11px;color:var(--muted);line-height:1.35">Simulated: as busy as the hour and the day of the week (Vancouver time), quiet at night, fewer people out in the rain. Cars from neighbourhood zoom, people up close. Streets, signals, crossings, benches and stops © OpenStreetMap contributors.</div>
     </div>`
   for (const cb of el.querySelectorAll('[data-k]')) {
     cb.checked = set[cb.dataset.k]
@@ -637,7 +694,7 @@ export default function life(city) {
       stopAnim?.()
       worker.terminate()
       group.removeFromParent(); glowGroup.removeFromParent()
-      for (const o of [...carMeshes, people, bikes, ...allNear]) o.m.geometry.dispose()
+      for (const o of [...carMeshes, ...carDots, people, peopleDots, bikes, ...allNear]) o.m.geometry.dispose()
       for (const m of [...pools, ...sig.meshes]) m.geometry?.dispose()
       benchMesh?.dispose(); names.mesh?.dispose(); names.words?.dispose(); postGeo.dispose()
       for (const m of [carMat, personMat, bikeMat, carNearMat, personNearMat, ...pools.map((p) => p.material), greyMat, housingMat, lampMat, benchMat, glowMat, glowNear]) m.dispose()

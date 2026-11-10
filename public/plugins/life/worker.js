@@ -61,9 +61,9 @@ onmessage = ({ data: m }) => {
   } else if (m.type === 'area') {
     area = m.area; dirty = walkDirty = true
   } else if (m.type === 'opts') {
-    const people = opts.people
+    const people = opts.people, weekend = !!opts.weekend
     Object.assign(opts, m.opts)
-    if (opts.people !== people) walkDirty = true
+    if (opts.people !== people || !!opts.weekend !== weekend) walkDirty = true
     if (!opts.people) { for (const p of peds) release(p); peds = []; bikes = []; statics = [] }
     targets()
   } else if (m.type === 'obstacles') {
@@ -76,7 +76,8 @@ onmessage = ({ data: m }) => {
     const p = peds.find((q) => q.id === m.id) || statics.find((q) => q.id === m.id)
     if (p && !p.fall) {
       const hard = m.v > 2.5
-      p.fall = { t: 0, dur: hard ? 3.4 : 1.0, max: hard ? 1.45 : 0.32 }
+      if (m.v < 1) p.pet = { t: 0, dur: 2.2 } // a pat (someone petting their dog): they stop and turn, the dog wags
+      else p.fall = { t: 0, dur: hard ? 3.4 : 1.0, max: hard ? 1.45 : 0.32 }
       p.ang = Math.atan2(-m.dy, -m.dx) // facing what hit them, falling back away from it
     }
   } else if (m.type === 'tick') { view = m.view || null; tick(m) }
@@ -580,17 +581,29 @@ function walkSign(ctl, g) {
 const axisGroup = (ctl, ang) => Math.abs(Math.cos(ang - ctl.ref)) > 0.7 ? 0 : 1
 
 // ---------------------------------------------------------------- cars
+// How busy the city is by the hour, in percent of its busiest hour: [weekdays, weekends], from midnight. Cars: the
+// two rush hours, a light early morning (6:30 is under a third of the evening rush), nights nearly empty; weekends
+// start late and peak in the afternoon. People: lunch and after work on weekdays, the afternoon at weekends, and
+// later at night then.
+const TOD = {
+  car: [[6, 4, 3, 3, 4, 7, 12, 45, 88, 75, 60, 62, 68, 66, 70, 85, 97, 100, 80, 58, 42, 33, 24, 13], [10, 8, 5, 4, 3, 4, 6, 11, 20, 34, 50, 62, 70, 72, 72, 70, 66, 60, 52, 42, 34, 28, 22, 16]],
+  walk: [[4, 3, 2, 2, 2, 3, 5, 22, 58, 55, 55, 68, 100, 88, 72, 78, 88, 100, 85, 65, 45, 30, 20, 10], [12, 9, 6, 3, 2, 2, 3, 8, 18, 36, 58, 75, 90, 100, 100, 95, 85, 75, 65, 55, 46, 40, 32, 20]],
+}
+const tod = (k) => { const a = TOD[k][opts.weekend ? 1 : 0], h = ((opts.hour % 24) + 24) % 24, i = Math.floor(h); return (a[i] + (a[(i + 1) % 24] - a[i]) * (h - i)) / 100 }
+// fewer people out in the wet (opts.wet: 0 dry to 1 a downpour; the ones who are carry umbrellas), far fewer cyclists
+const dry = (k) => 1 - k * Math.min(1, opts.wet || 0)
 function targets() {
-  const h = opts.hour, day = smooth(5.5, 8, h) * (1 - smooth(20, 23.5, h))
-  const carTod = 0.16 + 0.5 * day + 0.3 * Math.exp(-(((h - 8.2) / 1.3) ** 2)) + 0.38 * Math.exp(-(((h - 17) / 1.6) ** 2))
+  const ct = tod('car'), pt = tod('walk')
+  // and by place: the arterials carry the rush and what there is at night, the side streets empty as the city does
+  const key = `${Math.round(ct * 50)}`
+  if (net && net.todKey !== key) { net.todKey = key; net.cum = cumWeights(net.lanes, (L) => L.len * DENS[L.cls] * (L.cls <= 4 ? 1 : 0.3 + 0.7 * ct)) }
   const lanesKm = net ? net.cum[net.cum.length - 1] / 1000 : 0
-  carTarget = opts.cars ? Math.min(opts.maxCars, Math.round(lanesKm * carTod * opts.density)) : 0
+  carTarget = opts.cars ? Math.min(opts.maxCars, Math.round(lanesKm * ct * opts.density)) : 0
   if (walk) {
-    pedTarget = opts.people ? Math.min(opts.maxPeople - statics.length, Math.round(walk.weight * (0.1 + 0.9 * day) * opts.density)) : 0
-    bikeTarget = opts.people && opts.bikes ? Math.min(300, Math.round(walk.bikeWeight * (0.05 + 0.95 * day) * opts.density)) : 0
+    pedTarget = opts.people ? Math.min(opts.maxPeople - statics.length, Math.round(walk.weight * pt * dry(0.8) * opts.density)) : 0
+    bikeTarget = opts.people && opts.bikes ? Math.min(300, Math.round(walk.bikeWeight * pt * dry(0.9) * opts.density)) : 0
   }
 }
-const smooth = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t) }
 
 function newCar(cls) {
   const r = Math.random(), taxi = 0.012 + (Math.hypot(area.x - DOWNTOWN[0], area.y - DOWNTOWN[1]) < 3000 ? 0.07 : 0.02)
@@ -1044,7 +1057,9 @@ function* buildWalk() {
       for (let k = 0; k < n; k++) fg.add(c.x[i] + (dx * k) / n, c.y[i] + (dy * k) / n, [dx / l, dy / l, c.x[i] + (dx * k) / n, c.y[i] + (dy * k) / n, kind, p])
     }
   }
-  const streets = yield* gather(area.vx, area.vy, r, (p) => p.drive && p.kind <= 7 && p.pts.length >= 4)
+  // every carriageway, the ones the simulated cars keep off too (a bus loop, a busway, a private road: the player's
+  // bus drives there, and people walked along them as if they were paths)
+  const streets = yield* gather(area.vx, area.vy, r, (p) => p.kind <= 7 && p.pts.length >= 4)
   for (const p of pieces) { if (due()) yield; if (p.kind === 9 || p.kind === 8) lineOf(p, 1) }
   for (const p of streets) { if (due()) yield; if (p.oneway) lineOf(p, 0) }
   for (const p of pieces) {
@@ -1085,7 +1100,7 @@ function* buildWalk() {
   const nodes = new Map(), wps = []
   const node = (id, x, y) => { let n = nodes.get(id); if (!n) nodes.set(id, (n = { id, x, y, legs: [], bikes: [] })); return n }
   const dt = (x, y) => { const d = Math.hypot(x - DOWNTOWN[0], y - DOWNTOWN[1]); return 1 + 2.5 * Math.exp(-d / 1500) }
-  const h = opts.hour, day = smooth(6, 9, h) * (1 - smooth(19, 22.5, h))
+  const day = tod('walk'), we = opts.weekend ? 1 : 0 // (at weekends: the parks and paths more than the sidewalks)
   // the carriageways, every 3 m: footways that run into them (OSM draws many sidewalks inside the paved width) move
   // out to the kerb, and where a path crosses one that stretch is walked only while crossing
   const rg = grid(32)
@@ -1102,7 +1117,7 @@ function* buildWalk() {
     const off = sidewalk(p), bike = p.kind === 10, c = off || bike ? centre(p) : kerbed(p, rg)
     const lift = off ? 0.12 + (c.deck ? 0.3 : 0) : 0.18 + (18 - p.kind) * 0.004 - 0.03 + (c.deck ? 0.35 : 0)
     const m = c.x.length >> 1, mx = c.x[m], my = c.y[m]
-    const per = off ? (p.kind <= 3 ? 0.03 : 0.012) * 2 : p.kind === 8 ? 0.07 : p.kind === 9 ? 0.03 : p.kind === 12 ? 0.008 : 0.016 * (0.3 + day)
+    const per = (off ? (p.kind <= 3 ? 0.03 : 0.012) * 2 : p.kind === 8 ? 0.07 : p.kind === 9 ? 0.03 : p.kind === 12 ? 0.008 : 0.016 * (0.3 + day)) * (we ? (off ? 0.8 : 1.4) : 1)
     const wp = { p, c, off, bike, lift, w: p.w, okL: !off || p._sides[0], okR: !off || p._sides[1], na: node(p.a, c.x[0], c.y[0]), nb: node(p.b, c.x[c.x.length - 1], c.y[c.y.length - 1]), legs: [null, null],
       weight: bike ? 0 : c.len * per * dt(mx, my), bikeWeight: bike ? c.len * 0.004 * dt(mx, my) : 0 }
     if (!off && !bike) wp.xs = crossings(c, rg, p)
@@ -1163,8 +1178,36 @@ function* buildWalk() {
     near.near(x, y, (w) => { for (let i = 0; i < w.c.x.length; i++) { const d = (w.c.x[i] - x) ** 2 + (w.c.y[i] - y) ** 2; if (d < bd) { bd = d; bx = w.c.x[i]; by = w.c.y[i] } } })
     return bd < 1e9 ? Math.atan2(by - y, bx - x) : Math.random() * 6.28
   }
+  // a bench stands beside the nearest path or sidewalk, square to it and facing it, clear of its paving (OSM maps
+  // many on the path's own line or at its edge: facing the nearest point of the line they stood on it at any angle)
+  let scans = 0
+  const beside = (q) => {
+    let x = q.x, y = q.y, ang = null
+    for (let k = 0; k < 4; k++) { // (where paths meet: clear of each of them)
+      let b = null // the path whose paving it stands deepest in, else the one whose edge is nearest
+      const scan = ++scans
+      near.near(x, y, (w) => {
+        if (w._scan === scan) return // (it is in the grid once per point of its line)
+        w._scan = scan
+        const X = w.c.x, Y = w.c.y, need = w.off ? w.off + 1.3 : w.w / 2 + 0.5
+        for (let i = 0; i < X.length - 1; i++) {
+          const dx = X[i + 1] - X[i], dy = Y[i + 1] - Y[i], l2 = dx * dx + dy * dy || 1, t = Math.max(0, Math.min(1, ((x - X[i]) * dx + (y - Y[i]) * dy) / l2))
+          const px = X[i] + dx * t, py = Y[i] + dy * t, d = Math.hypot(x - px, y - py)
+          if (d > 12 || (b && d - need >= b.d - b.need)) continue
+          const l = Math.sqrt(l2), side = (x - px) * -dy + (y - py) * dx >= 0 ? 1 : -1
+          b = { d, need, px, py, nx: (side * -dy) / l, ny: (side * dx) / l }
+        }
+      })
+      if (!b) break
+      ang = Math.atan2(-b.ny, -b.nx)
+      if (b.d >= b.need - 0.01) break
+      x = b.px + b.nx * b.need; y = b.py + b.ny * b.need
+    }
+    if (ang == null) ang = (q.id % 628) / 100 // (no path within 12 m: any way round)
+    return wallOut(x, y, 0.3) ? { x: q.x, y: q.y, ang } : { x, y, ang } // (moved into a wall: as mapped)
+  }
   const benches = poisOf([4], area.vx, area.vy, r).filter((q) => !wallOut(q.x, q.y, 0)).map( // (not the ones mapped indoors, on a roof terrace)
-    (q) => ({ x: q.x, y: q.y, h: groundH(q.x, q.y) + 0.1, ang: face(q.x, q.y), id: q.id }))
+    (q) => { const b = beside(q); return { x: b.x, y: b.y, h: groundH(b.x, b.y) + 0.1, ang: b.ang, id: q.id } })
   const stops = poisOf([5], area.vx, area.vy, r).map((q) => ({ x: q.x, y: q.y, h: groundH(q.x, q.y) + 0.13, ang: face(q.x, q.y), id: q.id }))
   return { nodes, foot, cycl, cum: cumWeights(foot, (w) => w.weight), bcum: cumWeights(cycl, (w) => w.bikeWeight),
     weight: foot.reduce((s, w) => s + w.weight, 0), bikeWeight: cycl.reduce((s, w) => s + w.bikeWeight, 0), benches, stops, rg }
@@ -1227,6 +1270,20 @@ function kerbside(p) {
   const bx = -Math.cos(p.ang) * 0.5, by = -Math.sin(p.ang) * 0.5
   for (let k = 0; k < 6 && inRoad(p.x, p.y); k++) { p.x += bx; p.y += by }
 }
+// someone standing within m metres of a carriageway's edge (or on it): out to that far from it
+function standBack(p, m) {
+  for (let k = 0; k < 3; k++) {
+    let hit = null, hs = 0
+    walk.rg.near(p.x, p.y, (q) => {
+      if (hit || q[4].z) return
+      const ox = p.x - q[2], oy = p.y - q[3], s = -ox * q[1] + oy * q[0]
+      if (Math.abs(ox * q[0] + oy * q[1]) <= 1.6 && Math.abs(s) < q[4].w / 2 + m) { hit = q; hs = s }
+    })
+    if (!hit) return
+    const d = (hs >= 0 ? 1 : -1) * (hit[4].w / 2 + m) - hs
+    p.x -= hit[1] * d; p.y += hit[0] * d
+  }
+}
 // the carriageway (a road sample of walk.rg) at a point, if any
 function inRoad(x, y) {
   let hit = null
@@ -1248,10 +1305,10 @@ function makeStatics() {
   }
   const seeded = (id) => { let a = id % 2147483647; return () => { a = (a * 48271) % 2147483647; return a / 2147483647 } }
   if (!walk || !opts.people) return
-  const h = opts.hour, day = smooth(6, 9, h) * (1 - smooth(19, 23, h))
+  const day = tod('walk')
   const rnd = (id, k) => { const x = Math.sin(id * 0.0001 + k * 12.9898) * 43758.5453; return x - Math.floor(x) }
   for (const b of walk.benches) {
-    if (rnd(b.id, 1) > 0.15 + 0.55 * day) continue
+    if (rnd(b.id, 1) > (0.04 + 0.66 * day) * dry(0.95)) continue // (nobody sits in the rain)
     const two = rnd(b.id, 2) < 0.35
     for (const side of two ? [-0.45, 0.45] : [(rnd(b.id, 3) - 0.5) * 0.8]) {
       const ax = Math.cos(b.ang), ay = Math.sin(b.ang)
@@ -1259,10 +1316,11 @@ function makeStatics() {
     }
   }
   for (const s of walk.stops) {
-    const n = Math.floor(rnd(s.id, 4) * (1 + 3.5 * (0.15 + day)))
+    const n = Math.floor(rnd(s.id, 4) * (0.6 + 4 * day)) // (nobody at most stops at night, one here and there at dawn)
     for (let i = 0; i < n; i++) {
       const a = rnd(s.id, 5 + i) * 6.28, d = 0.6 + rnd(s.id, 9 + i) * 1.4
       const p = person(s.x + Math.cos(a) * d, s.y + Math.sin(a) * d, s.h, s.ang + (rnd(s.id, 13 + i) - 0.5) * 1.2, 1, seeded(s.id + i))
+      standBack(p, 1.4) // the stop's pole is at the kerb: they wait well back from it
       outdoors(p) // (a stop by a wall)
       sit(`s${s.id}:${i}`, p)
     }
@@ -1306,6 +1364,18 @@ function mayCross(n, leg) {
   }
   for (const c of cn.conns) if ((c.cars.length || c.reserved) && (!leg || c.from.p === leg.wp.p || c.to.p === leg.wp.p)) return false
   return true
+}
+// is something the player drives on the stretch of street from (x0, y0) to (x1, y1), or about to pass over it (within
+// four seconds at its speed)? People wait at the kerb for it as they do for the cars
+function playerComing(x0, y0, x1, y1, h) {
+  for (const o of obstacles.values()) {
+    if (o.len < 2 || (o.h != null && Math.abs(h - o.h) > 3)) continue // (a vehicle, at this level)
+    for (let k = 0; k <= 2; k++) {
+      const px = x0 + ((x1 - x0) * k) / 2 - o.x, py = y0 + ((y1 - y0) * k) / 2 - o.y, along = px * o.c + py * o.s
+      if (Math.abs(-px * o.s + py * o.c) < o.w / 2 + 1.5 && along > -o.len / 2 - 1 && along < o.len / 2 + 2 + o.speed * 4) return true
+    }
+  }
+  return false
 }
 function crosswalk(n, leg) { return n.car ? net.cws.get(n.car.id + ':' + leg.wp.p.key) : null }
 function arrive(p, leg, side) {
@@ -1436,11 +1506,12 @@ function dodge(p, tx, ty) {
   return 0
 }
 function stepPeople(dt) {
-  for (const p of peds) { p.ox = p.x; p.oy = p.y; p.oh = p.h } // where they were: drawn between that and here (output())
-  for (const b of bikes) { b.ox = b.x; b.oy = b.y; b.oh = b.h }
-  for (const p of statics) if (p.fall && (p.fall.t += dt) >= p.fall.dur) p.fall = null
+  for (const p of peds) { p.ox = p.x; p.oy = p.y; p.oh = p.h; p.oph = p.phase } // where they were: drawn between that and here (output())
+  for (const b of bikes) { b.ox = b.x; b.oy = b.y; b.oh = b.h; b.oph = b.phase }
+  for (const p of statics) { if (p.fall && (p.fall.t += dt) >= p.fall.dur) p.fall = null; if (p.pet && (p.pet.t += dt) >= p.pet.dur) p.pet = null }
   for (const p of peds) {
     if (p.fall) { if ((p.fall.t += dt) >= p.fall.dur) p.fall = null; continue } // down (or stumbling): no walking
+    if (p.pet) { if ((p.pet.t += dt) >= p.pet.dur) p.pet = null; continue } // stopped for someone petting their dog
     p.life -= dt
     if (p.xcw && simT - p.xT > 30) hold(p, null) // (never hold the cars up for long)
     if (p.mode === 'walk') {
@@ -1486,8 +1557,9 @@ function stepPeople(dt) {
       p.waitT += dt
       if (p.cross) {
         const n = p.cross.n
-        if (mayCross(n, p.cross) || p.waitT > 60) {
-          const X = p.cross, sX = p.crossSide
+        const X = p.cross, sX = p.crossSide
+        portPos(X, -sX, 0, tmp2)
+        if ((mayCross(n, X) && !playerComing(p.x, p.y, tmp2.x, tmp2.y, p.h)) || p.waitT > 60) {
           p.cw = crosswalk(n, X); if (p.cw) p.cw.n++
           portPos(X, -sX, 0, tmp2)
           p.cross = null; p.xing = true // (on the street, on the crosswalk)
@@ -1495,7 +1567,7 @@ function stepPeople(dt) {
         }
       } else if (p.xhop) {
         const X = p.xhop
-        if (!X.cn || mayCross({ car: X.cn }, X.leg) || p.waitT > 60) {
+        if (((!X.cn || mayCross({ car: X.cn }, X.leg)) && !playerComing(p.x, p.y, X.o.x, X.o.y, p.h)) || p.waitT > 60) {
           p.xhop = null; p.xing = true
           hold(p, X.cn && net?.cws.get(X.cn.id + ':' + X.leg.wp.p.key))
           hop(p, X.o, () => {
@@ -1506,7 +1578,8 @@ function stepPeople(dt) {
         }
       } else if (p.xiv) {
         const I = p.xiv
-        if (!I.node || mayCross({ car: I.node }, I.leg) || p.waitT > 60) { p.xok = I; p.xiv = null; p.mode = 'walk' }
+        at(p.wp.c, p.dir > 0 ? I.u1 : I.u0, tmp2) // (the far kerb)
+        if (((!I.node || mayCross({ car: I.node }, I.leg)) && !playerComing(p.x, p.y, tmp2.x, tmp2.y, p.h)) || p.waitT > 60) { p.xok = I; p.xiv = null; p.mode = 'walk' }
       } else p.mode = 'walk'
     }
     if ((p.x - area.vx) ** 2 + (p.y - area.vy) ** 2 > (area.vr + 300) ** 2) p.dead = true
@@ -1544,11 +1617,11 @@ function stepBikes(dt) {
     b.u += b.dir * b.v * dt; b.phase += b.v * dt * 2.2
     const c = b.wp.c
     if (b.u > c.len || b.u < 0) {
-      const leg = b.wp.legs[b.u > c.len ? 1 : 0], n = leg.n
+      const leg = b.wp.legs[b.u > c.len ? 1 : 0], n = leg.n, over = b.u > c.len ? b.u - c.len : -b.u // (ridden on along the next path: no pause at each junction)
       const opts = n.bikes.filter((l) => l !== leg)
       let nx = opts.length ? opts[(Math.random() * opts.length) | 0] : Math.random() < 0.5 ? null : leg
       if (!nx || (b.x - area.vx) ** 2 + (b.y - area.vy) ** 2 > (area.vr + 200) ** 2) { if (!seen(b.x, b.y, b.h)) { b.dead = true; continue } nx = leg } // gone out of sight, else back the way it came
-      b.wp = nx.wp; b.dir = nx.end ? -1 : 1; b.u = nx.end ? nx.wp.c.len : 0
+      b.wp = nx.wp; b.dir = nx.end ? -1 : 1; b.u = nx.end ? Math.max(0, nx.wp.c.len - over) : Math.min(nx.wp.c.len, over)
     }
     at(b.wp.c, b.u, tmp)
     const off = -b.dir * Math.min(0.9, b.wp.w / 4)
@@ -1691,14 +1764,14 @@ function tick({ dt, buf }) {
 }
 
 // 8 floats per thing: x, y (up), z (south), yaw, then per kind (cars: pitch, colour, brake, seed + 2 × shrink;
-// people: walk phase (fallen: how far over), pose + seed, shirt, trousers); then 2 per car in the same order: id,
-// speed; then 1 per person (not cyclists), from pbase: id; then 2 per person and cyclist, from vbase: their velocity
-// (x, z per second: the page moves them on between answers, like the cars)
+// people: walk phase (fallen: how far over; petted, pose 5: for how long), pose + seed, shirt, trousers); then 2 per car in the same order: id,
+// speed; then 1 per person and cyclist, from pbase: id (the page finds each thing in the answer before by it, and
+// draws between the two); then 2 per person and cyclist, from vbase: their velocity (x, z per second)
 function output(buf) {
   const counts = [0, 0, 0, 0, 0, 0]
   for (const c of cars) counts[c.kind]++
   const nPeople = opts.people ? peds.length + statics.length : 0, nBikes = opts.people ? bikes.length : 0
-  const base = (cars.length + nPeople + nBikes) * 8, pbase = base + cars.length * 2, vbase = pbase + nPeople, need = vbase + (nPeople + nBikes) * 2
+  const base = (cars.length + nPeople + nBikes) * 8, pbase = base + cars.length * 2, vbase = pbase + nPeople + nBikes, need = vbase + (nPeople + nBikes) * 2
   let a = buf && buf.length >= need ? buf : new Float32Array(Math.max(need, 1024) * 1.5)
   const off = [0]
   for (let k = 1; k < 6; k++) off[k] = off[k - 1] + counts[k - 1]
@@ -1736,18 +1809,27 @@ function output(buf) {
   // people and cyclists between their last two steps, rem / STEP of the way (drawn as they stood after each step, they
   // moved every other frame at 60 fps); one who hopped far (a new path) at once, and one with no step behind them
   // (just come, or sitting: no ox) where they are: (x - undefined) * 0 is NaN, not 0 (#591: it blacked the view out)
-  const u = Math.min(1, rem / STEP)
+  const u = Math.min(1, rem / STEP), now = simT + rem
   const put = (p, pose) => {
     const f = p.fall ? fallAngle(p.fall) : 0, mv = p.ox != null && Math.abs(p.x - p.ox) + Math.abs(p.y - p.oy) < 2, k = mv ? 1 - u : 0, q = vbase + j / 4 - cars.length * 2
-    a[j] = mv ? p.x - (p.x - p.ox) * k : p.x; a[j + 1] = (mv ? p.h - (p.h - p.oh) * k : p.h) + Math.sin(f) * 0.13; a[j + 2] = -(mv ? p.y - (p.y - p.oy) * k : p.y); a[j + 3] = p.ang
+    let x = mv ? p.x - (p.x - p.ox) * k : p.x, y = mv ? p.y - (p.y - p.oy) * k : p.y
+    if (pose === 0 || pose === 3) { // set down somewhere else within a few metres (a new network's line for their path, a hop begun): drawn where they were, easing over, as the cars are
+      const d = now - p.qt, ex = x - p.qx, ey = y - p.qy, lim = (pose === 3 ? 8 : 4.5) * d + 0.15
+      if (d < 0.5 && ex * ex + ey * ey > lim * lim && ex * ex + ey * ey < 64) { p.jx = p.dx - x; p.jy = p.dy - y; p.jt = now }
+      p.qx = x; p.qy = y; p.qt = now
+      if (p.jt != null) { const e = (now - p.jt) / 0.5; if (e >= 1) p.jt = null; else { x += p.jx * (1 - ease(e)); y += p.jy * (1 - ease(e)) } }
+      p.dx = x; p.dy = y
+    }
+    a[j] = x; a[j + 1] = (mv ? p.h - (p.h - p.oh) * k : p.h) + Math.sin(f) * 0.13; a[j + 2] = -y; a[j + 3] = p.ang
     a[q] = mv ? (p.x - p.ox) / STEP : 0; a[q + 1] = mv ? -(p.y - p.oy) / STEP : 0
-    a[j + 4] = p.fall ? f : p.mode === 'wait' ? 0 : p.phase; a[j + 5] = (p.fall ? 4 : p.mode === 'wait' ? 1 : pose) + p.seed * 0.9; a[j + 6] = p.shirt; a[j + 7] = p.pants
+    a[j + 4] = p.fall ? f : p.pet ? p.pet.t : p.mode === 'wait' ? 0 : mv ? p.phase - (p.phase - p.oph) * k : p.phase // (the legs' turn between the two steps, like the place)
+    a[j + 5] = (p.fall ? 4 : p.pet && pose !== 2 ? 5 : p.mode === 'wait' ? 1 : pose) + p.seed * 0.9; a[j + 6] = p.shirt; a[j + 7] = p.pants
     j += 8
   }
   if (opts.people) {
     for (const p of peds) { put(p, 0); a[q++] = p.id }
     for (const p of statics) { put(p, p.pose); a[q++] = p.id }
-    for (const b of bikes) put(b, 3)
+    for (const b of bikes) { put(b, 3); a[q++] = b.id }
   }
   return { type: 'frame', buf: a, counts, nPeople, nBikes, base, pbase, vbase, simT: simT + rem, cars: cars.length, people: peds.length + statics.length }
 }
@@ -1768,6 +1850,13 @@ function debug({ x, y, r, ids }) {
     type: 'debug', why, total: cars.length, meanV: cars.reduce((a, c) => a + c.v, 0) / (cars.length || 1), carTarget, stuck, peds: peds.length, statics: statics.length, bikes: bikes.length, pedTarget, simT,
     lcTotal, changing: cars.filter((c) => c.lc).map((c) => { posOn(c, c.s, tmp); return [Math.round(tmp.x), Math.round(tmp.y), c.id, +c.lc.t.toFixed(2)] }), // [x, north, id, progress]
     obstacles: obstacles.size, blocked: blocked.length,
+    // people on a carriageway who are not crossing it (roadWalk), people crossing one along a path that runs down it
+    // for longer than across (alongRoad), people waiting or sitting on one (roadStand), and the benches
+    roadWalk: walk ? peds.filter((p) => !p.fall && !p.xing && !p.xin && p.mode !== 'wait' && inRoad(p.x, p.y)).length : 0,
+    roadWalkers: walk ? peds.filter((p) => !p.fall && !p.xing && !p.xin && p.mode !== 'wait' && inRoad(p.x, p.y)).slice(0, 8).map((p) => { const q = inRoad(p.x, p.y); return [Math.round(p.x), Math.round(p.y), p.mode, p.wp.p.kind, p.wp.off ? 'sidewalk' : p.wp.p.crossing ? 'crossing' : 'path', q[4].kind, q[4].drive ? 'drive' : 'nodrive', +(q[4].w / 2 - Math.abs(-(p.x - q[2]) * q[1] + (p.y - q[3]) * q[0])).toFixed(1)] }) : [], // (the last: metres inside the paving, under 0: in the kerb strip)
+    alongRoad: peds.filter((p) => p.xin && p.xin.u1 - p.xin.u0 > p.xin.p.w + 8).length,
+    roadStand: walk ? statics.filter((p) => inRoad(p.x, p.y)).length : 0,
+    benches: walk ? walk.benches.map((b) => [b.x, b.y, b.ang]) : [],
     ctls: net?.ctls.length, lanes: net?.lanes.length,
     lanesNear: net?.lanes.filter((L) => { const m = L.x.length >> 1; return Math.hypot(L.x[m] - x, L.y[m] - y) < r }).slice(0, 30)
       .map((L) => ({ kind: L.cls, a: L.p.a, b: L.p.b, dir: L.dir, li: L.li, cars: L.cars.length, len: L.len | 0, level: L.p.tile.level })),

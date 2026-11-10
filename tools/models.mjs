@@ -13,7 +13,7 @@ mkdirSync(o.out, { recursive: true })
 
 const PAGE = /* js */ `
 import * as THREE from '/vendor/three.module.min.js'
-import { carModels, peopleModels, farModels, bikeModels, lifeMaterial, H } from '/plugins/life/models.js'
+import { carModels, peopleModels, farModels, dotModels, bikeModels, lifeMaterial, H } from '/plugins/life/models.js'
 import { makeVan } from '/plugins/drive/van.js'
 import { makeWalker, poseWalker, sitWalker } from '/plugins/drive/walker.js'
 import { makeBus } from '/plugins/drive/bus.js'
@@ -38,7 +38,7 @@ const PAINT = [0xc8ccd0, 0x23272b, 0xf1f1ee, 0x8e2a2a, 0x2b4a7a, 0x6d7478, 0x2f6
 const car = (g, i, brake = 0) => lifeObj(g, 'car', [0, PAINT[i % PAINT.length], brake, 0.3])
 const person = (g, pose, seed, i, phase = 1.2) => lifeObj(g, pose === 3 ? 'bike' : 'person', [phase, pose + seed * 0.9, PAINT[(i + 3) % PAINT.length], PAINT[(i + 1) % 2 + 4]])
 const named = (o, ...names) => (o.map ? o : [o]).map((g, i) => [names[i] || names[0] + ' ' + i, g])
-const far = farModels(THREE)
+const far = farModels(THREE), dots = dotModels(THREE, far.cars)
 const GROUPS = {
   player: () => [
     ['van', makeVan(THREE)], ['courier', (() => { const w = makeWalker(THREE); poseWalker(w, 1.2, 1, false); return w })()],
@@ -48,7 +48,7 @@ const GROUPS = {
     ...CABS.map((c) => ['cab ' + c.id, makeCab(THREE, c)]),
   ],
   cars: () => carModels(THREE).map((g, i) => [g.name || 'car ' + i, car(g, i, i % 3 === 1 ? 3 : 0)]),
-  far: () => [...far.cars.map((g, i) => ['far car ' + i, car(g, i)]), ['far person', person(far.person, 0, 0.3, 0)], ['far bike', person(far.bike, 3, 0.3, 1)]],
+  far: () => [...far.cars.map((g, i) => ['far car ' + i, car(g, i)]), ['far person', person(far.person, 0, 0.3, 0)], ['far bike', person(far.bike, 3, 0.3, 1)], ...dots.cars.map((g, i) => ['dot car ' + i, car(g, i)]), ['dot person', person(dots.person, 0, 0.3, 0)]],
   people: () => [
     ...peopleModels(THREE).flatMap((g, i) => { g.scale(H, H, H); return [[(g.name || 'person ' + i) + ' walk', person(g, 0, 0.11 + i * 0.13, i)], [(g.name || 'person ' + i) + ' wait', person(g, 1, 0.47 + i * 0.07, i + 2)]] }),
     ['sitting', person(peopleModels(THREE)[0].scale(H, H, H), 2, 0.6, 5)],

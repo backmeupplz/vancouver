@@ -222,7 +222,7 @@ export const DETAIL = (kind, seed) => SHARES[kind].find(([s]) => seed < s)?.[1] 
 // ---------------------------------------------------------------- people
 // People, 1.75 m before the shader's scale, facing +x. The shader swings the limbs about the hips (y 0.86) and
 // shoulders (1.38) and bends them at the knees and elbows (JOINT: what is below bends), by aSwing: ±1 legs, ±2 arms,
-// 9 a companion (a dog, a stroller: no pose moves it). Parts: 0 shirt, 1 trousers, 2 skin, 3 hair, 4 fixed, 5 the
+// 9 a companion (a dog, a stroller: no pose moves it), 10 the dog's tail. Parts: 0 shirt, 1 trousers, 2 skin, 3 hair, 4 fixed, 5 the
 // shirt a shade darker, 6 an umbrella (only in the rain; its holder's arm is raised).
 export const H = 1.08 // people a touch larger than life, so they read at street zoom
 const JOINT = { hip: 0.86, knee: 0.465, shoulder: 1.38, elbow: 1.105 }
@@ -260,7 +260,8 @@ function personModel(THREE, v) {
   }
   if (v === 'dog') { // on a lead, trotting ahead to the right: the coat in a hair colour
     k.c(null, 3, 9).box(0.62, 1.08, 0.26, 0.5, 0.36, 0.54, 0.92).box(1.0, 1.26, 0.42, 0.66, 0.37, 0.53, 0.8).box(1.22, 1.36, 0.44, 0.54, 0.41, 0.49) // body, head, muzzle
-    k.box(1.0, 1.06, 0.64, 0.74, 0.37, 0.41).box(1.0, 1.06, 0.64, 0.74, 0.49, 0.53).box(0.5, 0.64, 0.44, 0.5, 0.43, 0.47) // ears, tail
+    k.box(1.0, 1.06, 0.64, 0.74, 0.37, 0.41).box(1.0, 1.06, 0.64, 0.74, 0.49, 0.53) // ears
+    k.c(null, 3, 10).box(0.5, 0.64, 0.44, 0.5, 0.43, 0.47).c(null, 3, 9) // the tail (10: it wags while the dog is petted)
     for (const [x, z] of [[0.66, 0.39], [0.66, 0.51], [1.0, 0.39], [1.0, 0.51]]) k.box(x, x + 0.07, 0, 0.28, z - 0.03, z + 0.03)
     k.c(0xc23b2e, 4, 9).box(1.0, 1.04, 0.5, 0.62, 0.365, 0.535).rod([0.04, 0.78, 0.27], [1.02, 0.62, 0.45], 0.012, 0.012, 3) // collar and lead
   }
@@ -349,6 +350,38 @@ export function farModels(THREE) {
   return { cars: FAR.map((fn, i) => build(THREE, fn, true, 'far ' + i)), person: k.geometry().scale(H, H, H), bike: bikeModel(THREE) }
 }
 
+// The cheapest models, for what is a few pixels on the screen (#604): a car as two blocks in the main colours of its
+// lower and upper halves (taken from its far model `cars[k]`) with a lamp strip at each end, 144 vertices for 432; a
+// person as legs, body and head, 108 for 252.
+export function dotModels(THREE, cars) {
+  const col = new THREE.Color()
+  const main = (g, y0, y1) => { // [colour, part] of most of the surface between two heights
+    const P = g.attributes.position.array, C = g.attributes.aCol.array, A = g.attributes.aPart.array, sum = new Map()
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
+    for (let i = 0; i < P.length / 3; i += 3) {
+      a.fromArray(P, i * 3); b.fromArray(P, i * 3 + 3); c.fromArray(P, i * 3 + 6)
+      const y = (a.y + b.y + c.y) / 3
+      if (y < y0 || y >= y1 || A[i] > 1.5) continue // (not the lamps)
+      const key = A[i] < 0.5 ? 'body' : col.setRGB(C[i * 3], C[i * 3 + 1], C[i * 3 + 2]).getHex()
+      sum.set(key, (sum.get(key) || 0) + b.sub(a).cross(c.sub(a)).length())
+    }
+    const best = [...sum].sort((p, q) => q[1] - p[1])[0]?.[0] ?? 'body'
+    return best === 'body' ? [null, 0] : [best, 1]
+  }
+  const car = (g, i) => {
+    g.computeBoundingBox()
+    const { min, max } = g.boundingBox, k = kit(THREE), L = max.x - min.x, ym = min.y + (max.y - min.y) * 0.55
+    k.c(...main(g, min.y + 0.3, ym)).box(min.x, max.x, min.y + 0.2, ym, min.z, max.z)
+    k.c(...main(g, ym, max.y + 1)).box(min.x + L * 0.12, max.x - L * 0.22, ym, max.y, min.z * 0.9, max.z * 0.9)
+    k.c(0xfff2cc, 2).box(max.x, max.x + 0.04, 0.6, 0.74, min.z, max.z).c(0xb01010, 3).box(min.x - 0.04, min.x, 0.62, 0.76, min.z, max.z)
+    const o = k.geometry(); o.name = 'dot ' + i
+    return o
+  }
+  const k = kit(THREE)
+  k.c(null, 1).box(-0.09, 0.09, 0, 0.86, -0.17, 0.17).c(null, 0).box(-0.13, 0.13, 0.84, 1.44, -0.24, 0.24).c(null, 2).box(-0.11, 0.11, 1.45, 1.74, -0.1, 0.1)
+  return { cars: cars.map(car), person: k.geometry().scale(H, H, H) }
+}
+
 // kind: 'car', 'person' or 'bike'; hide: a { value } uniform, the squared radius around uCam within which these
 // boxes are not drawn (the detailed models are), or null for the detailed models themselves
 export function lifeMaterial(THREE, uni, kind, hide = null) {
@@ -408,6 +441,7 @@ export function lifeMaterial(THREE, uni, kind, hide = null) {
             if (pose < 0.5) { a = s * (leg ? 0.5 : -0.45); b = leg ? -0.95 * max(0.0, c) : 0.15 + 0.4 * max(0.0, -s); } // the swinging leg's knee bends
             else if (pose < 1.5) b = leg ? 0.0 : 0.12;
             else if (pose < 2.5) { a = leg ? 1.5708 : 0.3; b = leg ? -1.5708 : 0.6; } // sitting
+            else if (pose > 4.5) b = leg ? 0.0 : 0.12; // stopped for someone petting their dog
             else if (pose > 3.5) a = leg ? 0.12 * sd : -0.9 * min(1.0, iB.x * 2.0); // knocked over: arms out
             if (umb && aSwing > 1.5) { a = 0.75; b = 0.0; } // holding it up
             float jy = (leg ? ${JOINT.knee} : ${JOINT.elbow}) * ${H.toFixed(3)};
@@ -416,7 +450,8 @@ export function lifeMaterial(THREE, uni, kind, hide = null) {
           }
           if (pose > 1.5 && pose < 2.5 && sw < 8.5) P0.y -= 0.38;
           P0 *= 0.92 + 0.16 * fract(seed * 5.3); // short and tall
-          if (pose > 3.5) pitch = iB.x; // tipping back from the feet`}`}
+          if (sw > 9.5 && pose > 4.5) { float w = 0.8 * sin(iB.x * 24.0); P0.xz = rot(P0.xz, vec2(0.64, 0.45), w); N0.xz = rot(N0.xz, vec2(0.0), w); } // the dog's tail, wagging (iB.x: seconds)
+          if (pose > 3.5 && pose < 4.5) pitch = iB.x; // tipping back from the feet`}`}
         vCol = col; vEmit = em; ${SHADE.vert}
         vec3 objectNormal = orient(N0, iA.w, pitch);`)
       .replace('#include <begin_vertex>', `${kind === 'car' ? 'P0 *= 1.0 - floor(iB.w * 0.5) / 15.0; // growing in, shrinking away (worker.js output())' : ''}

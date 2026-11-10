@@ -348,6 +348,17 @@ export function busGame(ctx, pick, d0) {
     }
   }
   function walkTo(f, x, y, speed, then) { f.tx = x; f.ty = y; f.speed = speed; f.then = then; f.mode = 'walk' }
+  // to door j, round the bus and not through it (#606): someone who is not on its door side (the bus stopped on the
+  // far side of them, or across the stop) walks round its nearer end, a metre clear of the corners
+  function walkToDoor(f, j, then) {
+    const a = ctx.secs[0], z = ctx.secs[artic ? 1 : 0], door = (g) => { const p = doorAt(j, 0.15); walkTo(g, p.x, p.y, 1.6, then) }
+    const lat = (f.x - a.x) * a.fy - (f.y - a.y) * a.fx // metres to the right of the front section
+    if (lat > a.hw + 0.3) return door(f)
+    const nose = [a.x + a.fx * (a.hl + 1.2), a.y + a.fy * (a.hl + 1.2), a], tail = [z.x - z.fx * (z.hl + 1.2), z.y - z.fy * (z.hl + 1.2), z]
+    const [ex, ey, b] = Math.hypot(f.x - nose[0], f.y - nose[1]) < Math.hypot(f.x - tail[0], f.y - tail[1]) ? nose : tail, k = b.hw + 0.9
+    const right = (g) => walkTo(g, ex + b.fy * k, ey - b.fx * k, 1.6, door)
+    if ((f.x - b.x) * b.fy - (f.y - b.y) * b.fx < -b.hw - 0.3) walkTo(f, ex - b.fy * k, ey + b.fx * k, 1.6, right); else right(f)
+  }
   function stepFolk(dt) {
     for (const f of folk) {
       if (f.mode === 'off') continue
@@ -659,7 +670,7 @@ export function busGame(ctx, pick, d0) {
       // the first in the queue walks to the front door (or a back one, on the B-Line and RapidBus)
       const f = folk.find((g) => g.mode === 'wait' && g.stop === s)
       const go = () => { S.aboard++; S.carried++; s.wait = Math.max(0, s.wait - 1); const j = dest_(s.i); stops[j].alight++; snd.fare(); bus.userData.aboard(S.aboard) }
-      if (f) { const p = doorAt(rapid ? Math.floor(Math.random() * DOORS.length) : 0, 0.15); walkTo(f, p.x, p.y, 1.6, (g) => { g.mode = 'off'; g.w.visible = false; g.stop = null }); go() } else go()
+      if (f) { walkToDoor(f, rapid ? Math.floor(Math.random() * DOORS.length) : 0, (g) => { g.mode = 'off'; g.w.visible = false; g.stop = null }); go() } else go()
     }
     bus.userData.aboard(S.aboard)
   }
