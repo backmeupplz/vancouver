@@ -1069,6 +1069,19 @@ function* buildWalk() {
     p._sides = hit.map((h) => !(tried && h / tried >= 0.4)) // [left, right]
   }
   pieces = pieces.filter((p) => FOOT.has(p.kind) || p.kind === 10 || (sidewalk(p) > 0 && (p._sides[0] || p._sides[1])))
+  // a footway mapped through a building (an indoor mall's corridor, a path drawn across a block's footprint): nobody
+  // walks it, 3 m or more of it being over 0.8 m inside walls (decks and tunnels are over or under the buildings)
+  const outside = []
+  for (const p of pieces) {
+    if (due()) yield
+    let ok = true
+    if (FOOT.has(p.kind) && !p.z && !p.tunnel) {
+      const c = centre(p)
+      for (let u = 0, run = 0; ok && u <= c.len; u += 1.5) { at(c, u, tmp); const o = wallOut(tmp.x, tmp.y, 0); run = o && Math.hypot(o.x, o.y) > 0.8 ? run + 1 : 0; ok = run < 3 }
+    }
+    if (ok) outside.push(p)
+  }
+  pieces = outside
   const nodes = new Map(), wps = []
   const node = (id, x, y) => { let n = nodes.get(id); if (!n) nodes.set(id, (n = { id, x, y, legs: [], bikes: [] })); return n }
   const dt = (x, y) => { const d = Math.hypot(x - DOWNTOWN[0], y - DOWNTOWN[1]); return 1 + 2.5 * Math.exp(-d / 1500) }

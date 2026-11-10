@@ -743,5 +743,5 @@ export function busGame(ctx, pick, d0) {
   const goal = () => { const s = stops[next]; if (!s || S.end) return null; const p = laneAt(s.d); G.x = p.x; G.y = p.y; return G }
   bus.userData.aboard(0)
   ctx.bus.userData.setSign(r.name, dest, accentOf(r) ? r.color : null)
-  return { S, startAt, settle, inLane, frame, action, actionLabel, bump, summary, dispose, resetSpot, goal, get serving() { return !!serving }, get busy() { return !!serving && (boardQ > 0 || alightQ > 0) }, get doors() { return doors }, get end() { return S.end }, get d() { return d }, get next() { return stops[next] }, stops, trolley, pole, lane, get settled() { return settled } }
+  return { S, startAt, settle, inLane, laneAt, frame, action, actionLabel, bump, summary, dispose, resetSpot, goal, get serving() { return !!serving }, get busy() { return !!serving && (boardQ > 0 || alightQ > 0) }, get doors() { return doors }, get end() { return S.end }, get d() { return d }, get next() { return stops[next] }, stops, trolley, pole, lane, get settled() { return settled } }
 }

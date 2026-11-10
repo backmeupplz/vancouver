@@ -237,9 +237,11 @@ export default function drive(city) {
   }
   // push a circle out of building footprints: returns the summed push (x, y) or null. h: the height it is at (the
   // camera's), when the raised parts of buildings that reach down to there are solid too
+  let hitD = Infinity // how near the nearest wall collide() just met is (0: inside one): its pushes sum, and between two walls cancel
   function collide(x, y, rad0, h = -Infinity, pad = 0) { // pad: further off the landmarks' outlines (their scanned meshes stand out past them: steps, porticos, cornices)
     let px = 0, py = 0, hit = false
     const mark = ++stamp, R = rad0 + pad
+    hitD = Infinity
     for (const b of tilesNear(x, y, R)) {
       if (!b.fp) continue
       for (let cx = Math.floor((x - R) / CELL); cx <= Math.floor((x + R) / CELL); cx++) for (let cy = Math.floor((y - R) / CELL); cy <= Math.floor((y + R) / CELL); cy++) {
@@ -259,6 +261,7 @@ export default function drive(city) {
             if (d < bd) { bd = d; bx = qx; by = qy }
           }
           if (!inside && bd >= rad) continue
+          hitD = Math.min(hitD, inside ? 0 : Math.max(0, bd - (rad - rad0)))
           const nx = (x - bx) / (bd || 1), ny = (y - by) / (bd || 1)
           const k = inside ? -(bd + rad) : rad - bd // inside: out through the nearest wall
           px += nx * k; py += ny * k; hit = true
@@ -268,6 +271,23 @@ export default function drive(city) {
     return hit ? { x: px, y: py } : null
   }
   const insideBuilding = (x, y) => !!collide(x, y, 0.01)
+  // the underside of the lowest raised part of a building (an arcade's upper floors, a skybridge, the storeys over a
+  // lane) over (x, north) above the height h, or Infinity: what is driven under is a ceiling to the camera
+  function ceilingAt(x, y, h) {
+    let top = Infinity
+    for (const b of tilesNear(x, y, 1)) {
+      if (!b.lo) continue
+      for (const r of b.fg.get(ckey(Math.floor(x / CELL), Math.floor(y / CELL))) || NONE) {
+        const l = b.lo[r]
+        if (!(l > h && l < top) || x < b.bb[r * 4] || x > b.bb[r * 4 + 2] || y < b.bb[r * 4 + 1] || y > b.bb[r * 4 + 3]) continue
+        const P = b.fp.pts
+        let inside = false
+        for (let q = b.fp.start[r], e = b.fp.start[r + 1], w = e - 2; q < e; w = q, q += 2) if ((P[q + 1] > y) !== (P[w + 1] > y) && x < ((P[w] - P[q]) * (y - P[q + 1])) / (P[w + 1] - P[q + 1]) + P[q]) inside = !inside
+        if (inside) top = l
+      }
+    }
+    return top
+  }
   // the first building wall on the way from (x0, y0) to (x1, y1): the fraction of the way (1 = none); h as collide's
   function wallHit(x0, y0, x1, y1, h = -Infinity) {
     let best = 1
@@ -998,6 +1018,11 @@ export default function drive(city) {
     v3.set(bx, gy, -by)
     if (snap) chase.pos.copy(v3); else chase.pos.lerp(v3, 1 - Math.exp(-(doors ? 1.6 : taxi ? 10 : 7) * dt))
     if (tube) chase.pos.y = Math.min(chase.pos.y, P.roof - 0.7)
+    // under a building's raised part (the player, or the camera behind it): under its underside too, where it is no
+    // wall (the camera used to rise into the storeys over a lane and look out from inside them)
+    // (again once the walls have moved it: they may push it under one)
+    const duck = () => { if (!tube) chase.pos.y = Math.min(chase.pos.y, Math.min(ceilingAt(P.x, P.y, P.h + lift + 1.8), ceilingAt(chase.pos.x, -chase.pos.z, P.h + lift + 1.8)) - 0.7) }
+    duck()
     // keep the camera out of buildings, every frame and after the smoothing (so it never glides through a wall):
     // on the line from the player to the camera, stop short of the first wall; then step off walls beside it
     // (a metre clear: cornices, awnings and balconies stand out from the footprint. At the camera's height, so the
@@ -1014,9 +1039,13 @@ export default function drive(city) {
       const dx = chase.pos.x - x, dy = -chase.pos.z - y, d = Math.hypot(dx, dy), m = r + nearPlane() + 0.2 - d
       if (!kind && m > 0 && d > 1e-3 && chase.pos.y - g < 8) { chase.pos.x += (dx / d) * m; chase.pos.z -= (dy / d) * m }
     })
+    duck()
     // the near plane comes in when a wall is close, so it never cuts through one
     const wall = !tube && collide(chase.pos.x, -chase.pos.z, 2.5, ch, 2)
-    chase.near = wall ? clamp((2.5 - Math.hypot(wall.x, wall.y)) * 0.6, 0.2, nearPlane()) : nearPlane()
+    // (its corners are further out than its middle, the more the wider the view: a cab at speed looked through the
+    // wall of a lane with 0.6 of the distance; and by the nearest wall, not the sum of the pushes off two)
+    const tn = Math.tan((pcam.fov * Math.PI) / 360)
+    chase.near = wall ? clamp((hitD * 0.9) / Math.sqrt(1 + tn * tn * (1 + pcam.aspect * pcam.aspect)), 0.2, nearPlane()) : nearPlane()
     const ahead = onFoot ? 3 : doors ? car.V.hl - 3 : 6 + big * 0.3, right = doors ? car.V.hw + 1.2 : 0
     v4.set(P.x + fwdX(P.yaw) * ahead + fwdY(P.yaw) * right, P.h + lift + (onFoot ? 1.3 : 1.0), -(P.y + fwdY(P.yaw) * ahead - fwdX(P.yaw) * right))
     if (snap) chase.look.copy(v4); else chase.look.lerp(v4, 1 - Math.exp(-(doors ? 2 : 10) * dt))
@@ -1225,7 +1254,8 @@ export default function drive(city) {
     const P = r.s.p.pts, m = P.length - 2, end = Math.min(Math.hypot(x - P[0], y - P[1]), Math.hypot(x - P[m], y - P[m + 1])) < 10
     const dz = r.z + 0.58
     if (r.over > 0.8 && !joined(r)) return { y: g, deck: false, end } // past a deck's end where nothing raised goes on: the street (not a disc of deck round its end)
-    if (r.d < (r.s.p.band ? 2.2 : 1.2) && Math.abs(dz - curY) < (end ? 4 : 1.2)) return r.s.p.tunnel ? { y: dz, deck: true, end, roof: r.z + r.s.p.tunnel } : { y: Math.max(g, dz), deck: dz - g > 1.2, end }
+    const rp = r.d < (r.s.p.band ? 2.2 : 1.2) ? -1 : railPast(x, y, curY) // (a deck goes on to its railings: a wheel by the rail of a wide bridge is on it, not over the ground far below)
+    if (rp < 0 && rp > -Infinity && Math.abs(dz - curY) < (end ? 4 : 1.2)) return r.s.p.tunnel ? { y: dz, deck: true, end, roof: r.z + r.s.p.tunnel } : { y: Math.max(g, dz), deck: dz - g > 1.2, end }
     return { y: g, deck: false, end }
   }
   // does another deck go on from the end of r's piece that (x, y) is past (a joint, not an abutment)
@@ -1318,21 +1348,9 @@ export default function drive(city) {
       if (Math.abs(car.speed) > 3) sfx.splash()
       car.speed *= 0.6; car.lat *= 0.6
     }
+    const x0 = car.x, y0 = car.y, mx = nx - x0, my = ny - y0
     car.x = nx; car.y = ny
     tow(); boxes()
-    for (let i = 0; i < nsec && !car.deck; i++) { // buildings: circles along the van (and each section of a bus); not the ones under a bridge it is on,
-      const B = secs[i], [offs, cr] = i ? [car.V.rear[2], 1.35] : car.V.circles // nor one over the carriageway (a street through a building's passage, a footprint drawn over the road)
-      for (const off of offs) {
-        const p = collide(B.x + B.fx * off, B.y + B.fy * off, cr)
-        if (!p) continue
-        const q = nearestRoad(B.x + B.fx * off, B.y + B.fy * off, 4, false, false, true)
-        if (q && q.z == null && q.dist < q.w / 2 - 0.3 && insideBuilding(q.px, q.py)) continue // (the building over the road's middle)
-        car.x += p.x; car.y += p.y; boxes()
-        const l = Math.hypot(p.x, p.y) || 1, vn = bounce(p.x / l, p.y / l, 0, 0, 0.15, i ? -car.V.hl : off)
-        probe?.('wall', B.x + B.fx * off - (p.x / l) * cr, B.y + B.fy * off - (p.y / l) * cr, vn)
-        if (vn > 2.5) bumped(vn)
-      }
-    }
     carVsTraffic()
     // street furniture, trunks, bollards, signal poles; then people
     for (let i = 0; i < nsec; i++) {
@@ -1341,6 +1359,34 @@ export default function drive(city) {
       for (const o of poles(B.x, B.y, B.hl + 4)) if (Math.abs(o.y - car.h) < 4 && !game?.inLane(o.x, -o.z)) carVsPost(o.x, -o.z, o.r, true)
     }
     carVsPeople(performance.now())
+    // (the walls last: a car or a pole that shoves the van does not shove it into one)
+    let walled = false
+    for (let i = 0; i < nsec && !car.deck; i++) { // buildings: circles along the van (and each section of a bus); not the ones under a bridge it is on,
+      const B = secs[i], [offs, cr] = i ? [car.V.rear[2], 1.35] : car.V.circles // nor one over the carriageway (a street through a building's passage, a footprint drawn over the road)
+      // (and its four corners, which stand out past the circles: 0.3 to 0.4 m of a cab's or a van's went into a wall
+      // it met at an angle, in a lane as wide as it is long)
+      const el = B.hl - 0.2, ew = B.hw - 0.2
+      for (let k = 0, n = offs.length + (i ? 0 : 4); k < n; k++) {
+        const c = k - offs.length, off = c < 0 ? offs[k] : c < 2 ? el : -el, sd = c < 0 ? 0 : c & 1 ? ew : -ew, r = c < 0 ? cr : 0.2
+        const x = B.x + B.fx * off + B.fy * sd, y = B.y + B.fy * off - B.fx * sd
+        const p = collide(x, y, r, car.lift > 0.3 ? car.h + car.lift + 1.8 : -Infinity) // (a cab in the air off a ramp meets the storeys over a lane, at its roof's height, as a wall)
+        if (!p) continue
+        const q = nearestRoad(x, y, 4, false, false, true)
+        if (q && q.z == null && q.dist < q.w / 2 - 0.3 && insideBuilding(q.px, q.py)) continue // (the building over the road's middle)
+        car.x += p.x; car.y += p.y; boxes(); walled = true
+        const l = Math.hypot(p.x, p.y) || 1, vn = bounce(p.x / l, p.y / l, 0, 0, 0.15, i ? -car.V.hl : off)
+        probe?.('wall', x - (p.x / l) * r, y - (p.y / l) * r, vn)
+        if (vn > 2.5) bumped(vn)
+      }
+    }
+    // between a wall and a car it was moving towards, in a gap narrower than the van (a parked car in a lane): it
+    // stops where it was, not inside the car (backing away from it is always open)
+    pinch: if (walled) for (let i = 0; i < nsec; i++) for (const o of others(secs[i].x, secs[i].y, 10 + secs[i].hl)) {
+      const b = otherBox(o)
+      if ((b.x - x0) * mx + (b.y - y0) * my <= 0 || !(boxBox(secs[i], b)?.depth > 0.3)) continue
+      car.x = x0; car.y = y0; car.speed *= -0.2; car.lat = 0; boxes()
+      break pinch
+    }
     kerbs()
     // stand on the surface, on all four wheels: the height, pitch and roll of the plane through the road under them
     // (so a long bus over a crest, a van across a camber or half on the next deck has its wheels on the road; what is

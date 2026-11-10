@@ -51,7 +51,7 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.world.toLatLon(x, z)` | `{ lat, lon }` |
 | `city.world.heightAt(x, z)` | ground height in metres (real elevation, from the finest loaded tile; 0 where nothing is loaded yet) |
 | `city.world.offRoad(x, z, margin = 0.6, maxD = 8)` | for street furniture: the nearest `{ x, z }` at least `margin` m off the carriageways and cycle tracks the map draws (detail tiles), within `maxD` m; `null` where `(x, z)` is clear already or no detail tile is loaded there |
-| `city.world.eachTile(fn)` | `fn(tile)` for every loaded map tile now and later (`{ level, i, j, ox, oy, size, graph, terrain, footprints, water, trees }`, see below); returns an unsubscribe |
+| `city.world.eachTile(fn)` | `fn(tile)` for every loaded map tile now and later (`{ level, i, j, ox, oy, size, graph, terrain, footprints, overhangs, water, trees }`, see below); returns an unsubscribe |
 | `city.world.suppressBuildings(ring)` | `[[lat, lon], …]`: the generic building there is removed because your plugin draws its own |
 | `city.view.zoom`, `.center`, `.metresPerPixel`, `.bounds` | what is on screen (`bounds`: `{x0, z0, x1, z1}`) |
 | `city.view.useCamera(camera, opts)` | draw the map through your own camera, e.g. a `PerspectiveCamera` for a game (see below) |
@@ -101,6 +101,9 @@ close. New tiles are built and uploaded to the GPU a few MB per frame, so stream
   3 street lamp, 4 bench, 5 bus stop, 6 give way, 7 painted crossing (bars), 8 painted crossing (two lines); `id` is the OSM node id (signals on a junction share the id of
   the graph pieces' end there).
 - `tile.terrain`: `{ n, h, size }`, an `n`×`n` height grid over the tile, row 0 north.
+- `tile.overhangs` (detail tiles, or `null`): the parts of buildings left out of `footprints` because they start
+  more than 2.5 m up (the storeys over a lane or an arcade, a skybridge): `{ pts, start, lo }`, rings as in
+  `footprints`, `lo[r]` the height (world y) of ring `r`'s underside. A wall to a camera up there, a ceiling to one below.
 - `tile.footprints` (detail tiles): building outlines for collisions, `{ pts, start }`: ring `r` is the world x,
   north pairs `pts[start[r]] … pts[start[r + 1] - 1]`. Parts that start more than 2.5 m up (you can drive under
   them) and buildings a plugin replaced with `suppressBuildings` are left out. The cars parked in parking lots are

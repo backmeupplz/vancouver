@@ -505,6 +505,16 @@ export default function life(city) {
   const offTiles = city.world.eachTile((t) => { tiles.set(tkey(t), t); schedule() })
   const offUnload = city.on('tile:unload', (t) => { tiles.delete(tkey(t)); schedule() })
   function schedule() { if (!syncT) syncT = setTimeout(sync, 250) }
+  // ?drivedebug (tools/clip_check.mjs): when a third-person mode starts the simulated area is set round the player
+  // and its tiles sent anew, not grown from wherever the map's view was as tiles came in, so two runs of a route
+  // simulate the same streets
+  const offPlayer = location.search.includes('drivedebug') ? city.on('player', (p) => {
+    if (!p || !(p.x || p.z)) return
+    simA = { x: p.x, y: -p.z, r: 3000 }; pedA = { vx: p.x, vy: -p.z, vr: 2250 }
+    worker.postMessage({ type: 'tiles', add: [], drop: [...sent], masks: city.tiles?.masks || [] }); sent.clear()
+    worker.postMessage({ type: 'area', area: { ...simA, ...pedA } })
+    schedule()
+  }) : () => {}
   function sync() {
     syncT = 0
     if (!active) return
@@ -620,7 +630,7 @@ export default function life(city) {
   check()
   return {
     dispose() {
-      offTiles(); offUnload(); offView(); offWeather(); offQuality(); offFrame()
+      offTiles(); offUnload(); offPlayer(); offView(); offWeather(); offQuality(); offFrame()
       document.removeEventListener('visibilitychange', onVis)
       clearInterval(clock); clearInterval(statT); clearTimeout(syncT); clearTimeout(obsT)
       if (city.traffic === traffic) delete city.traffic

@@ -20,7 +20,7 @@ import { typing, buzz, MOVE_KEYS, mapPicker, mapCameraPose, poseOf, dive, street
 const VMAX = 9 // m/s: a small keelboat in a gale (the server allows 12 for boats)
 // share of the best speed by true wind angle (degrees off the bow): nothing in the no-go zone, best on a beam reach
 const POLAR = [0, 0, 34, 0, 45, 0.68, 60, 0.86, 95, 1, 130, 0.9, 180, 0.62]
-const HULL = [3.1, 0, -2.8, 0, 0.3, 1.15, 0.3, -1.15] // [ahead, right] points that must stay on the water (metres)
+const HULL = [3.1, 0, 2.15, 0, 1.2, 0, -0.8, 0, -1.8, 0, -2.8, 0, 0.3, 1.15, 0.3, -1.15] // [ahead, right] points that must stay on the water (metres): a metre apart along her, or the corner of a shore cell (4 m) passes between two and a metre and more of the hull is on the land
 const TRAIL = 48, TRAIL_DT = 0.2 // wake: samples, seconds apart
 const SPRAY = 90 // spray droplets
 const PLANE = 5.4 // m/s (10.5 kn): faster than this she lifts and planes
@@ -489,7 +489,7 @@ export default function sail(city) {
     // move, drifting a little with the wind; the shore stops the boat (it may always back off or turn away)
     const nx = B.x + (fx * B.speed + wind.x * 0.03) * dt, nz = B.z + (fz * B.speed + wind.z * 0.03) * dt
     d0 = dry(B.x, B.z, B.h)
-    if (d0 >= 3 && !wet(B.x, B.z)) { const w = nearestWater(B.x, B.z, 120); if (w) { B.x = w.x; B.z = w.z; B.speed = 0 } } // on land (a tile came in): back afloat
+    if (d0 >= 6 && !wet(B.x, B.z)) { const w = nearestWater(B.x, B.z, 120); if (w) { B.x = w.x; B.z = w.z; B.speed = 0 } } // on land (a tile came in): back afloat
     else if (ok(nx, nz, nh)) { B.x = nx; B.z = nz; B.h = nh }
     else {
       if (ok(B.x, B.z, nh)) B.h = nh
@@ -497,7 +497,11 @@ export default function sail(city) {
       bumped(Math.abs(B.speed))
       B.speed *= -0.25
     }
+    // pushed off a moored boat or a pier: not onto the shore, and not into the next boat of the row (a gap narrower
+    // than she is: she stops where she was, instead of ending up aground or inside a hull)
+    const px = B.x, pz = B.z
     collideObstacles(t)
+    if (hits && Math.hypot(x0 - B.x, z0 - B.z) < 5 && (dry(B.x, B.z, B.h) > d0 || (collideObstacles(t), hits))) { B.x = x0; B.z = z0; B.speed *= -0.25 } else if (!hits) { x0 = px; z0 = pz } // (x0, z0: where she was last clear of them)
     // heel to leeward with the apparent wind (more when pinned in); the sail eased by the sheet, flogging when it can't draw
     const luff = clamp(Math.max(-e / 0.25, (36 - B.twa) / 8), 0, 1)
     const heel = clamp((0.55 + 0.45 * B.sheet) * (1 - luff) * B.aws * B.aws * Math.sin(Math.min(awa, Math.PI / 2)) * 0.0045, 0, 0.42)
@@ -515,6 +519,7 @@ export default function sail(city) {
     }
   }
   let d0 = 0 // hull points on land before this step's move
+  let x0 = NaN, z0 = NaN
   function ok(x, z, h) { const d = dry(x, z, h); return d === 0 || d < d0 } // a move that doesn't run (further) aground
   function bumped(impact) {
     const now = performance.now()
@@ -523,7 +528,9 @@ export default function sail(city) {
     thud(clamp(impact / 4, 0.3, 1))
     buzz(Math.round(clamp(impact * 12, 15, 60)))
   }
+  let hits = 0
   function hit(p) { // pushed out of something ({ x, y }: y along z): bounce off it if heading into it
+    hits++
     B.x += p.x; B.z += p.y
     const l = Math.hypot(p.x, p.y) || 1, vn = (Math.sin(B.h) * p.x + Math.cos(B.h) * p.y) / l * B.speed
     if (vn < 0) { bumped(-vn); B.speed *= 0.3 }
@@ -536,6 +543,7 @@ export default function sail(city) {
     for (const o of obs) o.at = performance.now()
   }
   function collideObstacles() {
+    hits = 0
     const fx = Math.sin(B.h), fz = Math.cos(B.h), now = performance.now()
     for (let a = -2.2; a <= 2.21; a += 2.2) {
       const cx = B.x + fx * a, cz = B.z + fz * a
@@ -804,7 +812,7 @@ export default function sail(city) {
   addEventListener('resize', onResize)
   document.addEventListener('visibilitychange', onVis)
 
-  if (location.search.includes('drivedebug')) window.sailDebug = { B, wind, goals, wet, teleport, toggleGoals, set auto(v) { auto = v ? { tack: 0, tackT: 0 } : null } }
+  if (location.search.includes('drivedebug')) window.sailDebug = { B, wind, goals, wet, teleport, get state() { return state }, start: (x, z) => { const w = nearestWater(x, z, 3000); if (w) start(w.x, w.z) }, toggleGoals, set auto(v) { auto = v ? { tack: 0, tackT: 0 } : null } }
   return {
     dispose() {
       cancelPick()

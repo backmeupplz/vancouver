@@ -18,7 +18,7 @@ export async function server(port) { // own python static server on public/ unle
   port = 20000 + Math.floor(Math.random() * 20000)
   const pub = fileURLToPath(new URL('../public', import.meta.url))
   const p = spawn('python3', ['-m', 'http.server', port, '-b', '127.0.0.1'], { cwd: pub, stdio: 'ignore' })
-  await new Promise((r) => setTimeout(r, 800))
+  for (let i = 0; i < 100 && !(await fetch(`http://127.0.0.1:${port}/index.html`).then((r) => r.ok, () => false)); i++) await new Promise((r) => setTimeout(r, 200)) // (up: a loaded machine takes its time)
   return { port, stop: () => p.kill() }
 }
 
