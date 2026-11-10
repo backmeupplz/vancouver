@@ -33,7 +33,7 @@ import { makeFeel } from './feel.js'
 import { deliveryGame } from './deliver.js'
 import { clamp, smooth, wrap, esc, vancouver, circleBox } from '../../core/util.js'
 import { cellsNear, nearestStreet, abbr } from '../../core/streets.js'
-import { typing, buzz, MOVE_KEYS, mapPicker, mapCameraPose, poseOf, dive, streetSky, touchButtons, audioContext, tone as toneInto } from '../../core/play.js'
+import { typing, buzz, MOVE_KEYS, mapPicker, mapCameraPose, poseOf, dive, streetSky, touchButtons, orbitLook, audioContext, tone as toneInto } from '../../core/play.js'
 
 const DRIVE_MAX_KIND = 7 // motorway .. living street (graph piece kinds): where a van belongs
 const WALK_MAX_KIND = 13 // .. steps, tracks: where a person can walk (plus the sidewalks of roads)
@@ -690,7 +690,7 @@ export default function drive(city) {
   function showHelp() { // the keys, for a few seconds after each change between van and feet (always while delivering)
     ui.help.textContent = taxi ? taxi.help() : game ? 'W gas · S brake (a tap is gentle, hold for more) · A D steer · E doors · H horn · R back on the route · Esc end the shift'
       : hike ? 'WASD or arrows to walk · Shift to push on (it tires you; each quarter mark is a second wind) · the trail guides you when you let go · Esc to the map'
-      : onFoot ? 'WASD or arrows to walk · Shift to run · P camera: snap the landmarks · C sit a while · E van · Esc to the map'
+      : onFoot ? touchy ? 'Go walks where the camera looks · drag to look round, pinch to zoom' : 'WASD or arrows to walk · Shift to run · drag to look round, wheel to zoom · Space hop · P camera · C sit · E van · Esc to the map'
       : `W gas · S brake, hold to reverse · A D steer · Space handbrake · E get out · H horn · R back on the road · Esc map`
     ui.help.hidden = false; ui.help.classList.remove('fade')
     clearTimeout(helpT)
@@ -723,8 +723,9 @@ export default function drive(city) {
     car.tyaw = ty; car.tx = jx - fwdX(ty) * V.trail; car.ty = jy - fwdY(ty) * V.trail
   }
   function resetTrailer() { const V = car.V; car.tyaw = car.yaw; car.tx = car.x - fwdX(car.yaw) * ((V.joint || 0) + (V.trail || 0)); car.ty = car.y - fwdY(car.yaw) * ((V.joint || 0) + (V.trail || 0)); boxes() }
-  const man = { x: 0, y: 0, h: 0, deck: false, yaw: 0, speed: 0, phase: 0, run: false, bumpT: 0, board: null, stamina: 1, winded: false }
-  const chase = { pos: new THREE.Vector3(), look: new THREE.Vector3(), yaw: 0 }
+  const man = { x: 0, y: 0, h: 0, deck: false, yaw: 0, speed: 0, phase: 0, run: false, bumpT: 0, board: null, stamina: 1, winded: false, lean: 0, bank: 0, air: 0 }
+  const chase = { pos: new THREE.Vector3(), look: new THREE.Vector3(), yaw: 0, pitch: 0.12, dist: 4.3 } // (pitch, dist: on foot, where the camera orbits)
+  const orbit = orbitLook(city.canvas)
   let state = 'off', anim = null, offFrame = null, t0 = 0, mapPose = null, fromPose = null, saved = null
   let deliver = false, onFoot = false, hasVan = true, assist = true, job = null, hudAt = 0, readAt = 0, street = null, shake = 0, skyAt = 0, fogFar = 850
   let pickKind = null, hike = null, errand = null, grip = 1, propsAt = null, kerbsAt = null, vista = 0 // vista: 0 .. 1 the photo's long view
@@ -836,7 +837,7 @@ export default function drive(city) {
   const yawFromDir = (dir) => dir - Math.PI / 2 // road direction atan2(dy, dx) in (x, north) to a yaw
   const fwdX = (yaw) => -Math.sin(yaw), fwdY = (yaw) => Math.cos(yaw) // forward in (x, north)
   // photo walk, sitting, hike splits and wildlife (foot.js)
-  const foot = makeFoot(THREE, city, { man, walker, popup, sfx, wallHit, wet: isWater, fwdX, fwdY, hikeSpeed: HIKE, flash() { ui.flash.hidden = false; ui.flash.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => ui.flash.classList.remove('on'))); setTimeout(() => { ui.flash.hidden = true }, 1000) } })
+  const foot = makeFoot(THREE, city, { man, walker, popup, sfx, audio: () => (audio() ? master : null), pathAt: (x, y) => { const r = nearestRoad(x, y, 3, true, true, false, man.h - 0.5); return r ? { d: r.d, drv: r.s.drv } : null }, wallHit, wet: isWater, fwdX, fwdY, hikeSpeed: HIKE, flash() { ui.flash.hidden = false; ui.flash.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => ui.flash.classList.remove('on'))); setTimeout(() => { ui.flash.hidden = true }, 1000) } })
 
   function start(kind, spot, at) {
     deliver = kind === 'deliver'
@@ -850,7 +851,7 @@ export default function drive(city) {
       game = busGame(busCtx(), at.pick, at.data)
       spot = busSpawn = game.startAt(at.pick.from, at.x, at.y)
     }
-    paintVan()
+    paintVan(); walker.paint({ shirt: city.progress?.choice('shirt')?.value, pants: city.progress?.choice('pants')?.value, cap: city.progress?.choice('cap')?.value })
     if (kind === 'taxi') vehicle = makeCab(THREE, CABS[taxiChoice.cab], taxiChoice.livery, DRIVERS[taxiChoice.driver])
     if (onFoot) {
       Object.assign(man, { x: spot.x, y: spot.y, yaw: spot.yaw, speed: 0, board: null, stamina: 1, winded: false, roof: undefined })
@@ -884,7 +885,7 @@ export default function drive(city) {
     fitCamera()
     cellsNear(body().x, body().y, 800)
     state = 'in'; t0 = performance.now()
-    city.view.useCamera(pcam, opts)
+    city.view.useCamera(pcam, opts); orbit.on()
     anim = city.animate()
     offFrame = city.on('frame', frame)
     document.body.classList.add('dlv-on')
@@ -953,7 +954,7 @@ export default function drive(city) {
   }
   function finish() { // back on the map camera, exactly where it was
     state = 'off'
-    city.view.release()
+    city.view.release(); orbit.off()
     offFrame?.(); offFrame = null
     anim?.(); anim = null
     city.scene.remove(vehicle, walker, icons.pickup, icons.drop, icons.summit, icons.stop, props.group, lips.mesh)
@@ -999,15 +1000,27 @@ export default function drive(city) {
   const chaseFov = () => (innerWidth < innerHeight ? 72 : onFoot ? 62 : 58) + (taxi && !onFoot ? taxi.fov : !onFoot && feel ? feel.fov : 0) // a van's view widens with speed; a cab's FOV kicks out with speed and nitro
   function chasePose(dt, snap) {
     const k = snap ? 1 : 1 - Math.exp(-(onFoot ? 4 : 3.2) * dt), P = body()
-    if (onFoot || Math.abs(car.speed) > 0.5 || snap) chase.yaw += wrap(P.yaw - chase.yaw) * k
-    const fx = fwdX(chase.yaw), fy = fwdY(chase.yaw), sp = Math.max(0, P.speed)
+    const sp = Math.max(0, P.speed)
+    // on foot the camera orbits: a drag, the wheel, a pinch or the right stick look round and zoom (to the eye at the
+    // closest); left alone a moment while walking, it comes round behind again (not when walking at it)
+    orbit.step(dt)
+    const [oy, op, oz] = orbit.take(), eye = onFoot && chase.dist < 1
+    if (onFoot) {
+      chase.yaw += oy; chase.pitch = clamp(chase.pitch + op, eye ? -1.1 : -0.3, 1.25); chase.dist = clamp(chase.dist * oz, 0.6, 10)
+      const d = wrap(P.yaw - chase.yaw)
+      if (snap) chase.yaw = P.yaw
+      else if (orbit.idle > 1.2 && sp > 0.5 && Math.abs(d) < 2.4) chase.yaw += clamp(d * 2.2, -2, 2) * dt
+      if (foot.framing) man.yaw += oy; else walker.visible = !eye
+    } else if (Math.abs(car.speed) > 0.5 || snap) chase.yaw += wrap(P.yaw - chase.yaw) * k
+    const fx = fwdX(chase.yaw), fy = fwdY(chase.yaw), cp = Math.cos(chase.pitch), tp = Math.sin(chase.pitch)
+    const od = eye ? 0 : chase.dist * (1 + sp * 0.04), eyeH = eye ? 1.62 : 1.5 // the orbit's radius, the height of its middle over the feet
     const big = onFoot ? 0 : car.V.length - 4.3 // a bus: further back and up
     // a bus keeps to the kerb lane: the camera a little out over the road, clear of the street trees; at a stop with
     // its doors open it swings round in front, looking back at the front door and the people getting on
     const doors = !!game?.doors && Math.abs(car.speed) < 0.5 && !snap
     if (!doors) doorCam = null; else if (!doorCam) doorCam = pickDoorCam(P)
-    const back = onFoot ? 4.3 + sp * 0.18 : doors ? -(car.V.hl + doorCam[0]) : 8.6 + big * 0.8 + (taxi ? Math.min(sp, 22) : sp) * 0.14, up = onFoot ? 1.9 + sp * 0.06 : doors ? 3.8 : 4.3 + big * 0.2 + sp * 0.05
-    const off = !game ? 0 : doors ? doorCam[1] : -2.2
+    const back = onFoot ? od * cp : doors ? -(car.V.hl + doorCam[0]) : 8.6 + big * 0.8 + (taxi ? Math.min(sp, 22) : sp) * 0.14, up = onFoot ? eyeH + od * tp : doors ? 3.8 : 4.3 + big * 0.2 + sp * 0.05
+    const off = onFoot ? 0.4 * Math.min(1, od / 3) : !game ? 0 : doors ? doorCam[1] : -2.2 // (on foot: over the right shoulder)
     const bx = P.x - fx * back + fy * off, by = P.y - fy * back - fx * off
     // in a tunnel: under its ceiling, and the buildings overhead are no walls; so while the camera is still in the tube the
     // player has just come out of (else it rose through the roof and the portal's headwall behind them)
@@ -1016,9 +1029,9 @@ export default function drive(city) {
     const tube = roof != null
     if (city.tiles?.baseMesh) city.tiles.baseMesh.position.y = tube ? -120 : 0 // (the far map's picture lies 4 m under the ground, through a tunnel deeper than that: sunk under it meanwhile)
     const lift = onFoot ? 0 : car.lift // (a cab in the air: the camera rises with it)
-    const gy = tube ? Math.min(P.h + up, roof - 0.7) : Math.max(city.world.heightAt(bx, -by) + (onFoot ? 1.2 : 1.4), P.h + up + lift)
+    const gy = tube ? Math.min(P.h + up, roof - 0.7) : Math.max(city.world.heightAt(bx, -by) + (onFoot ? 0.9 : 1.4), P.h + up + lift)
     v3.set(bx, gy, -by)
-    if (snap) chase.pos.copy(v3); else chase.pos.lerp(v3, 1 - Math.exp(-(doors ? 1.6 : taxi ? 10 : 7) * dt))
+    if (snap) chase.pos.copy(v3); else chase.pos.lerp(v3, 1 - Math.exp(-(doors ? 1.6 : eye ? 40 : taxi || onFoot ? 10 : 7) * dt))
     if (tube) chase.pos.y = Math.min(chase.pos.y, roof - 0.7)
     // under a building's raised part (the player, or the camera behind it): under its underside too, where it is no
     // wall (the camera used to rise into the storeys over a lane and look out from inside them)
@@ -1034,7 +1047,7 @@ export default function drive(city) {
       const len = Math.hypot(cx - P.x, cy - P.y) || 1, k = Math.max(0, k0 - 1 / len)
       chase.pos.x = P.x + (cx - P.x) * k; chase.pos.z = -(P.y + (cy - P.y) * k)
     }
-    const side = !tube && collide(chase.pos.x, -chase.pos.z, 1, ch, 2)
+    const side = !tube && !eye && collide(chase.pos.x, -chase.pos.z, 1, ch, 2) // (at the eye: where the walker's own collision keeps it)
     if (side) { chase.pos.x += side.x; chase.pos.z -= side.y }
     // and out of tree trunks (their crowns dissolve between the lens and the player: materials.js occluder)
     if (!tube) propsNear(chase.pos.x, -chase.pos.z, 1.3, (x, y, r, kind, ang, g) => {
@@ -1047,10 +1060,11 @@ export default function drive(city) {
     // (its corners are further out than its middle, the more the wider the view: a cab at speed looked through the
     // wall of a lane with 0.6 of the distance; and by the nearest wall, not the sum of the pushes off two)
     const tn = Math.tan((pcam.fov * Math.PI) / 360)
-    chase.near = wall ? clamp((hitD * 0.9) / Math.sqrt(1 + tn * tn * (1 + pcam.aspect * pcam.aspect)), 0.2, nearPlane()) : nearPlane()
+    chase.near = wall ? clamp((hitD * 0.9) / Math.sqrt(1 + tn * tn * (1 + pcam.aspect * pcam.aspect)), eye ? 0.1 : 0.2, nearPlane()) : nearPlane()
     const ahead = onFoot ? 3 : doors ? car.V.hl - 3 : 6 + big * 0.3, right = doors ? car.V.hw + 1.2 : 0
-    v4.set(P.x + fwdX(P.yaw) * ahead + fwdY(P.yaw) * right, P.h + lift + (onFoot ? 1.3 : 1.0), -(P.y + fwdY(P.yaw) * ahead - fwdX(P.yaw) * right))
-    if (snap) chase.look.copy(v4); else chase.look.lerp(v4, 1 - Math.exp(-(doors ? 2 : 10) * dt))
+    if (onFoot) { const a = eye ? 10 : 3; v4.set(P.x + fx * a * cp + fy * off, P.h + eyeH - a * tp, -(P.y + fy * a * cp - fx * off)) } // along the camera's own line
+    else v4.set(P.x + fwdX(P.yaw) * ahead + fwdY(P.yaw) * right, P.h + lift + 1.0, -(P.y + fwdY(P.yaw) * ahead - fwdX(P.yaw) * right))
+    if (snap) chase.look.copy(v4); else chase.look.lerp(v4, 1 - Math.exp(-(doors ? 2 : eye ? 40 : onFoot ? 14 : 10) * dt))
   }
   // where the camera stands at a stop, in front of the bus: metres past its nose and to the side (− out over the road).
   // The first spot (once a stop) with no tree crown in its view of the front door or by the lens, and no pole, lamp or
@@ -1498,16 +1512,24 @@ export default function drive(city) {
     if (foot.busy(I, dt) || city.fishing?.busy) { man.speed = 0; return } // framing a photo, sat down, a rod in hand (plugins/fish)
     man.run = I.run && !(hike && man.winded)
     const tr = hike ? nearestRoad(man.x, man.y, 4, false, true) : null, onTrail = !!tr && tr.d < 0.8
-    const target = hike ? hikeSpeed(dt, I, onTrail) : I.up ? (I.run ? RUN : WALK) : I.down ? -WALK * 0.6 : 0
-    man.speed += (target - man.speed) * (1 - Math.exp(-(target ? 6 : 10) * dt))
+    // the keys are the camera's: up walks away from it, left and right across its view, down towards it; the walker
+    // turns to face the way it goes (first, when that is behind it) and the camera comes round after it (chasePose)
+    const mv = I.up ? 1 : I.down ? -1 : 0, going = mv || I.steer ? 1 : 0, yaw0 = man.yaw
+    if (going) man.yaw += wrap(chase.yaw + Math.atan2(I.steer, mv) - man.yaw) * (1 - Math.exp(-12 * dt))
+    const faced = going ? clamp(Math.cos(wrap(chase.yaw + Math.atan2(I.steer, mv) - man.yaw)) * 1.5, 0, 1) : 0
+    const target = (hike ? hikeSpeed(dt, { up: !!going, down: false }, onTrail) : going ? (I.run ? RUN : WALK) : 0) * faced
+    man.speed += (target - man.speed) * (1 - Math.exp(-(target ? 9 : 13) * dt))
     if (Math.abs(man.speed) < 0.02 && !target) man.speed = 0
-    man.yaw += I.steer * (I.run ? 2.2 : 2.8) * dt
+    const turned = wrap(man.yaw - yaw0), h0 = man.h, k5 = 1 - Math.exp(-5 * dt)
+    if (Math.abs(man.speed) < 0.8) man.phase += Math.abs(turned) * 1.6 // turning on the spot: small steps
+    man.bank += (clamp(-(turned / dt) * Math.abs(man.speed) * 0.02, -0.14, 0.14) - man.bank) * k5
+    if (man.air) { man.air += dt / 0.42; if (man.air >= 1) man.air = 0 } // a hop (foot.js: Space)
     // the trail leads: walking on with nothing steered, turn towards the trail a few metres ahead (round switchbacks)
     if (hike && onTrail && !I.steer && man.speed > 0.3) {
       const a = nearestRoad(man.x + fwdX(man.yaw) * 2.6, man.y + fwdY(man.yaw) * 2.6, 4, false, true)
       if (a && a.dist > 0.3) {
         const d = wrap(yawFromDir(Math.atan2(a.py - man.y, a.px - man.x)) - man.yaw)
-        if (Math.abs(d) < 1.4) man.yaw += d * Math.min(1, 3 * dt)
+        if (Math.abs(d) < 1.4 && orbit.idle > 1.2) { man.yaw += d * Math.min(1, 3 * dt); chase.yaw += d * Math.min(1, 3 * dt) }
       }
     }
     const fx = fwdX(man.yaw), fy = fwdY(man.yaw)
@@ -1550,6 +1572,9 @@ export default function drive(city) {
     man.deck = s.deck; man.roof = s.roof
     man.h = clamp(man.h + (s.y - man.h) * (1 - Math.exp(-14 * dt)), s.y - 0.25, s.y + 0.25) // (a bank, a wall in the terrain: up or down it at once, not through it)
     man.phase += dt * Math.abs(man.speed) * (man.run ? 2.3 : 3.6)
+    // leaning: forward setting off and uphill, back stopping and downhill
+    const slope = Math.abs(man.speed) > 0.3 ? clamp((man.h - h0) / (Math.abs(man.speed) * dt), -0.5, 0.5) : 0
+    man.lean += (clamp((target - man.speed) / RUN, -1, 1) * 0.3 + slope * 0.35 - man.lean) * k5
   }
   // the walker (radius 0.32) out of a circle at (x, y) of radius r: true if it touched
   function push(x, y, r) {
@@ -1665,7 +1690,7 @@ export default function drive(city) {
     if (walker.visible) {
       walker.position.set(man.x, man.h - 0.05, -man.y)
       walker.rotation.set(0, man.yaw, 0)
-      poseWalker(walker, man.phase, clamp(Math.abs(man.speed) / WALK, 0, 1), (man.run || !!errand) && Math.abs(man.speed) > WALK + 0.3, carried.visible)
+      poseWalker(walker, man.phase, clamp(Math.abs(man.speed) / WALK, 0, 1), (man.run || !!errand) && Math.abs(man.speed) > WALK + 0.3, carried.visible, man)
       foot.pose(walker)
       wblob.position.set(man.x, man.h + 0.03, -man.y)
     }
@@ -1990,7 +2015,7 @@ export default function drive(city) {
   document.addEventListener('visibilitychange', onVis)
 
   // ?drivedebug: the state, for tests in a browser (window.driveDebug)
-  if (location.search.includes('drivedebug')) window.driveDebug = { car, man, goal, get run() { return job?.run }, get job() { return job }, get drift() { return drift }, get feel() { return feel }, get hike() { return hike }, get errand() { return errand }, get shift() { return job?.S }, get state() { return state }, startHike: (id) => startHike(HIKES.find((h) => h.id === id)), propsNear, nearestRoad, wallHit, railPast,
+  if (location.search.includes('drivedebug')) window.driveDebug = { car, man, chase, walker, goal, get run() { return job?.run }, get job() { return job }, get drift() { return drift }, get feel() { return feel }, get hike() { return hike }, get errand() { return errand }, get shift() { return job?.S }, get state() { return state }, startHike: (id) => startHike(HIKES.find((h) => h.id === id)), propsNear, nearestRoad, wallHit, railPast,
     get game() { return game }, get horn() { return !!horn }, get taxi() { return taxi }, showGarage, startTaxi: (x, y, c = { cab: 0, livery: 0, driver: 0 }) => { taxiChoice = c; start('taxi', carSpawn(x, y) || { x, y, yaw: 0 }, { x, y }) }, input, secs, collide, surface, frame,
     set autopilot(f) { autopilot = f }, set probe(f) { probe = f }, stop: () => { if (state === 'off') return; game?.dispose(); taxi?.dispose(); taxi = null; state = 'out'; finish() },
     start: (kind, x, y, yaw = 0) => start(kind, { x, y, yaw }, { x, y }), startBus: (name, dir = 0, from = 'first') => loadLines().then(({ man }) => { const ri = man.routes.findIndex((r) => r.name === name); return startBus({ ri, r: man.routes[ri], dir, from, man }) }) }

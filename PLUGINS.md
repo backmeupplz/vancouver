@@ -232,11 +232,11 @@ throws). Everything is kept in `localStorage` (`progress.v1`); no accounts. **Th
   `'sail.gybes'`); totals show in the panel when a daily challenge or unlock uses them. Distances are counted for you
   from `city.player` (`km.car`, `km.bus`, `km.foot`, `km.boat`, and `climb` in metres on foot): don't report those.
 - `city.progress.unlocked(id)` → boolean. Ids are `slot:name`: `van:<name>` (van colours), `horn:<name>`,
-  `boat:<name>` (hull colours), `rod:<name>`, `lure:<name>`, `trap:<name>` (fishing gear, `plugins/fish/rules.js`), `cab:<index>` (Rush Fare cabs, the index into `CABS`; the garage's Start button asks). Unknown ids are unlocked
+  `boat:<name>` (hull colours), `shirt:<name>` / `pants:<name>` / `cap:<name>` (the courier's clothes on foot), `rod:<name>`, `lure:<name>`, `trap:<name>` (fishing gear, `plugins/fish/rules.js`), `cab:<index>` (Rush Fare cabs, the index into `CABS`; the garage's Start button asks). Unknown ids are unlocked
   (`true`), so gating by an id the progress plugin doesn't know never locks anyone out; the basic modes are never
   gated.
-- `city.progress.choice(slot)` → what the player picked for `'van' | 'horn' | 'boat' | 'rod' | 'lure' | 'trap'` in the panel: `{ id, name,
-  value }` (`value`: a CSS colour for `van` / `boat`, the horn's oscillator frequencies in Hz for `horn`), or `null` for the default. Read it
+- `city.progress.choice(slot)` → what the player picked for `'van' | 'horn' | 'boat' | 'shirt' | 'pants' | 'cap' | 'rod' | 'lure' | 'trap'` in the panel: `{ id, name,
+  value }` (`value`: a CSS colour for `van` / `boat` / `shirt` / `pants` / `cap`, the horn's oscillator frequencies in Hz for `horn`), or `null` for the default. Read it
   when the game starts (and on `'progress:choice'`).
 - `city.progress.level`, `.xp`, `.cash`, `.stats` (read-only snapshot values).
 - Events on `city.on`: `'progress:award'` `({ kind, amount, xp, meta })`, `'progress:level'` `(level)`,

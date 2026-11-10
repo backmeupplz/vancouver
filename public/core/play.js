@@ -110,6 +110,42 @@ export function streetSky() {
   }
 }
 
+// ---------------------------------------------------------------- looking round
+// A third-person orbit's input on el (the canvas; a button over it keeps its own presses): a drag with the mouse or a
+// finger, the wheel, a pinch, a gamepad's right stick. They add up in dyaw, dpitch (radians: a drag to the right looks
+// right, down looks down) and zoom (a factor on the distance) until the caller takes them (take()); idle: seconds
+// since the last of them (step(dt) each frame counts it, and reads the stick).
+export function orbitLook(el) {
+  const P = new Map(), O = { dyaw: 0, dpitch: 0, zoom: 1, idle: 99 }
+  let pinch = 0
+  const down = (e) => { P.set(e.pointerId, [e.clientX, e.clientY]); pinch = 0; try { el.setPointerCapture(e.pointerId) } catch {} }
+  const move = (e) => {
+    const p = P.get(e.pointerId); if (!p) return
+    if (P.size === 1) { const k = e.pointerType === 'touch' ? 0.007 : 0.0045; O.dyaw -= (e.clientX - p[0]) * k; O.dpitch += (e.clientY - p[1]) * k * 0.8 }
+    p[0] = e.clientX; p[1] = e.clientY; O.idle = 0
+    if (P.size === 2) { const [a, b] = [...P.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]); if (pinch && d > 1) O.zoom *= pinch / d; pinch = d }
+  }
+  const up = (e) => { P.delete(e.pointerId); pinch = 0 }
+  const wheel = (e) => { e.preventDefault(); O.zoom *= Math.exp(clamp(e.deltaY, -120, 120) * 0.0022); O.idle = 0 }
+  const menu = (e) => e.preventDefault()
+  const EV = [['pointerdown', down], ['pointermove', move], ['pointerup', up], ['pointercancel', up], ['contextmenu', menu]]
+  return Object.assign(O, {
+    on() { for (const [n, f] of EV) el.addEventListener(n, f); el.addEventListener('wheel', wheel, { passive: false }) },
+    off() { for (const [n, f] of EV) el.removeEventListener(n, f); el.removeEventListener('wheel', wheel); P.clear(); O.take() },
+    get held() { return P.size > 0 },
+    step(dt) {
+      O.idle += dt
+      for (const g of navigator.getGamepads?.() || []) {
+        if (!g?.connected || g.mapping !== 'standard') continue
+        const x = Math.abs(g.axes[2]) > 0.15 ? g.axes[2] : 0, y = Math.abs(g.axes[3]) > 0.15 ? g.axes[3] : 0
+        if (x || y) { O.dyaw -= x * 2.6 * dt; O.dpitch += y * 1.6 * dt; O.idle = 0 }
+        break
+      }
+    },
+    take() { const r = [O.dyaw, O.dpitch, O.zoom]; O.dyaw = O.dpitch = 0; O.zoom = 1; return r },
+  })
+}
+
 // ---------------------------------------------------------------- touch buttons
 // hold-to-press buttons ([data-k] in root) kept in state[k]; onPress(k) on each press (to wake the sound up),
 // onRelease(k) when one is let go
