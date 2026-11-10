@@ -13,7 +13,7 @@ from shapely.ops import unary_union
 from PIL import Image, ImageDraw
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(__file__))
-from common import digest, file_digest, files_digest, code_key, code_data, cpu_slot, write_if_changed, manifest, save_manifest, write_index, VERSION, GROUND, GI, xy, extent, L0, L1, KX, KY, LAT_O, LON_O, HR, KINDS, KI, DRIVE, SHOP_AMENITY, line_kind, hnum, densify, all_tiles, HR_CACHE, hr_lookup, tile_args, load_feat, tube_h, SLAB
+from common import digest, file_digest, files_digest, code_key, code_data, cpu_slot, write_if_changed, manifest, save_manifest, write_index, VERSION, GROUND, GI, xy, extent, L0, L1, KX, KY, LAT_O, LON_O, HR, KINDS, KI, DRIVE, SHOP_AMENITY, line_kind, hnum, densify, all_tiles, HR_CACHE, hr_lookup, tile_args, load_feat, tube_h, SLAB, FINE, FB, fine_grid, under_reach
 from roofs import roof_lookup, valid_poly
 from facades import facade_lookup, NONE as B_NONE, GLASS as B_GLASS, SOLID as B_SOLID
 from lidar_massing import massing_lookup, walls_near
@@ -432,14 +432,16 @@ def build(ij):
     # street under it here; a building here it passes through) and the pieces meeting this cell's at its seams
     nbr = [L for a in (-1, 0, 1) for b in (-1, 0, 1) if a or b for L in road_pieces(feat.get('lines', []), dsm, dtm, X0 + a * L1, Y0 + b * L1)]
     over = [L for L in nbr if L['z'] and any(X0 - 30 <= x < X0 + L1 + 30 and Y0 - 30 <= y < Y0 + L1 + 30 for x, y in L['pts'])]
-    ground8 = road_ground(dtm, road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0, own=False), X0, Y0, lines + over)  # 8 m, fitted to the streets
+    ground8, fine = road_ground(dtm, road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0, own=False), X0, Y0, lines + over)  # 8 m, fitted to the streets; 2 m offsets over it
     # the geometry rules (tools/geom_rules.py): their fixes on this cell's buildings and road pieces, then what is left
-    g8 = lambda x, y: ndimage.map_coordinates(ground8, [(Y0 + L1 - np.asarray(y)) / 8, (np.asarray(x) - X0) / 8], order=1, mode='nearest')
+    q8, qf = np.round(ground8 * 10) / 10, np.round(fine * 100) / 100  # (as drawn: decimetres, the offsets centimetres)
+    g8 = lambda x, y: bilinear(q8, x, y, X0, Y0, 8) + bilinear(qf, x, y, X0, Y0, FINE)
     # the pieces of the next cells that meet this cell's at its seams (a deck ending at the seam, the street going on)
     seam = {n for L in lines for n in (L['a'], L['b'])}
     nxt = [L for L in nbr if L['a'] in seam or L['b'] in seam]
     rules = apply_rules(dict(cell=(X0, Y0), next=nxt, over=over, builds=builds, lines=lines, ground=g8, trees=trees, beach=beach, carr=polys.get('road', []) + polys.get('arterial', []) + polys.get('cycle', []), decks=[(np.asarray(L['pts'], float), np.asarray(L['z']), L['w']) for L in lines if L['z'] and not L.get('tube')]))
     rules = {k: dict(fixed=n, **summary(left)) for k, (n, left) in rules.items()}
+    xdecks = [L for L in lines + over if L['z'] and not L.get('tube')]  # (every detail tile's neighbours' decks: XDCK)
     for a in range(4):
         for b in range(4):
             tx, ty = X0 + a * L0, Y0 + b * L0
@@ -447,9 +449,11 @@ def build(ij):
             ti_, tj_ = i * 4 + a, j * 4 + b
             terr = ground8[(3 - b) * 128:(4 - b) * 128 + 1, a * 128:a * 128 + 129]  # 8 m: embankments, cuts and seawalls under the roads
             path = f'{OUT}/0/{ti_}_{tj_}.bin'
-            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, shops=shopn, boats=boats, beach=beach, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes):
+            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, shops=shopn, boats=boats, beach=beach, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes, foreign=xdecks):
                 if os.path.exists(path): os.remove(path)  # an earlier bake's, now empty
                 continue
+            tf = fine_section(fine[(3 - b) * 512:(4 - b) * 512 + 1, a * 512:a * 512 + 513])
+            if tf: out.section('TFIN', tf)
             os.makedirs(f'{OUT}/0', exist_ok=True)
             write_if_changed(path, out.bytes()); n += 1
     out = Out(X0, Y0, L1)
@@ -511,6 +515,7 @@ def flat_water(dtm, sea, water):
 
 
 ITER, DAMP, HOLD = 60, 0.45, 0.3  # road_ground's fit: rounds, step, how hard a node holds its own height
+CUT = 3.0  # metres: the deepest road_ground cuts a street down under a deck (deeper: one at the deck's level, meeting it near its end)
 DECK_TOP = 0.38  # a deck's drawn road over its height, less the ground's (the page's tile-worker.js strip lift, drive surface())
 
 
@@ -535,10 +540,10 @@ def road_ground(dtm, pieces, X0, Y0, decks=()):
         Q = [P] if e < 1 else [P, P + n * e, P - n * e]
         h = np.median([at(q) for q in Q], axis=0)  # level across, as a street is (a line drawn a metre or two off the street puts a kerb on the cut's or the embankment's slope)
         for q in Q: S.append(np.c_[q, np.full(len(q), 0.3 if L['kind'] in ('rail', 'lightrail') else 1.0 if L['kind'] in DRIVE else 0.5), h, np.full(len(q), L.get('a', -1)), np.full(len(q), L.get('b', -1))])
-    if not S: return G
+    if not S: return G, np.zeros((L1 // FINE + 1,) * 2, np.float32)
     S = np.concatenate(S)
     S = S[(S[:, 0] > X0 + 1) & (S[:, 0] < X0 + L1 - 1) & (S[:, 1] > Y0 + 1) & (S[:, 1] < Y0 + L1 - 1)]
-    if not len(S): return G
+    if not len(S): return G, np.zeros((L1 // FINE + 1,) * 2, np.float32)
     S, ab = S[:, :4], S[:, 4:].astype(np.int64)  # (each sample's piece's end nodes)
     want = S[:, 3].copy()
     # the decks' ends at the street's level (an abutment, a ramp's foot: the ground 15 m on past the end is near it;
@@ -561,17 +566,17 @@ def road_ground(dtm, pieces, X0, Y0, decks=()):
         want[near] = top * (1 - f) + want[near] * f
         S[near, 2] *= 3  # held to it harder than the LiDAR elsewhere
     # under a deck: the street 3 m under its underside (tools/audit_elev.py 'under'; the LiDAR has no ground under a
-    # bridge, its ground there is filled in from round it): a street drawn up into the deck is cut down, up to 3 m
+    # bridge, its ground there is filled in from round it): a street drawn up into the deck is cut down, up to CUT
     dk = [(shapely.LineString(L['pts']), L) for L in decks if L['z'] and not L.get('tube') and len(L['pts']) > 1]
     if dk:
         from shapely.strtree import STRtree
-        tree = STRtree([g.buffer(L['w'] / 2 + 0.6, cap_style='flat') for g, L in dk]); pts = shapely.points(S[:, :2])
+        tree = STRtree([g.buffer(under_reach(L['w'], L.get('band')), cap_style='flat') for g, L in dk]); pts = shapely.points(S[:, :2])
         for si, q in zip(*tree.query(pts, predicate='intersects')):
             g, L = dk[q]; f = g.project(pts[si])
             if min(f, g.length - f) < 12: continue  # (at its ends it comes down to the street)
             P_ = np.array(L['pts'], float); s_ = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P_, axis=0).T))])
             under = float(np.interp(f, s_, L['z'])) - (1.6 if KI[L['kind']] <= KI['tertiary'] else 0.9) - 3.0
-            if under < want[si] < under + 3.0: want[si] = under; S[si, 2] *= 3
+            if under < want[si] < under + CUT: want[si] = under; S[si, 2] *= 3
     k = S[:, 2:3]  # how much each counts: the streets, rail a little (a cut's floor where it shares a cell with the street above)
     fx, fy = (S[:, 0] - X0) / 8, (Y0 + L1 - S[:, 1]) / 8
     i, j = np.clip(np.floor(fx).astype(int), 0, 511), np.clip(np.floor(fy).astype(int), 0, 511)
@@ -587,7 +592,68 @@ def road_ground(dtm, pieces, X0, Y0, decks=()):
         e = want - (g[idx] * w).sum(1)  # sample or two lean on stays near it, no overshoot where a cut meets a street)
         num = np.zeros(g.size); np.add.at(num, idx.ravel(), (w2 * e[:, None]).ravel())
         g += np.where(free, DAMP * (num - HOLD * (g - g0)) / (den + HOLD), 0.0)
-    return g.reshape(513, 513).astype(np.float32)
+    G = g.reshape(513, 513).astype(np.float32)
+    return G, road_fine(S[:, :2], k[:, 0], want - bilinear(np.round(G * 10) / 10, S[:, 0], S[:, 1], X0, Y0, 8), X0, Y0)
+
+
+FINE_MIN = 0.6  # metres: a street this far off the 8 m grid gets the fine lattice under it (nearer, it holds it level)
+SMOOTH = 0.05  # how hard a fine node holds to its neighbours' mean, against a street sample's 1
+FINE_DROP = 0.25  # metres: smaller offsets are left out
+FINE_EDGE = 16.0  # metres: none of it this near a detail tile's edge (paint reaching past it lies on the next tile's 8 m grid, TERM)
+
+
+def bilinear(G, x, y, X0, Y0, c):
+    """grid G (row 0 north, c metres apart, its NW node at X0, Y0 + (rows - 1) c) at x, y"""
+    return ndimage.map_coordinates(G, [(Y0 + (G.shape[0] - 1) * c - np.asarray(y)) / c, (np.asarray(x) - X0) / c], order=1, mode='nearest')
+
+
+def road_fine(P, k, r, X0, Y0):
+    """the 2 m offsets over the 8 m grid (2049 x 2049 nodes over the 4 km tile, row 0 north) that take the streets the rest
+    of the way to their ground: P, k, r the street samples, their weights, how far the 8 m grid leaves them off. Fitted
+    as road_ground's grid is (held to nothing where the streets are near it), then eased out 6 m round them so the
+    banks stay walkable, nothing within FINE_EDGE of the detail tiles' edges (the next tile meets this one's 8 m grid there)"""
+    n = L1 // FINE + 1
+    F = np.zeros(n * n)
+    on = np.abs(r) > FINE_MIN
+    if not on.any(): return F.reshape(n, n).astype(np.float32)
+    near = np.zeros(len(r), bool)  # (the samples round the ones off: held level, so the fix stays on the street that needs it)
+    from scipy.spatial import cKDTree
+    near[np.unique(np.concatenate([np.asarray(q, int) for q in cKDTree(P).query_ball_point(P[on], 6.0)]))] = True
+    P, k, r = P[near], k[near], np.where(np.abs(r[near]) > FINE_MIN, r[near], 0.0)
+    d = np.minimum(np.abs((P - [X0, Y0] + L0 / 2) % L0 - L0 / 2), L0).min(1)  # (metres to the nearest detail tile edge)
+    r = r * np.clip((d - FINE_EDGE) / FINE_EDGE, 0, 1)  # none within FINE_EDGE of it, eased in over as much again
+    fx, fy = (P[:, 0] - X0) / FINE, (Y0 + L1 - P[:, 1]) / FINE
+    i, j = np.clip(np.floor(fx).astype(int), 0, n - 2), np.clip(np.floor(fy).astype(int), 0, n - 2)
+    u, v = fx - i, fy - j
+    idx = np.stack([j * n + i, j * n + i + 1, (j + 1) * n + i, (j + 1) * n + i + 1], 1)
+    w = np.stack([(1 - u) * (1 - v), u * (1 - v), (1 - u) * v, u * v], 1); w2 = w * k[:, None]
+    e_ = np.abs((np.arange(n) * FINE + L0 / 2) % L0 - L0 / 2) < FINE_EDGE; edge = (e_[:, None] | e_[None, :]).ravel()
+    den = np.zeros(n * n); np.add.at(den, idx.ravel(), (w2 * w).ravel())
+    held = den.reshape(n, n) > 0
+    for _ in range(2 * ITER):  # (each node also pulled to its neighbours' mean, SMOOTH: a membrane, no spikes where streets disagree)
+        e = r - (F[idx] * w).sum(1)
+        num = np.zeros(n * n); np.add.at(num, idx.ravel(), (w2 * e[:, None]).ravel())
+        G = F.reshape(n, n); lap = np.zeros((n, n)); lap[1:-1, 1:-1] = G[:-2, 1:-1] + G[2:, 1:-1] + G[1:-1, :-2] + G[1:-1, 2:] - 4 * G[1:-1, 1:-1]
+        F += np.where(edge, 0.0, DAMP * (num + SMOOTH * lap.ravel() - 0.05 * F) / (den + 4 * SMOOTH + 0.05))
+    F = F.reshape(n, n)
+    for _ in range(3):  # (eased out: a node no street leans on half its neighbours' mean, three times)
+        m = np.zeros_like(F); m[1:-1, 1:-1] = (F[:-2, 1:-1] + F[2:, 1:-1] + F[1:-1, :-2] + F[1:-1, 2:]) / 4
+        F = np.where(held, F, 0.5 * m)
+    F[edge.reshape(n, n)] = 0
+    F[np.abs(F) < FINE_DROP] = 0  # (the fit's faint spread: the page would split the ground over it for nothing)
+    return F.astype(np.float32)
+
+
+def fine_section(F):
+    """a detail tile's fine offsets (513 x 513, row 0 north) as section TFIN: u16 blocks, then each block's u16 index
+    (row * 33 + column, FB x FB nodes from its NW one) and its FB x FB int16 centimetres; blocks that don't move are
+    left out. None when none moves"""
+    nb = -(-F.shape[0] // FB)
+    Fp = np.zeros((nb * FB, nb * FB), np.float32); Fp[:F.shape[0], :F.shape[1]] = F
+    B = np.round(Fp * 100).clip(-32768, 32767).astype('<i2').reshape(nb, FB, nb, FB).transpose(0, 2, 1, 3).reshape(nb * nb, FB * FB)
+    keep = np.nonzero(np.abs(B).max(1) >= 3)[0]  # (3 cm)
+    if not len(keep): return None
+    return struct.pack('<H', len(keep)) + b''.join(struct.pack('<H', b) + B[b].tobytes() for b in keep)
 
 
 def terrain_grid(dtm, ox, oy, size, n):
@@ -1864,6 +1930,103 @@ def deck_design(k):  # the grade a structure is built to, where its LiDAR doesn'
     return {'rail': 0.03, 'lightrail': 0.06, 'steps': 0.8}.get(k, 0.10 if k in FOOT else 0.08)
 
 
+MILP_NODES = 300  # branch-and-bound nodes a structure's MILP may take (a bound in nodes, not seconds: the same answer every run)
+MILP_ROWS = 8000  # rows of the biggest structure the MILP is tried on (its root alone takes seconds over that)
+
+
+def deck_program(rs, runs, W, M_=40.0):
+    """deck_solve's LP over one structure's rows (runs: its stretches drawn over each other, {n: (one way?, [(var, other's
+    var j, j + 1, fraction, sample)])}, each one surface or stacked either way up as the solve finds best, binaries: then
+    a MILP, those stretches' own rows left out): ({var: height}, [(tag, sample, slack)], cost), or Nones.
+    M_: metres, big enough for any two decks drawn over each other (the stretches more than 15 m apart are left out)"""
+    from scipy.optimize import milp, LinearConstraint, Bounds
+    from scipy.sparse import coo_matrix
+    vs = sorted({v for r in rs for v, _ in r[1]} | {k for n in runs for t in runs[n][1] for k in t[:3]}); col = {v: n for n, v in enumerate(vs)}; nv = len(vs)
+    A, lo_, hi_, cost, tags = ([], [], []), [], [], [0.0] * nv, []
+    def con(terms, l, u):
+        for v, a in terms: A[0].append(len(lo_)); A[1].append(v); A[2].append(a)
+        lo_.append(l); hi_.append(u)
+    h0 = float(np.median([r[2] for r in rs if r[4] and len(r[1]) == 1] or [0.0]))  # (heights about this one: better conditioned)
+    for _, terms, rhs, cst, both, tag, at in rs:
+        if isinstance(tag, tuple) and tag[1] in runs: continue
+        rhs = 0.0 if cst is None else rhs - h0 * sum(a for _, a in terms)  # (ties: their terms sum to nothing)
+        T = [(col[v], a) for v, a in terms]
+        if cst is None: con(T, rhs, rhs); continue
+        t_ = len(cost); cost.append(cst)
+        if tag: tags.append((t_, tag, at))
+        con(T + [(t_, -1.0)], -np.inf, rhs)
+        if both: con(T + [(t_, 1.0)], rhs, np.inf)
+    ints = []
+    for n in sorted(runs):  # one surface (b0), or this one SEP over the other (b1) or under it (b2)
+        same, sm = runs[n]
+        b = [len(cost), len(cost) + 1, len(cost) + 2]; cost += [0.0, 0.0, 0.0]; ints += b
+        con([(b[0], 1.0), (b[1], 1.0), (b[2], 1.0)], 1.0, 1.0)
+        if same: con([(b[0], 1.0)], 1.0, 1.0)
+        for v, j0, j1, f, q in sm:
+            if v == j0 == j1: continue
+            d = [(col[v], 1.0), (col[j0], -(1 - f)), (col[j1], -f)]
+            t_ = len(cost); cost.append(W['tie']); tags.append((t_, ('ov', n), q))
+            con(d + [(t_, -1.0), (b[0], M_)], -np.inf, M_)  # dz <= M (1 - b0) + slack
+            con([(v_, -a) for v_, a in d] + [(t_, -1.0), (b[0], M_)], -np.inf, M_)
+            con([(v_, -a) for v_, a in d] + [(t_, -1.0), (b[1], M_)], -np.inf, M_ - SEP)  # dz >= SEP - M (1 - b1) - slack
+            con(d + [(t_, -1.0), (b[2], M_)], -np.inf, M_ - SEP)
+    nt = len(cost)
+    Am = coo_matrix((A[2], (A[0], A[1])), shape=(len(lo_), nt)).tocsr()
+    lb = np.r_[np.full(nv, -np.inf), np.zeros(nt - nv)]; ub_ = np.full(nt, np.inf)
+    integ = np.zeros(nt)
+    if ints: integ[ints] = 1; ub_[ints] = 1
+    r = None
+    for pre in (True, False):  # (HiGHS's presolve trips over some: without it)
+        r = milp(cost, integrality=integ, bounds=Bounds(lb, ub_), constraints=LinearConstraint(Am, lo_, hi_),
+                 options=dict(presolve=pre, node_limit=MILP_NODES, random_seed=1, threads=1, mip_rel_gap=1e-3))
+        if r.x is not None: break
+    if r.x is None: return None, None, None
+    return {v: r.x[n] + h0 for v, n in col.items()}, [(tag, at, float(r.x[t_])) for t_, tag, at in tags], float(r.fun)
+
+
+def deck_chosen(rs, runs, W, choice):
+    """a structure's rows with each chosen stretch's own rows as its choice: 0 one surface, 1 this one SEP over the
+    other, -1 under it"""
+    out = [r for r in rs if not (isinstance(r[5], tuple) and r[5][1] in choice)]
+    for n, ch in sorted(choice.items()):
+        for v, j0, j1, f, q in runs[n][1]:
+            if v == j0 == j1: continue
+            if ch == 0: out.append((rs[0][0], [(v, 1.0), (j0, -(1 - f)), (j1, -f)], 0.0, W['tie'], True, ('tie', n), q))
+            else: out.append((rs[0][0], [(v, -ch), (j0, ch * (1 - f)), (j1, ch * f)], -SEP, W['sep'], False, ('sep', n), q))
+    return out
+
+
+def deck_structure(job):
+    """one structure of deck_solve: its LP; where a stretch drawn over another can't be what the LiDAR says, each such
+    stretch made what the solved heights make it (one surface, or SEP over or under; the rest stay as the LiDAR has
+    them) and solved again while that gives less (a few LPs), then, on a structure small enough, a MILP deciding them
+    all at once; the best of these: ({var: height}, [(tag, sample, slack)], decided by the rules?, seconds)"""
+    import warnings
+    warnings.filterwarnings('ignore', 'Unrecognized options')
+    rs, runs, W = job
+    t0 = time.time()
+    hard = lambda sl: sum(v for t, at, v in sl if (t[0] if isinstance(t, tuple) else t) in ('tie', 'sep', 'ov', 'end', 'limit', 'low') and v > 0.05)
+    zc, sl, fun = deck_program(rs, {}, W)
+    if zc is None: return None, None, False, time.time() - t0
+    best, decided, choice = hard(sl), False, {}
+    bad = sorted({t[1] for t, at, v in sl if isinstance(t, tuple) and v > 0.05})
+    for _ in range(4):
+        new = dict(choice)
+        for n in sorted({t[1] for t, at, v in sl if isinstance(t, tuple) and v > 0.05}):
+            d = [zc[v] - (zc[j0] * (1 - f) + zc[j1] * f) for v, j0, j1, f, q in runs[n][1] if not v == j0 == j1]
+            if not d: continue
+            d, cur = float(np.median(d)), choice.get(n)
+            new[n] = (0 if abs(d) < MERGE / 2 else 1 if d > 0 else -1) if cur is None else (1 if d > 0 else -1) if cur == 0 else 0
+        if new == choice: break
+        z2, sl2, _ = deck_program(deck_chosen(rs, runs, W, new), {}, W)
+        if z2 is None or hard(sl2) >= best - 1e-6: break
+        zc, sl, best, choice, decided = z2, sl2, hard(sl2), new, True
+    if bad and best > 0.05 and len(rs) <= MILP_ROWS:
+        z2, sl2, _ = deck_program(rs, {n: runs[n] for n in bad}, W)
+        if z2 is not None and hard(sl2) < best - 1e-6: zc, sl, decided = z2, sl2, True
+    return zc, sl, decided, time.time() - t0
+
+
 def deck_solve(ways, raw, grade, tun={}, ground=None, drawn=None):
     """Every raised way's heights (DECKS, APPROACH, and the tunnels drawn beside them: TUNNELS), one linear program per
     connected structure (ways meeting at nodes or drawn over each other), on their 4 m samples: as near their LiDAR
@@ -1888,11 +2051,11 @@ def deck_solve(ways, raw, grade, tun={}, ground=None, drawn=None):
     from shapely.strtree import STRtree
     t0 = time.time()
     gw, gat = grade
-    E = []  # [key, points, along, wanted height, weight, kind, width, {sample: node}]
+    E, band = [], {}  # [key, points, along, wanted height, weight, kind, width, {sample: node}]; deck -> its sidewalk band?
     for w, (c, s, z) in DECKS.items():
         coords, refs, t, k = ways[w]
         vert = np.concatenate([[0], np.cumsum([max(1, int(math.dist(a, b) / 4)) for a, b in zip(coords, coords[1:])])])
-        E.append([w, raw[w][0], np.asarray(s, float), np.asarray(z, float), 1.0, k, road_shape(k, t)[1], dict(zip(vert.tolist(), refs))])
+        E.append([w, raw[w][0], np.asarray(s, float), np.asarray(z, float), 1.0, k, road_shape(k, t)[1], dict(zip(vert.tolist(), refs))]); band[w] = road_shape(k, t)[3]
     for w, lst in APPROACH.items():
         k, wd = gw[w][2], gw[w][3]
         for n, (r0, r1, ins, P, s, z, nodes) in enumerate(lst):
@@ -1941,11 +2104,20 @@ def deck_solve(ways, raw, grade, tun={}, ground=None, drawn=None):
             same = way_of(E[a]) == way_of(E[b])  # (a ramp leaving the main line; one way approached from both ends)
             one = min(abs(p[3]) for p in run) < MERGE or same
             if not one and min(abs(p[3]) for p in run) >= 15: continue
-            RUN.append((same, [(int(q), int(j), int(j) + 1, f) for q, j, f, dz in run]))
-            for q, j, f, dz in run:
-                q, j = int(q), int(j)
-                if one: ties.append((q, j, j + 1, f, len(RUN) - 1)); merged.add(q)
-                else: seps.append((q, j, j + 1, f, 1.0 if dz > 0 else -1.0, len(RUN) - 1))
+            parts = [(one, run)]
+            if not one:  # stacked by their LiDAR, yet they meet at a node: one surface as far from it as their grades take to part SEP, stacked from twice that
+                nb = {rep[off[b] + k_] for k_ in E[b][7]}; meet = [E[a][2][k_] for k_ in E[a][7] if rep[off[a] + k_] in nb]
+                if meet:
+                    reach = SEP / (deck_design(E[a][5]) + deck_design(E[b][5]))
+                    d = np.array([min(abs(E[a][2][int(p[0]) - off[a]] - m) for m in meet) for p in run])
+                    parts = [(True, run[d < reach]), (False, run[d >= 2 * reach])]
+            for one, run in parts:
+                if not len(run): continue
+                RUN.append((same, [(int(q), int(j), int(j) + 1, f) for q, j, f, dz in run]))
+                for q, j, f, dz in run:
+                    q, j = int(q), int(j)
+                    if one: ties.append((q, j, j + 1, f, len(RUN) - 1)); merged.add(q)
+                    else: seps.append((q, j, j + 1, f, 1.0 if dz > 0 else -1.0, len(RUN) - 1))
     # the ground: drawn under each sample, the LiDAR's at the ends
     gd = drawn(P[:, 0], P[:, 1])
     lo = np.full(N, -np.inf)  # the lowest each sample may be
@@ -1960,7 +2132,7 @@ def deck_solve(ways, raw, grade, tun={}, ground=None, drawn=None):
             s = e[2]; inner = np.nonzero((s > 12) & (s < s[-1] - 12) & (not tube(e)))[0]
             if not len(inner): continue
             pts = shapely.points(e[1][inner]); th = 1.6 if KI[e[5]] <= KI['tertiary'] else 0.9
-            for a, b in zip(*gt.query(pts, predicate='dwithin', distance=e[6] / 2 + 0.6)):
+            for a, b in zip(*gt.query(pts, predicate='dwithin', distance=under_reach(e[6], band.get(e[0])))):
                 if set(gw[G_[b]][1]) & set(e[7].values()): continue  # (it meets the deck)
                 c_ = shapely.line_interpolate_point(gl[b], shapely.line_locate_point(gl[b], pts[a]))
                 k_ = off[i] + inner[a]
@@ -2013,70 +2185,29 @@ def deck_solve(ways, raw, grade, tun={}, ground=None, drawn=None):
     for q, j0, j1, f, n in ties:
         if rep[q] != rep[j0] or rep[q] != rep[j1]: row([(rep[q], 1.0), (rep[j0], -(1 - f)), (rep[j1], -f)], 0.0, W['tie'], True, ('tie', n), q)
     for q, j0, j1, f, sg, n in seps: row([(rep[q], -sg), (rep[j0], sg * (1 - f)), (rep[j1], sg * f)], -SEP, W['sep'], tag=('sep', n), at=q)
-    # one program per structure
+    # one program per structure, in parallel; each deterministic (HiGHS bounded by nodes, not seconds), so the bake is too
     rows.sort(key=lambda r: r[0])
-    z = tgt.copy(); zr = {}
     starts = np.searchsorted([r[0] for r in rows], np.arange(nc + 1))
-    bad = 0
-    from scipy.optimize import milp, LinearConstraint, Bounds
-    M_ = 40.0  # metres: big enough for any two decks drawn over each other (the stretches more than 15 m apart are left out)
-    def program(rs, runs=frozenset()):
-        """the LP over a structure's rows (runs: its stretches drawn over each other, each one surface or stacked either
-        way up as the solve finds best, binaries: then a MILP, those stretches' own rows left out)"""
-        vs = sorted({v for r in rs for v, _ in r[1]} | {rep[k] for n in runs for t in RUN[n][1] for k in t[:3]}); col = {v: n for n, v in enumerate(vs)}; nv = len(vs)
-        A, lo_, hi_, cost, tags = ([], [], []), [], [], [0.0] * nv, []
-        def con(terms, l, u):
-            for v, a in terms: A[0].append(len(lo_)); A[1].append(v); A[2].append(a)
-            lo_.append(l); hi_.append(u)
-        h0 = float(np.median([r[2] for r in rs if r[4] and len(r[1]) == 1] or [0.0]))  # (heights about this one: better conditioned)
-        for _, terms, rhs, cst, both, tag, at in rs:
-            if isinstance(tag, tuple) and tag[1] in runs: continue
-            rhs = 0.0 if cst is None else rhs - h0 * sum(a for _, a in terms)  # (ties: their terms sum to nothing)
-            T = [(col[v], a) for v, a in terms]
-            if cst is None: con(T, rhs, rhs); continue
-            t_ = len(cost); cost.append(cst)
-            if tag: tags.append((t_, tag, at))
-            con(T + [(t_, -1.0)], -np.inf, rhs)
-            if both: con(T + [(t_, 1.0)], rhs, np.inf)
-        ints = []
-        for n in runs:  # one surface (b0), or this one SEP over the other (b1) or under it (b2)
-            same, sm = RUN[n]
-            b = [len(cost), len(cost) + 1, len(cost) + 2]; cost += [0.0, 0.0, 0.0]; ints += b
-            con([(b[0], 1.0), (b[1], 1.0), (b[2], 1.0)], 1.0, 1.0)
-            if same: con([(b[0], 1.0)], 1.0, 1.0)
-            for q, j0, j1, f in sm:
-                if rep[q] == rep[j0] == rep[j1]: continue
-                d = [(col[rep[q]], 1.0), (col[rep[j0]], -(1 - f)), (col[rep[j1]], -f)]
-                t_ = len(cost); cost.append(W['tie']); tags.append((t_, ('ov', n), q))
-                con(d + [(t_, -1.0), (b[0], M_)], -np.inf, M_)  # dz <= M (1 - b0) + slack
-                con([(v, -a) for v, a in d] + [(t_, -1.0), (b[0], M_)], -np.inf, M_)
-                con([(v, -a) for v, a in d] + [(t_, -1.0), (b[1], M_)], -np.inf, M_ - SEP)  # dz >= SEP - M (1 - b1) - slack
-                con(d + [(t_, -1.0), (b[2], M_)], -np.inf, M_ - SEP)
-        nt = len(cost)
-        Am = coo_matrix((A[2], (A[0], A[1])), shape=(len(lo_), nt)).tocsr()
-        lb = np.r_[np.full(nv, -np.inf), np.zeros(nt - nv)]; ub_ = np.r_[np.full(nv, np.inf), np.full(nt - nv, np.inf)]
-        integ = np.zeros(nt)
-        if ints: integ[ints] = 1; ub_[ints] = 1
-        r = None
-        for pre in (True, False):  # (HiGHS's presolve trips over some: without it)
-            r = milp(cost, integrality=integ, bounds=Bounds(lb, ub_), constraints=LinearConstraint(Am, lo_, hi_), options=dict(presolve=pre, time_limit=10))
-            if r.x is not None: break
-        if r.x is None: return None, None, None
-        return {v: r.x[n] + h0 for v, n in col.items()}, [(tag, at, float(r.x[t_])) for t_, tag, at in tags], float(r.fun)
-    hard = lambda sl: sum(v for t, at, v in sl if (t[0] if isinstance(t, tuple) else t) in ('tie', 'sep', 'ov', 'end', 'limit', 'low') and v > 0.05)
-    nm = 0
-    for c in range(nc):
-        rs = rows[starts[c]:starts[c + 1]]
-        if not rs: continue
-        zc, sl, fun = program(rs)
+    runs_of = {}  # structure -> {stretch: (one way?, [(sample, other's samples j, j + 1, fraction, sample index)] as variables)}
+    for n, (same, sm) in enumerate(RUN): runs_of.setdefault(int(comp[rep[sm[0][0]]]), {})[n] = (same, [(int(rep[q]), int(rep[j0]), int(rep[j1]), f, q) for q, j0, j1, f in sm])
+    jobs = [(rows[starts[c]:starts[c + 1]], runs_of.get(c, {}), W) for c in range(nc) if starts[c + 1] > starts[c]]
+    order = sorted(range(len(jobs)), key=lambda n: -len(jobs[n][0]))  # (the biggest first: none left running alone at the end)
+    procs = int(os.environ.get('PROCS', '8'))
+    t1 = time.time()
+    import multiprocessing as mp
+    if procs > 1 and len(jobs) > 50:
+        with mp.get_context('fork').Pool(procs) as pool: res = dict(zip(order, pool.imap(deck_structure, [jobs[n] for n in order], 4)))
+    else: res = {n: deck_structure(jobs[n]) for n in order}
+    print('deck solve: rows in', round(t1 - t0), 's, solved in', round(time.time() - t1), 's', flush=True)
+    bad = nm = 0
+    zr = {}
+    for n, (rs, _, _) in enumerate(jobs):  # (in structure order)
+        zc, sl, decided, secs = res[n]
         if zc is None: bad += 1; continue  # (left at their LiDAR profiles, one height at each node: below)
-        if any(isinstance(t, tuple) and v > 0.05 for t, at, v in sl):  # a stretch could not be what the LiDAR said: which it is, decided by the rules
-            runs = sorted({t[1] for t, at, v in sl if isinstance(t, tuple) and v > 0.05})  # (the rest stay as the LiDAR has them)
-            t1 = time.time(); z2, sl2, fun2 = program(rs, frozenset(runs))
-            if time.time() - t1 > 5: print('  deck solve: structure', c, len(runs), 'stretches decided in', round(time.time() - t1), 's', flush=True)
-            if z2 is not None and hard(sl2) < hard(sl): zc, sl = z2, sl2; nm += 1
+        if secs > 5: print('  deck solve: structure', rs[0][0], len(rs), 'rows', round(secs), 's', flush=True)
+        nm += decided
         zr.update(zc)
-        GAVE.extend((t[0] if isinstance(t, tuple) else t, float(P[at][0]), float(P[at][1]), v, c) for t, at, v in sl if v > 0.02)
+        GAVE.extend((t[0] if isinstance(t, tuple) else t, float(P[at][0]), float(P[at][1]), v, int(rs[0][0])) for t, at, v in sl if v > 0.02)
     left = {}  # (a structure the solver failed on: each node at the mean of what its ways' LiDAR says there)
     for q in range(N):
         if rep[q] not in zr: left.setdefault(rep[q], []).append(tgt[q])
@@ -2360,7 +2491,28 @@ def ground_partition(per, tx, ty, k, holes=None, simp=2):
     return res
 
 
-def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None, shops=(), beach=()):
+def line_bytes(out, sel, detail):
+    """pieces as section LINE: a node table (so pieces join across tiles), then each piece"""
+    nodes = {}
+    for L in sel:
+        for nid in (L['a'], L['b']): nodes.setdefault(nid, len(nodes))
+    lb = bytearray(struct.pack('<I', len(nodes)))
+    for nid in nodes: lb += struct.pack('<Q', nid)
+    lb += struct.pack('<I', len(sel))
+    for L in sel:
+        pts = L['pts'] if detail or L['z'] or len(L['pts']) <= 2 else list(LineString(L['pts']).simplify(1.5).coords)
+        z = L['z'] if L['z'] and len(pts) == len(L['pts']) else None  # bridge decks in overview tiles too
+        tf, tb_ = L.get('turns', ([], []))
+        flags = (1 if L['ow'] else 0) | (2 if L['band'] else 0) | (4 if z else 0) | (8 if L['drive'] else 0) | (16 if L.get('crossing') else 0) | (32 if tf or tb_ else 0) \
+            | (64 if z and L.get('tube') else 0) | (128 if z and L.get('roof') else 0)
+        lb += struct.pack('<BBBbHII', KI[L['kind']], min(255, L['lanes']), flags, max(-8, min(7, L['layer'])), int(min(655, L['w']) * 100), nodes[L['a']], nodes[L['b']])
+        lb += pack_ring(out, pts)
+        if z: lb += np.round(np.array(z) * 10).astype('<i2').tobytes()
+        if tf or tb_: lb += bytes([len(tf)] + tf + [len(tb_)] + tb_)  # turn lanes, left to right in each direction of travel
+    return bytes(lb)
+
+
+def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None, shops=(), beach=(), foreign=()):
     tb = box(tx, ty, tx + size, ty + size)
     n = terr.shape[0]
     out.section('TERR', struct.pack('<H', n) + np.clip(np.round(terr * 10), -32768, 32767).astype('<i2').tobytes())
@@ -2412,23 +2564,13 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
         if not detail and (KI[L['kind']] >= KI['service'] and L['kind'] not in ('rail', 'lightrail', 'runway', 'taxiway')): continue
         mid = L['own']  # the point that decided which 4 km tile owns the piece
         if tx <= mid[0] < tx + size and ty <= mid[1] < ty + size: sel.append(L)
-    nodes = {}
-    for L in sel:
-        for nid in (L['a'], L['b']): nodes.setdefault(nid, len(nodes))
-    lb = bytearray(struct.pack('<I', len(nodes)))
-    for nid in nodes: lb += struct.pack('<Q', nid)
-    lb += struct.pack('<I', len(sel))
-    for L in sel:
-        pts = L['pts'] if detail or L['z'] or len(L['pts']) <= 2 else list(LineString(L['pts']).simplify(1.5).coords)
-        z = L['z'] if L['z'] and len(pts) == len(L['pts']) else None  # bridge decks in overview tiles too
-        tf, tb_ = L.get('turns', ([], []))
-        flags = (1 if L['ow'] else 0) | (2 if L['band'] else 0) | (4 if z else 0) | (8 if L['drive'] else 0) | (16 if L.get('crossing') else 0) | (32 if tf or tb_ else 0) \
-            | (64 if z and L.get('tube') else 0) | (128 if z and L.get('roof') else 0)
-        lb += struct.pack('<BBBbHII', KI[L['kind']], min(255, L['lanes']), flags, max(-8, min(7, L['layer'])), int(min(655, L['w']) * 100), nodes[L['a']], nodes[L['b']])
-        lb += pack_ring(out, pts)
-        if z: lb += np.round(np.array(z) * 10).astype('<i2').tobytes()
-        if tf or tb_: lb += bytes([len(tf)] + tf + [len(tb_)] + tb_)  # turn lanes, left to right in each direction of travel
-    out.section('LINE', bytes(lb))
+    out.section('LINE', line_bytes(out, sel, detail))
+    if detail:  # the next tiles' decks whose strips reach over this one (section XDCK, as LINE): the page draws none of them, it
+        # leaves out what of this tile's strips they cover, as it does between its own (tile-worker.js unstack()), and no paint under them
+        tb2 = box(tx, ty, tx + size, ty + size)
+        xd = [L for L in foreign if L['z'] and not L.get('tube') and L['kind'] in DRAWN and len(L['pts']) > 1
+              and not (tx <= L['own'][0] < tx + size and ty <= L['own'][1] < ty + size) and LineString(L['pts']).buffer(L['w'] / 2 + 2.5).intersects(tb2)]
+        if xd: out.section('XDCK', line_bytes(out, xd, True))
     if detail:  # tunnels (flag 64): per point 0 underground, 1 open (the ground is cut: the page draws its box), 2 a portal
         tun = [(n, L['tube']) for n, L in enumerate(sel) if L.get('tube') and L['z']]
         out.section('TUNL', struct.pack('<I', len(tun)) + b''.join(struct.pack('<I', n) + bytes(c) for n, c in tun))
@@ -2808,9 +2950,17 @@ def selftest():
     # the 8 m grid under a street along a cut's lip: the street's ground there, the cut's floor away from it kept
     dtm = np.full((2048, 2048), 30.0, np.float32); dtm[:, 1003:1010] = 20.0  # a 14 m wide cut beside x = 2000
     street = [dict(z=None, kind='primary', w=12.0, pts=[(2026.0, -3000.0), (2026.0, -1000.0)])]
-    G = road_ground(dtm, street, 0, -L1)
-    gx = lambda x, y: ndimage.map_coordinates(G, [[(-y) / 8], [x / 8]], order=1)[0]
+    G, F = road_ground(dtm, street, 0, -L1)
+    gx = lambda x, y: ndimage.map_coordinates(G, [[(-y) / 8], [x / 8]], order=1)[0] + ndimage.map_coordinates(F, [[(-y) / FINE], [x / FINE]], order=1)[0]
     assert abs(gx(2026, -2000) - 30) < 0.8 and abs(gx(2021, -2000) - 30) < 1.0 and gx(2008, -2000) < 21, (gx(2026, -2000), gx(2021, -2000), gx(2008, -2000))
+    # a path along a 4 m ditch 3 m deep, narrower than the 8 m grid: the fine lattice takes it down into it, the
+    # fields beside it stay where they are; the tile's section gives back the same ground
+    dtm = np.full((2048, 2048), 30.0, np.float32); dtm[:, 1001:1003] = 27.0
+    G, F = road_ground(dtm, [dict(z=None, kind='footway', w=2.2, pts=[(2004.0, -3000.0), (2004.0, -1000.0)])], 0, -L1)
+    assert abs(gx(2004, -2000) - 27) < 0.3 and abs(gx(2020, -2000) - 30) < 0.2 and np.abs(F[:8]).max() == 0 and np.abs(F[:, 504:521]).max() == 0, (gx(2004, -2000), gx(2020, -2000))
+    T = G[3 * 128:4 * 128 + 1, 1 * 128:1 * 128 + 129]; Ft = F[3 * 512:4 * 512 + 1, 1 * 512:1 * 512 + 513]
+    D = fine_grid(np.round(T * 10) / 10, fine_section(Ft))
+    assert np.abs(D - (ndimage.zoom(np.round(T * 10) / 10, 4, order=1, grid_mode=False)[:513, :513] + Ft)).max() < 0.02
     # pct is np.percentile to the bit; a CPU slot is held while its job runs and given back after
     rng = np.random.default_rng(2)
     for n in (1, 2, 7, 100, 1001):

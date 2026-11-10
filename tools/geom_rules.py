@@ -295,60 +295,86 @@ def overlap_fix(tile):
 PASS = 3.5  # metres of headroom a road passing through a building gets (a building passage, a parkade's ramp in)
 
 
+def through_hit(Q, h, w, floor, strip, poly, foot, top):
+    """the one rule for a street or a deck through a building (bldg-road's check and fix here, tools/audit_elev.py's
+    'clash' over the baked tiles): Q the street's points every 4 m, h its drawn surface there, w its width, strip what it
+    covers (through_strip), poly, foot and top the building part, floor(lowest drawn surface there): a part whose top is
+    under it is clear (a street at grade: its sunk foot; a deck: under its girders, a roof's deck: under its surface, the
+    roof it rests on). The strip in the part and the highest drawn surface there, or None: the part clear under it, or the
+    street under the part with headroom"""
+    inter = poly.intersection(strip)
+    if inter.area < 1: return None
+    inside = shapely.contains_xy(poly.buffer(w / 2), Q[:, 0], Q[:, 1])
+    if not inside.any(): return None
+    hs, lo = float(h[inside].max()), float(h[inside].min())
+    if top < floor(lo) or foot > hs + PASS - 0.05: return None
+    return inter, hs
+
+
+def through_strip(Q, w, deck, band):  # what a street covers (a deck: its structure past the strip, its railings' band)
+    return shapely.LineString(Q).buffer(w / 2 + (DECK_SIDE + (2 if band else 0) if deck else 0), cap_style='flat')
+
+
+def through_floor(deck, roof, kind):  # through_hit's floor: under it a building part's top is clear of the street over it
+    return (lambda lo: lo + 0.3) if not deck else (lambda lo: lo - 0.05) if roof else (lambda lo: lo - DECK_TOP - girders(kind) + 0.4)
+
+
+def girders(kind):  # metres of a deck's structure under its drawn surface less DECK_TOP (tools/audit_elev.py)
+    return 1.6 if KIND_I[kind] <= KIND_I['tertiary'] else 0.9
+
+
 def _through(tile):
-    """streets the traffic drives (at grade: carriageways, rail) and every deck, through a building's walls: [(part
-    index, the street's strip in it, its highest drawn surface there)]"""
+    """streets the traffic drives (at grade: carriageways, rail) and every deck (a roof's too), through a building's
+    walls: [(part index, the street's strip in it, its highest drawn surface there, its lowest deck bottom or None)]"""
     P, tree = _polys(tile)
     B, out = tile['builds'], []
     for L in [*tile.get('lines', ()), *tile.get('over', ())]:  # (over: the next cells' decks reaching over this one's buildings)
-        if L.get('tube') or len(L['pts']) < 2 or L.get('roof'): continue
+        if L.get('tube') or len(L['pts']) < 2: continue
         deck = bool(L['z'])
-        if not deck and not (L.get('drive') and L['kind'] in ROADS or L['kind'] in ('rail', 'lightrail')) or L.get('crossing'): continue
+        if not deck and (not (L.get('drive') and L['kind'] in ROADS or L['kind'] in ('rail', 'lightrail')) or L.get('crossing')): continue  # (a deck: every one)
         Q = np.array(densify(L['pts'], 4), float)
-        ls = shapely.LineString(Q); strip = ls.buffer(L['w'] / 2 + (DECK_SIDE + (2 if L.get('band') else 0) if deck else 0), cap_style='flat')
+        strip = through_strip(Q, L['w'], deck, L.get('band'))
         if deck:
             s, z = _sz(L); sq = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(Q, axis=0).T))]); h = np.interp(sq, s, z) + DECK_TOP
         else: h = tile['ground'](Q[:, 0], Q[:, 1]) + 0.02
         for k in tree.query(strip, predicate='intersects'):
             b = B[k]
             if b.get('post'): continue
-            inter = P[k].intersection(strip)
-            if inter.area < 1: continue
-            inside = shapely.contains_xy(P[k].buffer(L['w'] / 2), Q[:, 0], Q[:, 1])
-            if not inside.any(): continue
-            hs = float(h[inside].max()); lo = float(h[inside].min())
-            foot, top = b['base'] + (b['mn'] or 0), b['base'] + max(b['h'], b.get('ridge') or 0)
-            under = lo + 0.3 if not deck else lo - DECK_TOP - (1.6 if KIND_I[L['kind']] <= KIND_I['tertiary'] else 0.9) + 0.4  # (a deck's girders under it)
-            if top < under or foot > hs + PASS - 0.05: continue  # under the street (a deck over a low roof), or the street under it with headroom
-            out.append((k, inter, hs))
+            r = through_hit(Q, h, L['w'], through_floor(deck, L.get('roof'), L['kind']), strip, P[k], b['base'] + (b['mn'] or 0), b['base'] + max(b['h'], b.get('ridge') or 0))
+            if r: out.append((k, *r, float(h.min()) - DECK_TOP - girders(L['kind']) if deck else None))
     return out
 
 
 def through_check(tile):
     P, _ = _polys(tile)
-    return [_rec(tile['builds'][k], g if not g.is_empty else P[k], 'through', g.area, top=round(h, 1)) for k, g, h in _through(tile)]
+    return [_rec(tile['builds'][k], g if not g.is_empty else P[k], 'through', g.area, top=round(h, 1)) for k, g, h, _ in _through(tile)]
 
 
 def through_fix(tile):
     """a passage: the part over the street lifted to PASS over it (gone if that leaves under 1 m of it, or if there is
-    no rest of the part to hang it from), the rest of the part round it as it was"""
+    no rest of the part to hang it from), what is under a deck's girders kept (gone if under 1 m), the rest of the part
+    round it as it was"""
     n = 0
     for _ in range(4):
         todo = _through(tile)
         if not todo: break
         P, _ = _polys(tile)
         B, cut, add = tile['builds'], {}, []
-        for k, g, h in todo: cut.setdefault(k, []).append((g, h))
+        for k, g, h, bot in todo: cut.setdefault(k, []).append((g, h, bot))
         for k, gs in cut.items():
             b, p = B[k], P[k]
-            hole = shapely.union_all([g.buffer(0.3, join_style='mitre') for g, _ in gs]).intersection(p)
-            hmax = max(h for _, h in gs)
+            hole = shapely.union_all([g.buffer(0.3, join_style='mitre') for g, _, _ in gs]).intersection(p)
+            hmax = max(h for _, h, _ in gs)
+            bots = [bt for _, _, bt in gs if bt is not None]
+            low = min(bots) - b['base'] if len(bots) == len(gs) else None  # (only under decks: a street at grade has nothing under it)
             rest = [q for q in _simple(p.difference(hole)) if q.area >= 1]
             add += [_piece(b, q) for q in rest]
-            mn = hmax + PASS - b['base']
-            if mn < max(b['h'], b.get('ridge') or 0) - 1 and sum(q.area for q in rest) >= 4:  # (all on the street: nothing to hang it from, bldg-air takes it back down)
-                for q in getattr(hole, 'geoms', [hole]):
-                    if q.geom_type == 'Polygon' and q.area >= 1: add.append(dict(_piece(b, q), mn=mn, tagmn=False, roof=0 if b.get('roof') else 0))
+            mn = hmax + PASS + 0.1 - b['base']  # (0.1: the tile's rounding)
+            hang = sum(q.area for q in rest) >= 4  # (all on the street: nothing to hang it from, bldg-air takes it back down)
+            for q in getattr(hole, 'geoms', [hole]):
+                if q.geom_type != 'Polygon' or q.area < 1: continue
+                if hang and mn < max(b['h'], b.get('ridge') or 0) - 1: add.append(dict(_piece(b, q), mn=mn, tagmn=False, roof=0))
+                if low is not None and low - (b['mn'] or 0) >= 1: add.append(dict(_piece(b, q), h=low, ridge=0, roof=0, units=[]))
         B[:] = [b for i, b in enumerate(B) if i not in cut] + add
         tile.pop('_polys', None); tile.pop('_tree', None)
         n += len(cut)
@@ -650,8 +676,11 @@ def _ground(ij, d):
                 q = f'{d}/0/{ti + di}_{tj + dj}.bin'
                 if not os.path.exists(q): continue
                 U = parse(q)
-                if U[3].shape != T[3].shape: continue
-                dz = np.abs(mine(T[3]) - theirs(U[3]))
+                a_, b_ = T[3], U[3]
+                if a_.shape != b_.shape:  # (one with its fine lattice: the other's grid on it too)
+                    from common import fine_grid
+                    a_, b_ = (fine_grid(a_, None), b_) if len(a_) < len(b_) else (a_, fine_grid(b_, None))
+                dz = np.abs(mine(a_) - theirs(b_))
                 if dz.max() > 0.05:
                     k = int(np.argmax(dz)); x, y = (T[0] + L0, T[1] + L0 - k * L0 / (len(dz) - 1)) if di else (T[0] + k * L0 / (len(dz) - 1), T[1] + L0)
                     out.append(dict(kind='seam', x=round(x, 1), y=round(y, 1), score=round(float(dz.max()), 2), hash=view_hash(x, y, 0)))
@@ -904,7 +933,7 @@ def apply_rules(tile, fix=True):
     """every tile rule's fix (when fix), then its check: {name: (fixed, [issues left])}"""
     rules = [r for r in RULES if r.on == 'tile']
     n = {r.name: 0 for r in rules}
-    for _ in range(2 if fix else 0):  # twice: a fix can leave work for a rule before it (a building raised onto a street)
+    for _ in range(3 if fix else 0):  # thrice: a fix can leave work for a rule before it (a building raised onto a street, a part sunk onto a slope)
         for r in rules: n[r.name] += r.fix(tile) if r.fix else 0
     return {r.name: (n[r.name], r.check(tile)) for r in rules}
 
@@ -942,7 +971,7 @@ def selftest():
     t = dict(builds=[dict(ring=sq(0, 0, 20), base=0.0, mn=0, h=10, ridge=0, gid=1)], decks=[], ground=flat,
              lines=[dict(kind='service', pts=[(-10, 10), (30, 10)], z=None, a=1, b=2, w=5, drive=True)])
     r = apply_rules(t)  # a lane into a building and out the other side: a passage
-    assert r['bldg-road'][0] == 1 and not r['bldg-road'][1] and len(t['builds']) == 3 and sorted(round(b['mn'], 2) for b in t['builds']) == [0, 0, 3.52], t['builds']
+    assert r['bldg-road'][0] == 1 and not r['bldg-road'][1] and len(t['builds']) == 3 and sorted(round(b['mn'], 2) for b in t['builds']) == [0, 0, 3.62], t['builds']
     assert not r['bldg-air'][1], r['bldg-air']
     t = dict(builds=[dict(ring=sq(0, 0, 10), base=0.0, mn=0, h=5, ridge=8, gid=1), dict(ring=sq(0, 0, 10), base=0.0, mn=0, h=5, ridge=0, gid=2),
                      dict(ring=sq(5, 0, 20), base=0.0, mn=5, h=9, ridge=0, gid=2), dict(ring=sq(40, 0, 10), base=0.0, mn=0, h=6, ridge=0, gid=3)], decks=[], ground=flat,

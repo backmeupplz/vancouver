@@ -118,7 +118,12 @@ function tileH(t, x, y) {
   const { n, h } = t.terrain, size = t.size, c = size / (n - 1)
   const fx = Math.min(n - 1.0001, Math.max(0, (x - t.ox) / c)), fy = Math.min(n - 1.0001, Math.max(0, (size - (y - t.oy)) / c))
   const i = fx | 0, j = fy | 0, u = fx - i, v = fy - j
-  const g = h[j * n + i] * (1 - u) * (1 - v) + h[j * n + i + 1] * u * (1 - v) + h[(j + 1) * n + i] * (1 - u) * v + h[(j + 1) * n + i + 1] * u * v
+  let g = h[j * n + i] * (1 - u) * (1 - v) + h[j * n + i + 1] * u * (1 - v) + h[(j + 1) * n + i] * (1 - u) * v + h[(j + 1) * n + i + 1] * u * v, f = t.terrain.f
+  if (f) { // (the 2 m offsets under the streets: core/util.js sampleTerr, inline as this worker imports nothing)
+    const gx = Math.min(f.n - 1.0001, Math.max(0, (x - t.ox) / 2)), gy = Math.min(f.n - 1.0001, Math.max(0, (size - (y - t.oy)) / 2)), a = gx | 0, b = gy | 0, p = gx - a, q = gy - b
+    const at = (a, b) => { const s = f.B[(b >> 4) * f.nb + (a >> 4)]; return s < 0 ? 0 : f.V[s * 256 + (b & 15) * 16 + (a & 15)] }
+    g += at(a, b) * (1 - p) * (1 - q) + at(a + 1, b) * p * (1 - q) + at(a, b + 1) * (1 - p) * q + at(a + 1, b + 1) * p * q
+  }
   return t.terrain.wall ? wallH(t.terrain.wall, g, x - t.ox, y - t.oy) : g
 }
 // the seawalls' walks over the terrain (core/util.js wallHeight, copied: this classic worker can't import it)
@@ -160,7 +165,8 @@ function centre(p) {
     const l = Math.hypot(x1 - x0, y1 - y0) || 1, nx = -(y1 - y0) / l, ny = (x1 - x0) / l
     for (const o of [-hw, 0, hw]) {
       const ax = x0 + nx * o, ay = y0 + ny * o, bx = x1 + nx * o, by = y1 + ny * o
-      if (Math.abs(groundH((ax + bx) / 2, (ay + by) / 2) - (groundH(ax, ay) + groundH(bx, by)) / 2) > 0.04) return true
+      const ha = groundH(ax, ay), hb = groundH(bx, by)
+      for (const f of [0.25, 0.5, 0.75]) if (Math.abs(groundH(ax + (bx - ax) * f, ay + (by - ay) * f) - ha - (hb - ha) * f) > 0.04) return true // (the ground's 2 m offsets: a dip between the ends and the middle)
     }
     return false
   }

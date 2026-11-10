@@ -18,7 +18,7 @@ import shapely
 from shapely.geometry import LineString, Polygon
 from shapely.strtree import STRtree
 sys.path.insert(0, os.path.dirname(__file__))
-from common import read_tile, latlon, L0, KINDS, line_kind, hnum, hr_lookup, densify, all_tiles, tile_args, load_feat, tube_h, SLAB
+from common import read_tile, latlon, L0, KINDS, line_kind, hnum, hr_lookup, densify, all_tiles, tile_args, load_feat, tube_h, SLAB, fine_grid, under_reach
 
 DIR = sys.argv[1] if len(sys.argv) > 1 else 'public/tiles'
 TUNNEL = ('yes', 'culvert')
@@ -29,6 +29,7 @@ def parse(path):
     b, ox, oy, size, sec, ring = read_tile(path)
     o = sec['TERR'][0]; n = struct.unpack_from('<H', b, o)[0]
     terr = np.frombuffer(b, '<i2', n * n, o + 2).reshape(n, n) / 10.0
+    if 'TFIN' in sec: terr = fine_grid(terr, b[sec['TFIN'][0]:sec['TFIN'][0] + sec['TFIN'][1]])  # (the 2 m offsets under the streets)
     lines = []
     if 'LINE' in sec:
         o = sec['LINE'][0]
@@ -40,7 +41,7 @@ def parse(path):
             z = None
             if flags & 4: z = np.frombuffer(b, '<i2', len(pts), o) / 10.0; o += 2 * len(pts)
             if flags & 32: nf = b[o]; o += 1 + nf; nb = b[o]; o += 1 + nb
-            lines.append(dict(kind=kind, layer=layer, w=w / 100, band=bool(flags & 2), a=int(nodes[a]), b=int(nodes[bb]), pts=pts, z=z, tunnel=bool(flags & 64), tube=None))
+            lines.append(dict(kind=kind, layer=layer, w=w / 100, band=bool(flags & 2), a=int(nodes[a]), b=int(nodes[bb]), pts=pts, z=z, tunnel=bool(flags & 64), roof=bool(flags & 128), tube=None))
     if 'TUNL' in sec:  # per point of a tunnel piece: 0 underground, 1 open, 2 portal
         o = sec['TUNL'][0]; cnt = struct.unpack_from('<I', b, o)[0]; o += 4
         for _ in range(cnt):
@@ -127,11 +128,6 @@ def audit(ij):
     G = walled(tiles, DIR)[1]  # (the seawalls' walks too)
     feat = load_feat(i, j)
     ways = [w for w in feat.get('lines', []) if line_kind(w[3])]
-    # stations, parkades and covered bridges are built around their tracks and ramps: a deck inside them is real
-    held = [Polygon(o) for _, prs, t in feat.get('buildings', []) for o, _ in prs if len(o) >= 4 and (
-        t.get('building', t.get('building:part')) in ('train_station', 'transportation', 'parking', 'bridge') or t.get('amenity') == 'parking'
-        or t.get('public_transport') == 'station' or t.get('railway') == 'station')]
-    held = STRtree([h.buffer(0) for h in held]) if held else None
     byref = {}
     for n_, (wid, c, refs, t) in enumerate(ways):
         for r in refs: byref.setdefault(r, set()).add(n_)
@@ -158,7 +154,7 @@ def audit(ij):
     segs, sp = [], []
     for L in decks:
         P, z = L['pts'], L['z']
-        half = L['w'] / 2 + (2.5 if L['band'] else 0.6)
+        half = under_reach(L['w'], L['band'])
         th = 1.6 if L['kind'] <= KINDS.index('tertiary') else 0.9
         for k in range(len(P) - 1):
             ls = LineString([P[k], P[k + 1]])
@@ -269,40 +265,27 @@ def audit(ij):
             elif gr and not dk:
                 gh = float(G(x, y)[0])
                 if abs(zd - gh) > 1.0: add('step', abs(zd - gh) * 10, x, y, zd, L, w, step=zd - gh, deck=zd, ground=gh, note='abutment')
-    # decks through buildings
-    deck_nodes = {}
-    for D in decks:
-        for nd in (D['a'], D['b']): deck_nodes[nd] = deck_nodes.get(nd, 0) + 1
-    deck_nodes = {nd for nd, c in deck_nodes.items() if c > 1}  # joints inside a deck chain
+    # decks through buildings: the bake's own rule (tools/geom_rules.py through_hit, which its bldg-road fix cuts by)
+    import geom_rules as gr
     if blds and mine:
-        bt = STRtree([Polygon(B['ring']).buffer(0) for B in blds])
+        polys = [Polygon(B['ring']).buffer(0) for B in blds]
+        bt = STRtree(polys)
         for L in mine:
-            if L['z'] is None or L['tunnel']: continue
+            if L['z'] is None or L['tunnel'] or len(L['pts']) < 2: continue
             w = tags(L)
-            P, z = L['pts'], L['z']
-            half = L['w'] / 2 + (2.5 if L['band'] else 0.6)
-            th = 1.6 if L['kind'] <= KINDS.index('tertiary') else 0.9
+            P, z = np.asarray(L['pts'], float), np.asarray(L['z'], float)
+            s = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
+            Q = np.array(densify([tuple(p) for p in P], 4), float); sq = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(Q, axis=0).T))])
+            h = np.interp(sq, s, z) + gr.DECK_TOP
+            strip = gr.through_strip(Q, L['w'], True, L['band'])
             worst = None
-            for k in range(len(P) - 1):
-                ls = LineString([P[k], P[k + 1]])
-                if ls.length < 0.1: continue
-                q = ls.buffer(half, cap_style='flat')
-                for bi in bt.query(q, predicate='intersects'):
-                    B = blds[bi]; poly = bt.geometries[bi]
-                    if held is not None and len(held.query(poly.representative_point(), predicate='within')): continue
-                    inter = q.intersection(poly)
-                    if inter.area < 2: continue
-                    f = ls.project(inter.centroid, normalized=True); zz = z[k] + (z[k + 1] - z[k]) * f
-                    top, bot = zz + 0.35, zz - th
-                    if zz > B['top'] - 0.5: continue  # on its roof (a mall's rooftop car park)
-                    pen = min(B['top'] - bot, top - B['bot'])
-                    near_end = any(np.hypot(*(np.array(inter.centroid.coords[0]) - L['pts'][e])) < 8 for e, nd in ((0, L['a']), (-1, L['b'])) if nd not in deck_nodes)
-                    if pen > 0.5 and not near_end:
-                        sc = inter.area * min(pen, 10)
-                        if worst is None or sc > worst[0]: worst = (sc, inter.centroid, zz, B, inter.area, pen)
+            for bi in bt.query(strip, predicate='intersects'):
+                B = blds[bi]
+                r = gr.through_hit(Q, h, L['w'], gr.through_floor(True, L['roof'], KINDS[L['kind']]), strip, polys[bi], B['bot'], B['top'])
+                if r and (worst is None or r[0].area > worst[0].area): worst = (r[0], r[1], B)
             if worst:
-                sc, c, zz, B, ar, pen = worst
-                add('clash', sc, c.x, c.y, zz, L, w, deck=zz, bld_bot=B['bot'], bld_top=B['top'], overlap=ar, depth=pen)
+                g, hs, B = worst; c = g.representative_point()
+                add('clash', g.area * min(hs - B['bot'], 10), c.x, c.y, hs, L, w, deck=hs - gr.DECK_TOP, bld_bot=B['bot'], bld_top=B['top'], overlap=g.area)
     return out
 
 

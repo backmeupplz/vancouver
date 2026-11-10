@@ -3,7 +3,7 @@
 // Walls by what they face and the single-arm street lights follow Slop Toronto's rules (MIT, © 2026 Mr.doob, © 2026 John
 // Fewell; THIRD_PARTY.md).
 import earcut, { refine as delaunay } from '../vendor/earcut.js'
-import { mulberry32 as mulberry, inPoly, sampleGrid, wallGrid, wallHeight } from './util.js'
+import { mulberry32 as mulberry, inPoly, sampleGrid, sampleTerr, wallGrid, wallHeight } from './util.js'
 const GROUND_LIFT = 0 // the ground is one non-overlapping layer (tools/tiles.py), so no class needs lifting
 const KIND = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living', 'pedestrian', 'footway', 'cycleway',
   'path', 'steps', 'track', 'rail', 'lightrail', 'runway', 'taxiway']
@@ -131,6 +131,12 @@ function terrain(t) {
   const h = new Float32Array(n * n)
   for (let i = 0; i < n * n; i++) h[i] = t.dv.getInt16(s.off + 2 + i * 2, true) / 10
   const out = { n, h, size: t.size } // row 0 = north
+  const fs = t.sections.TFIN // the 2 m offsets under the streets (tools/tiles.py road_fine): 16 x 16 node blocks, the rest none
+  if (fs) {
+    const N = Math.round(t.size / 2) + 1, nb = Math.ceil(N / 16), cnt = t.dv.getUint16(fs.off, true), B = new Int16Array(nb * nb).fill(-1), V = new Float32Array(cnt * 256)
+    for (let k = 0, o = fs.off + 2; k < cnt; k++, o += 2 + 512) { B[t.dv.getUint16(o, true)] = k; for (let q = 0; q < 256; q++) V[k * 256 + q] = t.dv.getInt16(o + 2 + q * 2, true) / 100 }
+    out.f = { n: N, nb, B, V }
+  }
   const m = t.sections.TERM // the next tiles' terrain, M rows round this one (tools/tiles.py margins()): out.ext, the grid with them
   if (m && t.dv.getUint16(m.off, true) === n) {
     const M = t.dv.getUint16(m.off + 2, true), N = n + 2 * M, e = new Float32Array(N * N), c = t.size / (n - 1)
@@ -153,7 +159,7 @@ function terrain(t) {
       starts.push(P.length / 7)
     }
     const e = out.ext // (the walk's terrain a few metres in may lie in the next tile)
-    out.wall = wallGrid(Float32Array.from(P), starts, (x, y) => e ? sampleGrid(e.h, e.n, e.size, x + e.off, y + e.off) : sampleGrid(h, n, t.size, x, y))
+    out.wall = wallGrid(Float32Array.from(P), starts, (x, y) => out.f && x >= 0 && y >= 0 && x <= t.size && y <= t.size ? sampleTerr(out, x, y) : e ? sampleGrid(e.h, e.n, e.size, x + e.off, y + e.off) : sampleGrid(h, n, t.size, x, y))
   }
   return out
 }
@@ -169,12 +175,22 @@ function normals(terr, pos) {
   }
   return n
 }
-// the drawn ground at tile-local (x, y north): the terrain, and the seawalls' walks and feet (low: core/util.js wallHeight)
-const heightAt = (terr, x, y, low) => { const g = sampleGrid(terr.h, terr.n, terr.size, x, y); return terr.wall ? wallHeight(terr.wall, g, x, y, low) : g }
+// the drawn ground at tile-local (x, y north): the terrain with its 2 m offsets, and the seawalls' walks and feet (low: core/util.js wallHeight)
+const heightAt = (terr, x, y, low) => { const g = sampleTerr(terr, x, y); return terr.wall ? wallHeight(terr.wall, g, x, y, low) : g }
+// does an edge from (ax, ay) to (bx, by) lie on the 2 m offsets (its ends, its middle: a node of the 2 m cell there
+// moved)? Sampled every metre there (the rest of an offset block is the 8 m grid, sampled as anywhere)
+const fineOn = (terr, ax, ay, bx, by) => {
+  const f = terr.f
+  if (!f) return false
+  const node = (i, j) => { const s = f.B[(j >> 4) * f.nb + (i >> 4)]; return s >= 0 && f.V[s * 256 + (j & 15) * 16 + (i & 15)] !== 0 }
+  const at = (x, y) => { const i = Math.min(f.n - 2, Math.max(0, Math.floor(x / 2))), j = Math.min(f.n - 2, Math.max(0, Math.floor((terr.size - y) / 2))); return node(i, j) || node(i + 1, j) || node(i, j + 1) || node(i + 1, j + 1) }
+  return at(ax, ay) || at(bx, by) || at((ax + bx) / 2, (ay + by) / 2)
+}
 // the ground at tile-local (x, y) on past the tile's edge (a decal, a building reaching into the next tile): the next
 // tiles' terrain (terr.ext, tools/tiles.py margins()), else carried on on the slope at the edge
 function groundOut(terr, x, y) {
   const e = terr.ext
+  if (terr.f && x >= 0 && y >= 0 && x <= terr.size && y <= terr.size) return heightAt(terr, x, y) // (in the tile: with its 2 m offsets, which TERM's ring of the next tiles' grids leaves out)
   if (e) { const g = sampleGrid(e.h, e.n, e.size, x + e.off, y + e.off); return terr.wall ? wallHeight(terr.wall, g, x, y) : g }
   const S = terr.size, cx = Math.min(S, Math.max(0, x)), cy = Math.min(S, Math.max(0, y)), h = heightAt(terr, cx, cy)
   const gx = cx === x ? 0 : (h - heightAt(terr, cx - Math.sign(x - cx) * 4, cy)) / 4, gy = cy === y ? 0 : (h - heightAt(terr, cx, cy - Math.sign(y - cy) * 4)) / 4
@@ -201,6 +217,7 @@ function ground(t, terr, level) {
   }
   let hmin = Infinity, hmax = -Infinity
   for (const v of terr.h) { hmin = Math.min(hmin, v); hmax = Math.max(hmax, v) }
+  if (terr.f) { let lo = 0, hi = 0; for (const v of terr.f.V) { lo = Math.min(lo, v); hi = Math.max(hi, v) } hmin += lo; hmax += hi } // (the 2 m offsets: a flat tile's street in a cut)
   // Triangles are split where the terrain bends under them, not everywhere: an edge is halved while the ground along it
   // strays more than tol from the straight line between its ends, or it is longer than 4 terrain cells. The test
   // looks at the edge alone, so both triangles that share an edge split it alike (no cracks; where polygons meet, a gap
@@ -212,7 +229,9 @@ function ground(t, terr, level) {
     const L = Math.hypot(bx - ax, by - ay)
     if (L > cap) return true
     if (cap === Infinity || L < 1.5) return false
-    const ha = heightAt(terr, ax, ay), hb = heightAt(terr, bx, by), k = Math.ceil(L / (cell / 2)) // (the terrain, also under a pier: its border with the water is split alike on both sides)
+    const fine = fineOn(terr, ax, ay, bx, by)
+    if (fine && L < 2) return false // (the offsets have nothing finer than their 2 m)
+    const ha = heightAt(terr, ax, ay), hb = heightAt(terr, bx, by), k = Math.ceil(L / (fine ? 1 : cell / 2)) // (the terrain, also under a pier: its border with the water is split alike on both sides; every metre over the 2 m offsets)
     for (let i = 1; i < k; i++) { const f = i / k; if (Math.abs(heightAt(terr, ax + (bx - ax) * f, ay + (by - ay) * f) - ha - (hb - ha) * f) > tol) return true }
     return false
   }
@@ -513,8 +532,8 @@ function eachPoly(t, want, fn) {
   }
 }
 
-function readLines(t) {
-  const s = t.sections.LINE
+function readLines(t, tag = 'LINE') { // (XDCK: the next tiles' decks reaching over this one, as LINE)
+  const s = t.sections[tag]
   const out = []
   if (!s) return out
   const dv = t.dv
@@ -535,7 +554,7 @@ function readLines(t) {
     if (flags & 32) { const nf = dv.getUint8(o); const f = [...new Uint8Array(t.buf, o + 1, nf)]; o += 1 + nf; const nb = dv.getUint8(o); const b = [...new Uint8Array(t.buf, o + 1, nb)]; o += 1 + nb; turns = { f, b } }
     out.push({ kind, lanes, oneway: !!(flags & 1), band: !!(flags & 2), drive: !!(flags & 8), crossing: !!(flags & 16), tunnel: !!(flags & 64), roof: !!(flags & 128), turns, layer, w, a, b, pts, z, tube: null })
   }
-  const tl = t.sections.TUNL // detail tiles: per point of each tunnel piece 0 underground, 1 open (the ground is cut there), 2 a portal
+  const tl = tag === 'LINE' && t.sections.TUNL // detail tiles: per point of each tunnel piece 0 underground, 1 open (the ground is cut there), 2 a portal
   if (tl) for (let i = 0, o = tl.off + 4, n = dv.getUint32(tl.off, true); i < n; i++) {
     const L = out[dv.getUint32(o, true)], np = L.pts.length / 2
     L.tube = new Uint8Array(t.buf.slice(o + 4, o + 4 + np)); o += 4 + np
@@ -554,11 +573,12 @@ function roads(t, terr, lines, level, ps, R) {
   const deg = new Map()
   for (const L of lines) for (const n of [L.a, L.b]) deg.set(n, (deg.get(n) || 0) + 1)
   const mk = () => ({ P: [], A: [], B: [], I: [], nv: 0 })
+  let cur = {} // the piece strip() draws now, for unstack(): { a, b, foreign }
   const surf = Object.assign(mk(), { runs: [] }), paint = mk()
   // jA, jB: how far from each end the junction box there reaches (null: no junction, no stop line)
   const ext = terr.ext, decalH = (x, y) => groundOut(terr, x, y)
   const strip = (T, pts, zs, half, lift, kind, extra, w, jA, jB, mitre = null) => {
-    if (T === surf) T.runs.push({ i0: T.I.length, i1: T.I.length, kind }) // (unstack(): which triangles are whose)
+    if (T === surf) T.runs.push({ i0: T.I.length, i1: T.I.length, kind, ...cur }) // (unstack(): which triangles are whose)
     const xs = [], ys = [], zz = []
     for (let i = 0; i < pts.length / 2 - 1; i++) {
       const x0 = pts[i * 2], y0 = pts[i * 2 + 1], x1 = pts[i * 2 + 2], y1 = pts[i * 2 + 3]
@@ -654,6 +674,7 @@ function roads(t, terr, lines, level, ps, R) {
     const ja = (deg.get(L.a) || 0) >= 3, jb = (deg.get(L.b) || 0) >= 3
     if (L.z) { // bridges: the whole surface, raised
       if (L.kind > K.track && L.kind !== K.rail && L.kind !== K.lightrail) continue
+      cur = { a: L.a, b: L.b }
       const lift = 0.36 + (18 - L.kind) * 0.004 + (L.kind >= K.pedestrian ? 0.05 : 0), P = L.pts, n = P.length / 2 // (a foot or cycle deck mapped across a road deck's edge lies 5 cm over it, not in it)
       for (const [e, f, id] of L.kind <= K.track ? [[0, 1, L.a], [n - 1, n - 2, L.b]] : []) { // its square end at node id: (x, y, height, direction out of the node, half width)
         const dx = P[f * 2] - P[e * 2], dy = P[f * 2 + 1] - P[e * 2 + 1], dl = Math.hypot(dx, dy) || 1
@@ -672,6 +693,13 @@ function roads(t, terr, lines, level, ps, R) {
       strip(paint, L.pts, null, 1.3, 0.05, L.kind, 0, L.w, null, null)
     }
   }
+  if (level === 0) for (const L of readLines(t, 'XDCK')) { // the next tiles' decks over this one: their strips as theirs draw them, not drawn here (unstack())
+    if (!L.z || L.tunnel || (L.kind > K.track && L.kind !== K.rail && L.kind !== K.lightrail)) continue
+    cur = { a: L.a, b: L.b, foreign: true }
+    if (L.band) strip(surf, L.pts, L.z, L.w / 2 + 2.0, 0.3, 100, 2.0 * 16, L.w, null, null)
+    strip(surf, L.pts, L.z, L.w / 2, 0.36 + (18 - L.kind) * 0.004 + (L.kind >= K.pedestrian ? 0.05 : 0), L.kind, L.lanes + (L.oneway ? 32 : 0), L.w, null, null)
+  }
+  cur = {}
   for (const c of caps.values()) { // between one deck's end and the next round the node, where they open apart: a fan of plain deck
     if (c.length < 2 || c.every((q) => q.mitred)) continue // (two decks going on from each other share their end row)
     c.sort((p, q) => p.a - q.a)
@@ -696,8 +724,8 @@ function roads(t, terr, lines, level, ps, R) {
   unstack(surf)
   // the decks drawn here by 4 m cell: no decal under one (within 2.5 m) or over it
   const dg = new Map()
-  for (let q = 0; q < surf.I.length; q += 3) {
-    const v = [surf.I[q], surf.I[q + 1], surf.I[q + 2]].map((i) => [surf.P[i * 3], -surf.P[i * 3 + 2], surf.P[i * 3 + 1]])
+  for (const I of [surf.I, surf.xI]) for (let q = 0; q < I.length; q += 3) { // (the next tiles' decks over this one too)
+    const v = [I[q], I[q + 1], I[q + 2]].map((i) => [surf.P[i * 3], -surf.P[i * 3 + 2], surf.P[i * 3 + 1]])
     for (let u = Math.floor(Math.min(v[0][0], v[1][0], v[2][0]) / 4); u <= Math.floor(Math.max(v[0][0], v[1][0], v[2][0]) / 4); u++)
       for (let w = Math.floor(Math.min(v[0][1], v[1][1], v[2][1]) / 4); w <= Math.floor(Math.max(v[0][1], v[1][1], v[2][1]) / 4); w++) { const k = u * 65536 + w; let l = dg.get(k); if (!l) dg.set(k, (l = [])); l.push(v) }
   }
@@ -713,7 +741,7 @@ function roads(t, terr, lines, level, ps, R) {
     return false
   }
   const M = ext ? ext.off - 0.1 : 2, S = terr.size // past the next tiles' terrain this tile has (a piece reaching far out: the bake cuts them at the edges) there is no ground to lay paint on
-  refine(paint, decalH, (x, y, z) => x < -M || y < -M || x > S + M || y > S + M || underDeck(x, y, z))
+  refine(paint, decalH, (x, y, z) => x < -M || y < -M || x > S + M || y > S + M || underDeck(x, y, z), 0.05, (ax, ay, bx, by) => fineOn(terr, ax, ay, bx, by))
   const pack = (T) => {
     if (!T.nv) return null
     const PP = new Float32Array(T.P)
@@ -764,7 +792,8 @@ function unstack(T) {
   }
   const area2 = (poly) => { let s = 0; for (let i = 0; i < poly.length; i++) { const a = poly[i], b = poly[(i + 1) % poly.length]; s += P[a * 3] * -P[b * 3 + 2] - P[b * 3] * -P[a * 3 + 2] } return Math.abs(s) }
   const out = []
-  for (const r of [...runs].sort((p, q) => layer(p) - layer(q) || p.kind - q.kind)) {
+  const xI = [] // (what is left of the next tiles' strips: covering this one's, not drawn here)
+  for (const r of [...runs].sort((p, q) => layer(p) - layer(q) || p.kind - q.kind || p.a - q.a || p.b - q.b)) { // (by kind, then piece: the next tile decides alike)
     const g = grid[layer(r)], keep = []
     const tri = (a, b, c) => {
       const [pa, pb, pc] = [v3(a), v3(b), v3(c)], me = [pa, pb, pc]
@@ -802,9 +831,10 @@ function unstack(T) {
       t.push(Math.min(t[0], t[3], t[6]), Math.min(t[1], t[4], t[7]), Math.max(t[0], t[3], t[6]), Math.max(t[1], t[4], t[7])) // (its box: 9..12)
       for (let u = Math.floor(Math.min(t[0], t[3], t[6]) / G); u <= Math.floor(Math.max(t[0], t[3], t[6]) / G); u++)
         for (let w = Math.floor(Math.min(t[1], t[4], t[7]) / G); w <= Math.floor(Math.max(t[1], t[4], t[7]) / G); w++) { const k = u * 65536 + w; let l = g.get(k); if (!l) g.set(k, (l = [])); l.push(t) }
-      out.push(keep[i], keep[i + 1], keep[i + 2])
+      ;(r.foreign ? xI : out).push(keep[i], keep[i + 1], keep[i + 2])
     }
   }
+  T.xI = xI
   const inRun = new Uint8Array(T.I.length); for (const r of runs) inRun.fill(1, r.i0, r.i1)
   for (let i = 0; i < T.I.length; i += 3) if (!inRun[i]) out.push(T.I[i], T.I[i + 1], T.I[i + 2]) // (the plates between deck ends)
   T.I = out; T.nv = P.length / 3
@@ -812,14 +842,14 @@ function unstack(T) {
 
 // hidden(x, y, z): a decal point a deck covers (paint under a deck, or poking through its end): dropped, split to 0.75 m
 // along the deck's edge first
-function refine(T, h, hidden, tol = 0.05) {
+function refine(T, h, hidden, tol = 0.05, fine = null) {
   const P = T.P, A = T.A, B = T.B, lift = []
   for (let v = 0; v < T.nv; v++) lift.push(P[v * 3 + 1] - h(P[v * 3], -P[v * 3 + 2]))
   const mids = new Map()
   const bends = (a, b) => {
     const ax = P[a * 3], ay = -P[a * 3 + 2], bx = P[b * 3], by = -P[b * 3 + 2], L = Math.hypot(bx - ax, by - ay)
     if (L < 0.3) return 0
-    const ha = h(ax, ay), hb = h(bx, by), k = Math.max(2, Math.ceil(L / 2))
+    const ha = h(ax, ay), hb = h(bx, by), k = Math.max(2, Math.ceil(L / (fine && fine(ax, ay, bx, by) ? 1 : 2))) // (every metre over the ground's 2 m offsets under the streets)
     for (let i = 1; i < k; i++) { const f = i / k; if (Math.abs(h(ax + (bx - ax) * f, ay + (by - ay) * f) - ha - (hb - ha) * f) > tol) return L }
     return 0
   }

@@ -5,7 +5,7 @@ import * as THREE from 'three'
 import { FAMILY, night } from './materials.js'
 import { kit, kitMaterial } from './kit.js'
 import { FORMS, ASPECT } from './treeforms.js'
-import { sampleGrid, wallHeight } from './util.js'
+import { sampleGrid, sampleTerr, wallHeight } from './util.js'
 
 const SIZES = [1024, 4096]
 const ij = (level, i, j) => (level * 4096 + i + 2048) * 4096 + j + 2048 // a tile's number (|i|, |j| < 2048)
@@ -722,7 +722,7 @@ export class Tiles {
   heightAt(x, y) {
     for (let level = 0; level < 2; level++) {
       const s = SIZES[level], t = this.byIJ.get(ij(level, Math.floor(x / s), Math.floor(y / s)))
-      if (t?.terrain) { const T = t.terrain, g = sampleGrid(T.h, T.n, s, x - t.ox, y - t.oy); return T.wall ? wallHeight(T.wall, g, x - t.ox, y - t.oy) : g } // (the seawalls' walks: core/util.js)
+      if (t?.terrain) { const T = t.terrain, g = T.f ? sampleTerr(T, x - t.ox, y - t.oy) : sampleGrid(T.h, T.n, s, x - t.ox, y - t.oy); return T.wall ? wallHeight(T.wall, g, x - t.ox, y - t.oy) : g } // (the 2 m offsets, the seawalls' walks: core/util.js)
     }
     const g = this.coarse
     if (!g) return 0

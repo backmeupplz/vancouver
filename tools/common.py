@@ -362,3 +362,29 @@ def cpu_slot(cap=None):
     try: yield
     finally:
         fcntl.flock(fds[mine], fcntl.LOCK_UN); os.close(fds[mine])
+
+
+FINE = 2  # metres: the fine lattice under the streets (section TFIN), offsets over the 8 m grid where it can't follow them
+FB = 16  # its nodes per block side: a detail tile's 513 x 513 nodes in 33 x 33 blocks, only those that move stored
+
+
+def fine_grid(G, sec):
+    """a detail tile's drawn terrain on the fine lattice: its grid G (n x n) upsampled to 2 m (bilinear: the same surface)
+    plus section TFIN's offsets (bytes, or None)"""
+    import struct
+    import numpy as np
+    from scipy import ndimage
+    n = L0 // FINE + 1
+    t = np.linspace(0, G.shape[0] - 1, n)
+    out = ndimage.map_coordinates(np.asarray(G, float), np.meshgrid(t, t, indexing='ij'), order=1)
+    if sec:
+        nb = -(-n // FB); cnt = struct.unpack_from('<H', sec, 0)[0]; o = 2
+        for _ in range(cnt):
+            b = struct.unpack_from('<H', sec, o)[0]; v = np.frombuffer(sec, '<i2', FB * FB, o + 2).reshape(FB, FB) / 100.0; o += 2 + 2 * FB * FB
+            r0, c0 = (b // nb) * FB, (b % nb) * FB
+            out[r0:r0 + FB, c0:c0 + FB] += v[:n - r0, :n - c0]
+    return out
+
+
+def under_reach(w, band):  # metres from a deck's centre line it covers what is under it (its strip, its railings' or its sidewalk band's)
+    return w / 2 + (2.5 if band else 0.6)

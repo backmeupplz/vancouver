@@ -4,7 +4,7 @@
 //   paint-ground  a ground decal (lane lines, stop lines, crosswalks, rails) off the ground (the terrain grid the drawn ground
 //                 follows to 5 cm, heightAt) by more than TOL
 //   paint-deck    a ground decal within 2.5 m under a deck's top, or over it (seen through or over the deck)
-//   deck-gap      a drivable deck piece with no deck drawn under its lanes
+//   deck-gap      a drivable deck piece with no deck drawn under its lanes (not a hairline crack: none within 1 cm)
 //   deck-overlap  another deck strip drawn within 3 m over or under a drivable deck's lanes, off by more than 0.15 m
 //   lane-surface  a traffic lane or junction path (where the cars drive) off the surface drawn under it (deck or ground)
 //   crosswalk     a crosswalk (crosswalks()) whose middle or ends are off its carriageway
@@ -24,7 +24,7 @@ const ROOT = new URL('../public/', import.meta.url)
 const W = await import(new URL('core/tile-worker.js', ROOT).href)
 const { parse, readLines, terrain, roads, pois, build, carEnds, crosswalks, eachPoly } = W
 const onCarriage = W.onCarriage || ((c) => c), roadMask = W.roadMask || (() => null) // (an older tile-worker.js: measuring before a change)
-const { sampleGrid, inPoly, wallHeight } = await import(new URL('core/util.js', ROOT).href)
+const { sampleTerr, inPoly, wallHeight } = await import(new URL('core/util.js', ROOT).href)
 const [DIR, ...CELLS] = process.argv.slice(2)
 const TOL = { paint: 0.15, lane: 0.3, deck: 0.15, plinth: 1.2 }
 const CARR = new Set([25, 29, 30]) // cycle, road, arterial (tile-worker.js roadMask)
@@ -47,7 +47,7 @@ const keyOf = (x, y) => `${Math.floor(x / 1024)}_${Math.floor(y / 1024)}`
 function ground(x, y) { // the drawn ground (terrain + 0.02): the tile the point is in
   const T = tile(keyOf(x, y))
   if (!T) return null
-  const g = sampleGrid(T.terr.h, T.terr.n, 1024, x - T.ox, y - T.oy)
+  const g = sampleTerr(T.terr, x - T.ox, y - T.oy)
   return (T.terr.wall ? wallHeight(T.terr.wall, g, x - T.ox, y - T.oy) : g) + 0.02 // (on a seawall's walk: core/util.js)
 }
 // deck strips of loaded tiles by 8 m cell: [x0, y0, z0, x1, y1, z1, x2, y2, z2, kind]
@@ -138,7 +138,7 @@ function check(cell) {
           for (const o of [-0.35, 0, 0.35]) {
             const x = cx + nx * o * L.w, y = cy + ny * o * L.w
             const s1 = decks(x, y).filter(([h, kd]) => kd < 100 && Math.abs(h - E) < 3)
-            if (!s1.length) { add('deck-gap', x, y, E, 3, `no deck drawn (kind ${L.kind} ${L.a}-${L.b})`); continue }
+            if (!s1.length && !decks(x, y, -0.01).some(([h, kd]) => kd < 100 && Math.abs(h - E) < 3)) { add('deck-gap', x, y, E, 3, `no deck drawn (kind ${L.kind} ${L.a}-${L.b})`); continue }
             const off = s1.reduce((m, [h]) => (Math.abs(h - E) > Math.abs(m) ? h - E : m), 0)
             if (Math.abs(off) > TOL.deck) add('deck-overlap', x, y, E, Math.abs(off), `another deck ${off.toFixed(2)} m over/under ${L.a}-${L.b}`)
           }
@@ -304,7 +304,7 @@ function check(cell) {
     const k = `${ci * 4 + a}_${cj * 4 + b}`, T = tile(k)
     if (!T) continue
     const pieces = T.lines.filter((L) => L.kind <= 13).map((L) => { const pts = new Float32Array(L.pts.length); for (let q = 0; q < pts.length; q += 2) { pts[q] = L.pts[q] + T.ox; pts[q + 1] = L.pts[q + 1] + T.oy } return { ...L, pts, tunnel: L.tunnel ? 1 : 0 } })
-    add_.push({ key: `0/${k}`, level: 0, ox: T.ox, oy: T.oy, size: 1024, terrain: { n: T.terr.n, h: T.terr.h, wall: T.terr.wall }, pieces, pois: [] })
+    add_.push({ key: `0/${k}`, level: 0, ox: T.ox, oy: T.oy, size: 1024, terrain: { n: T.terr.n, h: T.terr.h, wall: T.terr.wall, f: T.terr.f }, pieces, pois: [] })
   }
   ctx.onmessage({ data: { type: 'tiles', add: add_, drop: [] } })
   ctx.onmessage({ data: { type: 'area', area: { x: X0 + 2048, y: Y0 + 2048, r: 3600, vx: X0 + 2048, vy: Y0 + 2048, vr: 300 } } })

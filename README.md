@@ -36,10 +36,12 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    spans its abutments. Where a street goes on from a raised deck end (OpenStreetMap's bridge tag stops short of the
    structure, stairs come down off a footbridge) it follows the LiDAR down to the ground at a ramp's grade; a path that goes
    on from a footbridge's end down on the ground (OpenStreetMap maps no stairs there) gets stairs down along it. Then one
-   solve per structure (`deck_solve`: a linear program over every deck, approach and tunnel beside them, on 4 m samples)
+   solve per structure (`deck_solve`: a linear program over every deck, approach and tunnel beside them, on 4 m samples,
+   the structures in parallel and the same every run)
    gives each its one height profile: as near the LiDAR as it can, one height where ways meet, one surface where decks are
    drawn over each other (else stacked 3.2 m apart; where the LiDAR's call can't hold, a MILP over the structure decides
-   which), tunnels joined where they meet a deck, no steeper than its grade, on the ground where a street goes on at
+   which: first each such stretch as the solved heights make it, solved again, then on a smaller structure a MILP bounded
+   in nodes, not seconds), tunnels joined where they meet a deck, no steeper than its grade, on the ground where a street goes on at
    grade (and at a road's or rail's dead end), never under the ground, 3 m clear over the streets under it. The deck,
    its paint, the traffic and the van all read that profile. Roads up on a building (a mall's rooftop
    parking, a parkade's top deck: layer or level 1 and up, mostly over a footprint, the LiDAR well above the ground) are
@@ -47,13 +49,16 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    is high over them, else with the roof under it, no steeper than a ramp); near a portal, where the roof isn't under the
    ground, the ground is cut and the page draws the tunnel's concrete box and portal face, and the whole way a dark tube
    round the road, so traffic, walkers and the van go through. Raised decks have railings along their edges. The terrain
-   is an 8 m grid in detail tiles, so streets sit on their embankments and in their cuts, fitted to the streets and
+   is an 8 m grid in detail tiles (plus, under the streets where it can't follow them, 2 m offsets: section TFIN), so
+   streets sit on their embankments and in their cuts, fitted to the streets and
    rail lines (where an 8 m point lands in the cut, ravine or yard beside a street, the grid round it moves so the
    drawn ground under the street is the LiDAR's); piers and seawalls in the sea keep their height. SkyTrain guideways
    take the structure the LiDAR sees beside their line where OpenStreetMap draws it a few metres off (at stations),
    long pieces (a bridge's span, one 1.5 km way on the Lions Gate) are cut at the detail tiles' edges so each tile has
-   the part over it, and busways are bus-only streets. `tools/geom_rules.py public/tiles` checks a bake against every
-   geometry rule (one registry: buildings on the ground, not in each other, streets through them as passages; decks one
+   the part over it (the next tiles' decks reaching over a tile come with it, XDCK: the page leaves out what of its own
+   strips they cover and paints nothing under them), and busways are bus-only streets. `tools/geom_rules.py public/tiles` checks a bake against every
+   geometry rule (one registry: buildings on the ground, not in each other, streets and decks through them as passages
+   (one predicate, `through_hit`, for the bake's fix and the audit's 'clash'); decks one
    surface, no steps, not too steep; paint, traffic lanes and crosswalks on what they are drawn on; poles, trees, beach
    logs clear of streets, buildings and each other; the ground one layer without seams; and `tools/audit_elev.py`'s
    streets off the ground, steps at abutments, buried decks, tunnels), each rule's worst with view links; the bake fixes

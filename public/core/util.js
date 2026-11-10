@@ -89,6 +89,17 @@ export function wallHeight(W, g, x, y, low) {
   const t = Math.min(1, (d2 - d1) / FADE)
   return h1 + (h2 - h1) * 0.5 * (1 - t * t * (3 - 2 * t))
 }
+// the drawn terrain at tile-local (x, y north): its grid (sampleGrid) plus, where the bake left them, the 2 m offsets
+// under the streets the grid can't follow (section TFIN, tile-worker.js terrain(): f.B each 16 x 16 block's slot in
+// f.V, or -1)
+export function sampleTerr(T, x, y) {
+  const g = sampleGrid(T.h, T.n, T.size, x, y), f = T.f
+  if (!f) return g
+  const N = f.n, fx = Math.min(N - 1.0001, Math.max(0, x / 2)), fy = Math.min(N - 1.0001, Math.max(0, (T.size - y) / 2))
+  const i = fx | 0, j = fy | 0, u = fx - i, v = fy - j
+  const at = (a, b) => { const s = f.B[(b >> 4) * f.nb + (a >> 4)]; return s < 0 ? 0 : f.V[s * 256 + (b & 15) * 16 + (a & 15)] }
+  return g + at(i, j) * (1 - u) * (1 - v) + at(i + 1, j) * u * (1 - v) + at(i, j + 1) * (1 - u) * v + at(i + 1, j + 1) * u * v
+}
 
 // a circle (x, y, r) against a box (centre cx, cy, unit forward fx, fy, half length hl and width hw; right is
 // (fy, -fx)): how to push the circle out { x, y } (one reused object: read it before asking again), or null
