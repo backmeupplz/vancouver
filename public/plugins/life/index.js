@@ -8,6 +8,7 @@
 // they brake for, and bumps (a car hit stops a moment, a person knocked stumbles or falls over and gets up again).
 
 import { kit } from '../../core/kit.js'
+import { smoother } from './smooth.js'
 import { carModels, peopleModels, farModels, dotModels, lifeMaterial, H, OUTFIT, signalModels, postModel, DETAIL, ARM_Y, ARM_BLADE, POST_BLADES, LENSES, POLE_LENSES, PED_LENSES } from './models.js'
 import { blades } from './blades.js'
 
@@ -340,26 +341,16 @@ export default function life(city) {
   let debugCb = null
   let busy = false, accDt = 0, spare = null, simT = 0, simAt = 0, stats = { cars: 0, people: 0 }
   const vp = new THREE.Matrix4()
-  let elapsed = 0, sentT = 0 // the frames' dt summed (the ticks' time), and the clock when the tick in flight was sent
+  // the clock: `elapsed` is the frames' dt summed; a tick sent at `sentT` is answered with the world at that time, and
+  // every frame draws between the last two answers (smooth.js)
+  const sm = smoother()
+  let elapsed = 0, sentT = 0, drawnT = 0
   worker.onmessage = ({ data: m }) => {
     if (m.type === 'frame') {
       busy = false; spare = m.buf
       if (!active) return
-      // under a perspective camera the boxes within the near radii are hidden (in their shader, by uCam / uNear)
-      // and those things are copied to the detailed models instead
-      // (and on the map zoomed right in, MAP_NEAR: everything in view, about its middle)
-      sight()
-      // the cars: positions and (id, speed), drawn every frame from here (carsAt()); the time of the tick it answers
-      if (snap.raw.length < m.cars * 8) { snap.raw = new Float32Array(m.cars * 12); snap.pos = new Float32Array(m.cars * 12); snap.aux = new Float32Array(m.cars * 3) }
-      snap.raw.set(m.buf.subarray(0, m.cars * 8)); snap.aux.set(m.buf.subarray(m.base, m.base + m.cars * 2))
-      snap.n = m.cars; snap.counts = m.counts; snap.t = sentT
-      carsAt(elapsed) // (now: city.traffic.nearby pairs these ids with positions)
-      // the people and cyclists likewise (peopleAt()), with their velocities, and the people's ids
-      const nb = m.nPeople + m.nBikes
-      if (snap.praw.length < nb * 8) { snap.praw = new Float32Array(nb * 12); snap.pq = new Float32Array(nb * 12); snap.pv = new Float32Array(nb * 3); snap.pid = new Float32Array(nb * 1.5) }
-      snap.praw.set(m.buf.subarray(m.cars * 8, (m.cars + nb) * 8)); snap.pv.set(m.buf.subarray(m.vbase, m.vbase + nb * 2)); snap.pid.set(m.buf.subarray(m.pbase, m.pbase + m.nPeople))
-      snap.pn = m.nPeople; snap.bn = m.nBikes
-      peopleAt(elapsed)
+      sm.push(m, sentT)
+      draw(drawnT) // (now: city.traffic.nearby pairs these ids with positions)
       simT = m.simT; simAt = performance.now()
       stats = m
       if (window.lifeDebug) { const a = (window.lifeMs ||= []); a.push(m.ms); if (a.length > 600) a.shift(); window.lifeAt = performance.now() }
@@ -374,49 +365,38 @@ export default function life(city) {
       city.requestRender()
     }
   }
-  // the cars at clock time t (the dt the ticks were sent with, summed): the latest snapshot moved on along each
-  // car's heading at its speed for the time since the frame that asked for it. The worker answers a frame or so
-  // later, sometimes two (a long tick, a busy main thread); drawn as they came, the cars lagged the camera by a
-  // frame and stood still for one now and then, then jumped two (a stutter beside a moving van). Over a frame or two
-  // a car's curve and braking are millimetres; never more than half a second on.
-  function carsAt(t) {
-    const n = snap.n, R = snap.raw, P = snap.pos, A = snap.aux, e = Math.min(0.5, Math.max(0, t - snap.t))
-    P.set(R.subarray(0, n * 8))
-    if (e > 0) for (let i = 0, s = 0; i < n; i++, s += 8) {
-      const d = A[i * 2 + 1] * e
-      if (!d) continue
-      const h = d * Math.cos(R[s + 4])
-      P[s] += Math.cos(R[s + 3]) * h; P[s + 1] += Math.sin(R[s + 4]) * d; P[s + 2] -= Math.sin(R[s + 3]) * h
-    }
+  // everything as it is at clock time t, into the instance buffers
+  function draw(t) {
+    drawnT = t
+    sight()
     const near = nearCars.value > 0
+    const B = sm.b, n = B.n, np = B.pn + B.bn
+    if (snap.pos.length < n * 8) snap.pos = new Float32Array(n * 12)
+    if (snap.pq.length < np * 8) snap.pq = new Float32Array(np * 12)
+    const P = snap.pos, Q = snap.pq
+    sm.cars(P, t)
     for (const o of carsNear) o.n = 0
-    for (let k = 0, off = 0; k < KINDS; k++) {
-      const c = snap.counts[k] || 0, m = Math.min(c, carMeshes[k].cap)
-      put(carMeshes[k], P, off, m, SEE.car, carDots[k])
-      if (near) pickNear(P, off, m, Math.sqrt(nearCars.value), pickCar[k])
+    for (let j = 0, off = 0; j < KINDS; j++) {
+      const c = B.counts[j] || 0, m = Math.min(c, carMeshes[j].cap)
+      put(carMeshes[j], P, off, m, SEE.car, carDots[j])
+      if (near) pickNear(P, off, m, Math.sqrt(nearCars.value), pickCar[j])
       off += c
     }
     for (const o of carsNear) show(o, o.n)
     for (let i = 0; i < pools.length; i++) pools[i].geometry.instanceCount = carAll[i].m.geometry.instanceCount
-  }
-  // the people and cyclists at clock time t, moved on from the latest snapshot like the cars (drawn as they came, they
-  // moved only on the frames an answer arrived: a stutter whenever the worker answered a frame late)
-  function peopleAt(t) {
-    const n = snap.pn + snap.bn, R = snap.praw, Q = snap.pq, V = snap.pv, e = Math.min(0.5, Math.max(0, t - snap.t))
-    Q.set(R.subarray(0, n * 8))
-    if (e > 0) for (let i = 0; i < n; i++) { Q[i * 8] += V[i * 2] * e; Q[i * 8 + 2] += V[i * 2 + 1] * e }
+    sm.people(Q, t)
     for (const o of peopleNear) o.n = 0
-    const np = Math.min(snap.pn, people.cap)
-    put(people, Q, 0, np, SEE.person, peopleDots)
-    if (nearPeople.value > 0) pickNear(Q, 0, np, Math.sqrt(nearPeople.value), pickPerson)
+    const pn = Math.min(B.pn, people.cap)
+    put(people, Q, 0, pn, SEE.person, peopleDots)
+    if (nearPeople.value > 0) pickNear(Q, 0, pn, Math.sqrt(nearPeople.value), pickPerson)
     for (const o of peopleNear) show(o, o.n)
-    put(bikes, Q, snap.pn, Math.min(snap.bn, bikes.cap), SEE.bike)
-    // the people for city.traffic.people, while a game asks for them: x, y, z, yaw and id
+    put(bikes, Q, B.pn, Math.min(B.bn, bikes.cap), SEE.bike)
+    // the people for city.traffic.people, while a game asks for them: x, y, z, yaw, id and pose + seed
     snap.np = 0
     if (performance.now() - snap.asked < 2000) {
-      if (snap.ppos.length < snap.pn * 6) snap.ppos = new Float32Array(snap.pn * 9)
-      for (let i = 0; i < snap.pn; i++) { const q = i * 6, o = i * 8; snap.ppos[q] = Q[o]; snap.ppos[q + 1] = Q[o + 1]; snap.ppos[q + 2] = Q[o + 2]; snap.ppos[q + 3] = Q[o + 3]; snap.ppos[q + 4] = snap.pid[i]; snap.ppos[q + 5] = Q[o + 5] }
-      snap.np = snap.pn
+      if (snap.ppos.length < B.pn * 6) snap.ppos = new Float32Array(B.pn * 9)
+      for (let i = 0; i < B.pn; i++) { const q = i * 6, o = i * 8; snap.ppos[q] = Q[o]; snap.ppos[q + 1] = Q[o + 1]; snap.ppos[q + 2] = Q[o + 2]; snap.ppos[q + 3] = Q[o + 3]; snap.ppos[q + 4] = B.pid[i]; snap.ppos[q + 5] = Q[o + 5] }
+      snap.np = B.pn
     }
   }
   // Only what the camera can see is drawn (#604: every simulated car and person was, whether in view or not, 540 000
@@ -470,7 +450,7 @@ export default function life(city) {
   }
 
   // ---------------------------------------------------------------- city.traffic, for games
-  const snap = { raw: new Float32Array(0), pos: new Float32Array(0), aux: new Float32Array(0), n: 0, counts: [], t: 0, ppos: new Float32Array(0), np: 0, asked: 0, praw: new Float32Array(0), pq: new Float32Array(0), pv: new Float32Array(0), pid: new Float32Array(0), pn: 0, bn: 0 }
+  const snap = { pos: new Float32Array(0), pq: new Float32Array(0), ppos: new Float32Array(0), np: 0, asked: 0 } // as drawn: cars, people and cyclists; the people for people()
   const pools2 = { people: [], poles: [], dogs: [], benches: [] } // reused result objects, so a game can ask every frame without garbage
   const rec = (k, i) => pools2[k][i] || (pools2[k][i] = { id: 0, x: 0, y: 0, z: 0, heading: 0, r: 0 })
   const obstacles = new Map()
@@ -484,12 +464,13 @@ export default function life(city) {
     nearby(x, z, r) {
       const out = [], r2 = r * r, p = snap.pos
       if (!active) return out
-      let k = 0, end = snap.counts[0] || 0
-      for (let i = 0; i < snap.n; i++) {
-        while (i >= end && k < KINDS - 1) end += snap.counts[++k]
+      const B = sm.b
+      let k = 0, end = B.counts[0] || 0
+      for (let i = 0; i < B.n; i++) {
+        while (i >= end && k < KINDS - 1) end += B.counts[++k]
         const o = i * 8, dx = p[o] - x, dz = p[o + 2] - z
         if (dx * dx + dz * dz > r2) continue
-        out.push({ id: snap.aux[i * 2], x: p[o], y: p[o + 1], z: p[o + 2], heading: p[o + 3] + Math.PI / 2, length: HALF[k] * 2, width: WIDE[k], speed: snap.aux[i * 2 + 1] })
+        out.push({ id: B.aux[i * 2], x: p[o], y: p[o + 1], z: p[o + 2], heading: p[o + 3] + Math.PI / 2, length: HALF[k] * 2, width: WIDE[k], speed: B.aux[i * 2 + 1] })
       }
       return out
     },
@@ -664,9 +645,8 @@ export default function life(city) {
     for (const p of pools) p.visible = city.light.night > 0.08
     if (sig.glow) { glowMat.size = Math.max(3, 2.6 * 6 * city.view.zoom) * city.renderer.getPixelRatio(); glowMat.opacity = glowNear.opacity = 0.45 + 0.55 * city.light.night }
     accDt += dt; elapsed += dt
-    sight()
-    if (snap.n) carsAt(elapsed)
-    if (snap.pn || snap.bn) peopleAt(elapsed)
+    const at = sm.step(elapsed, dt)
+    if (sm.b.t >= 0) draw(at)
     if (!busy) {
       busy = true; sentT = elapsed
       // (the view: no car or person appears or vanishes in it, worker.js seen())

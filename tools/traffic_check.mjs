@@ -13,6 +13,11 @@
 //   for the worker's answer (ms); tickMax: its longest tick (ms); onDeck/underDeck: transit vehicles seen on a road
 //   deck (sampled every 2 s), and of them those more than 1 m under it. ex: an example of each; why: the cars' states
 //   for the first overlapping pairs (?lifedebug)
+//   jerk / pjerk (cars / people): how unevenly each one in view moves, per agent: the change of its drawn velocity
+//   from one frame to the next (m/s), [mean, 95th percentile, worst] over all its frames; a thing moving smoothly
+//   changes by its acceleration × the frame (a car braking hard at 30 fps: 0.15), a stutter by its whole speed.
+//   --fps 30: the page draws at 30 frames a second (every other display frame); --cpu 4: the main thread 4× slower;
+//   --go: in a drive spec the van drives off (the accelerator held), so tiles, networks and detail levels change
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import vm from 'node:vm'
@@ -86,17 +91,92 @@ const sitters = got.find((x) => x.type === 'debug').statics
 console.log(`${walkers - sitters} walking, ${sitters} sitting or waiting, ${riders} cyclists: ${nans} numbers not finite (${nan || '-'})`)
 assert(walkers > sitters && sitters > 0 && riders > 0, 'people of every kind')
 assert.equal(nans, 0, nan)
+// As drawn (#606): the page's own smoothing (public/plugins/life/smooth.js) between the worker and the screen, at 60
+// and 30 frames a second and at an uneven rate, with the worker's answers on time, up to two frames late, and stalled
+// (a quarter second now and then), a new network built on the way. Per kind of thing, over every one of them:
+//   glitch: frames per 1000 in which one moved at a speed unlike both the frame before and the frame after (it stood
+//   for a frame and then jumped: a stutter; stopping at a kerb or pulling away is not one), and accel: the 99th
+//   percentile of the change of its drawn velocity from frame to frame, over the frame (m/s2; a car brakes at 3 to 4);
+//   gait: the same for the turning of a walker's legs (radians: 4.2 a metre walked)
+// `--old`: the same for the page as it was (each thing moved on along its heading from the latest answer)
+const { smoother } = await import('../public/plugins/life/smooth.js')
+const OLD = process.argv.includes('--old'), rnd = (s) => () => ((s = (s * 48271) % 2147483647) / 2147483647)
+function drawn(name, dtOf, lateOf, frames = 1800) {
+  const sm = smoother(), r = rnd(7), hist = new Map(), st = { car: [0, 0, []], person: [0, 0, []], cyclist: [0, 0, []], gait: [0, 0, []] }
+  let elapsed = 0, accDt = 0, busy = false, sentT = 0, spare = buf, due = [], P = new Float32Array(0), Q = new Float32Array(0), old = null
+  const see = (kind, id, x, z, dt) => {
+    let h = hist.get(id); if (!h) hist.set(id, (h = { x, z, v: [], dt: 0, vx: 0, vz: 0, f: -1 }))
+    if (h.f === f - 1 && h.dt && f > 120) { // (seen last frame too, and the one before: three speeds in a row; not the first two seconds, while the page finds how late the answers are)
+      const vx = (x - h.x) / dt, vz = (z - h.z) / dt, sp = Math.hypot(vx, vz), S = st[kind]
+      if (h.v.length) S[2].push(Math.hypot(vx - h.vx, vz - h.vz) / dt)
+      h.v.push(sp); h.vx = vx; h.vz = vz
+      if (h.v.length === 3) { const [a, b, c] = h.v, lim = 0.5 * Math.max(a, b, c) + 0.2; S[0]++; if (Math.abs(b - a) > lim && Math.abs(b - c) > lim) S[1]++; h.v.shift() }
+    } else h.v.length = 0
+    h.x = x; h.z = z; h.dt = dt; h.f = f
+  }
+  let f = 0
+  for (; f < frames; f++) {
+    for (const d of due) if (d.at <= f) { // the answers that have come since the last frame
+      busy = false; spare = d.m.buf
+      if (OLD) old = { t: d.t, m: d.m, buf: d.m.buf.slice() }; else sm.push(d.m, d.t)
+    }
+    due = due.filter((d) => d.at > f)
+    if (f === 900) send({ type: 'tiles', add: [], drop: [] })
+    const dt = dtOf(r); accDt += dt; elapsed += dt
+    if (OLD ? old : sm.b.t >= 0) {
+      let m, a, ids, pids
+      if (OLD) { // the latest answer, each thing moved on at its speed for the time since it was asked for
+        m = old.m; a = old.buf.slice(); const e = Math.min(0.5, Math.max(0, elapsed - old.t))
+        for (let i = 0; i < m.cars; i++) { const d = a[m.base + i * 2 + 1] * e, h = d * Math.cos(a[i * 8 + 4]); a[i * 8] += Math.cos(a[i * 8 + 3]) * h; a[i * 8 + 2] -= Math.sin(a[i * 8 + 3]) * h }
+        for (let i = 0; i < m.nPeople + m.nBikes; i++) { a[(m.cars + i) * 8] += a[m.vbase + i * 2] * e; a[(m.cars + i) * 8 + 2] += a[m.vbase + i * 2 + 1] * e }
+        for (let i = 0; i < m.cars; i++) see('car', a[m.base + i * 2], a[i * 8], a[i * 8 + 2], dt)
+        for (let i = 0; i < m.nPeople + m.nBikes; i++) see(i < m.nPeople ? 'person' : 'cyclist', 'p' + a[m.pbase + i], a[(m.cars + i) * 8], a[(m.cars + i) * 8 + 2], dt)
+        for (let i = 0; i < m.nPeople; i++) if (a[(m.cars + i) * 8 + 5] < 1) see('gait', 'g' + a[m.pbase + i], a[(m.cars + i) * 8 + 4], 0, dt)
+      } else {
+        const t = sm.step(elapsed, dt), B = sm.b, np = B.pn + B.bn
+        if (P.length < B.n * 8) P = new Float32Array(B.n * 12)
+        if (Q.length < np * 8) Q = new Float32Array(np * 12)
+        sm.cars(P, t); sm.people(Q, t)
+        for (let i = 0; i < B.n; i++) see('car', B.aux[i * 2], P[i * 8], P[i * 8 + 2], dt)
+        for (let i = 0; i < np; i++) see(i < B.pn ? 'person' : 'cyclist', 'p' + B.pid[i], Q[i * 8], Q[i * 8 + 2], dt)
+        for (let i = 0; i < B.pn; i++) if (Q[i * 8 + 5] < 1) see('gait', 'g' + B.pid[i], Q[i * 8 + 4], 0, dt)
+      }
+    }
+    if (!busy) {
+      busy = true; sentT = elapsed; got.length = 0
+      send({ type: 'tick', dt: accDt, buf: spare }); spare = null; accDt = 0
+      due.push({ at: f + 1 + lateOf(r, f), t: sentT, m: got.find((x) => x.type === 'frame') })
+    }
+  }
+  buf = due.at(-1)?.m.buf || spare
+  const out = {}
+  for (const [k, [n, g, acc]] of Object.entries(st)) { acc.sort((x, y) => x - y); out[k] = { glitch: +((1000 * g) / (n || 1)).toFixed(2), accel: +(acc[Math.floor(acc.length * 0.99)] || 0).toFixed(1) } }
+  console.log(`${name.padEnd(22)} ${JSON.stringify(out)}`)
+  return out
+}
+const even = (fps) => () => 1 / fps, uneven = (r) => [1 / 60, 1 / 30, 1 / 20][Math.floor(r() * 3)]
+const prompt = () => 0, late = (r) => Math.floor(r() * 3), stall = (r, f) => (f % 120 === 60 ? 15 : Math.floor(r() * 2))
+let worst = 0
+for (const [name, dtOf, lateOf] of [['60 fps', even(60), prompt], ['30 fps', even(30), prompt], ['60 fps, late answers', even(60), late], ['30 fps, late answers', even(30), late],
+  ['uneven frames, late', uneven, late], ['60 fps, stalls', even(60), stall], ['30 fps, stalls', even(30), stall]]) {
+  const o = drawn(name, dtOf, lateOf)
+  if (!name.includes('stalls')) for (const k in o) if (k !== 'cyclist') worst = Math.max(worst, o[k].glitch) // (a cyclist turns round on the spot at a path's dead end, and the test has two)
+}
+if (!OLD) assert(worst < 0.1, `things stutter as drawn: ${worst} glitches per 1000 frames`)
 console.log('traffic ok')
 
 async function live() {
   const { args, server, open, settle } = await import('./pw.mjs')
-  let [o, specs] = args(process.argv.slice(2).filter((a) => a !== '--live'), { secs: 60, dpr: 1, tier: 'high', hour: 17 })
+  let [o, specs] = args(process.argv.slice(2).filter((a) => a !== '--live' && a !== '--go'), { secs: 60, dpr: 1, tier: 'high', hour: 17, fps: 60, cpu: 1 })
   if (!specs.length) specs = ['stop=drive#15054,11350,0.02,1.5708', 'stopmap=map#15054,11350,1.2', 'downtown=map#13645,11243,0.5', 'bridge=map#13124,13929,1.9436']
   const srv = await server(o.port)
   try {
     for (const spec of specs) {
       const [name, v] = spec.split('='), drive = v.startsWith('drive'), [hx, hy, hz, yaw] = v.slice(v.indexOf('#') + 1).split(',').map(Number)
-      const { browser, page, errs } = await open({ ...o, port: srv.port, query: '?drivedebug&lifedebug', hash: `#${hx},${hy},${hz}` })
+      // --fps: each frame waits out the display frames between (60 / fps of them)
+      const init = +o.fps < 60 ? `{ const raf = requestAnimationFrame.bind(window), n = ${Math.round(60 / +o.fps)}; window.requestAnimationFrame = (cb) => { let k = n; const f = (t) => (--k ? raf(f) : cb(t)); return raf(f) } }` : undefined
+      const { browser, ctx, page, errs } = await open({ ...o, init, port: srv.port, query: '?drivedebug&lifedebug', hash: `#${hx},${hy},${hz}` })
+      if (+o.cpu > 1) await (await ctx.newCDPSession(page)).send('Emulation.setCPUThrottlingRate', { rate: +o.cpu })
       await settle(page, 800)
       if (drive) {
         await page.waitForFunction(() => window.driveDebug, null, { timeout: 30000 })
@@ -104,9 +184,12 @@ async function live() {
         await settle(page, 1500)
       }
       await page.waitForTimeout(4000) // the traffic settles in
+      if (drive && process.argv.includes('--go')) await page.keyboard.down('w')
       const r = await page.evaluate((secs) => new Promise((done) => {
         const T = city.traffic, cam = () => city.view.camera, POP = 250
         const st = { frames: 0, cars: 0, people: 0, overlap: 0, pairs: new Set(), pop: 0, vanish: 0, ppop: 0, pvanish: 0, jump: 0, pjump: 0, turn: 0, slow: 0, judder: 0, moving: 0, pjudder: 0, pmoving: 0, ex: {}, onDeck: 0, underDeck: 0 }
+        const vel = new Map(), jk = { c: [], p: [] } // per thing: its drawn velocity last frame; the changes of it
+        const jerk = (k, x, z, p, dt, vis, into) => { const vx = (x - p[0]) / dt, vz = (z - p[1]) / dt, w = vel.get(k); vel.set(k, [vx, vz]); if (vis && w && Math.hypot(vx, vz) + Math.hypot(w[0], w[1]) > 0.2) into.push(Math.hypot(vx - w[0], vz - w[1])) }
         const ema = new Map() // per thing: its speed over the last frames (judder: a frame's speed off it by more than 60 %)
         const jud = (k, d, dt, vis) => { const sp = d / dt, e = ema.get(k); ema.set(k, e == null ? sp : e * 0.8 + sp * 0.2); if (!vis || e == null || e < 0.5) return 0; return Math.abs(sp - e) > 0.6 * e ? 2 : 1 }
         let last = null, lastP = null, t0 = performance.now(), tp = t0 - 16.7
@@ -168,6 +251,7 @@ async function live() {
             const p = last.get(a.id), vis = inView(a.x, a.y, a.z)
             if (!p) { if (vis) { st.pop++; note('pop', `${a.id} at ${f1(a.x)},${f1(a.y)},${f1(a.z)}`) } continue }
             const d = Math.hypot(a.x - p[0], a.z - p[2]), dy = Math.abs(Math.atan2(Math.sin(a.heading - p[3]), Math.cos(a.heading - p[3])))
+            jerk(a.id, a.x, a.z, [p[0], p[2]], dt, vis, jk.c)
             const J = jud(a.id, d, dt, vis); if (J) { st.moving++; if (J > 1) { st.judder++; note('judder', `${a.id} ${f1(d / dt)} m/s, was ${f1(ema.get(a.id))}, speed ${f1(a.speed)}, dt ${(dt * 1000).toFixed(0)} ms`) } }
             if (vis && d > a.speed * dt * 1.5 + 0.4) { st.jump++; note('jump', `${a.id} ${f1(d)} m at ${f1(a.speed)} m/s, ${f1((now - t0) / 1000)} s in, worker ${Math.round(now - (window.lifeAt || now))} ms ago, ${f1(a.x)},${f1(a.y)},${f1(a.z)} dy ${f1(a.y - p[1])}`) }
             if (vis && dy > 0.25 && a.speed > 0.5) st.turn++
@@ -183,6 +267,7 @@ async function live() {
             if (!lastP) continue
             const p = lastP.get(q.id), vis = inView(q.x, q.y, q.z)
             if (!p) { if (vis) { st.ppop++; note('ppop', `${q.id} at ${f1(q.x)},${f1(q.z)}`) } continue }
+            jerk('p' + q.id, q.x, q.z, [p[0], p[2]], dt, vis, jk.p)
             const J = jud('p' + q.id, Math.hypot(q.x - p[0], q.z - p[2]), dt, vis); if (J) { st.pmoving++; if (J > 1) st.pjudder++ }
             if (vis && Math.hypot(q.x - p[0], q.z - p[2]) > 0.5) { st.pjump++; note('pjump', `${q.id} ${f1(Math.hypot(q.x - p[0], q.z - p[2]))} m at ${f1(q.x)},${f1(q.z)}`) }
           }
@@ -191,11 +276,13 @@ async function live() {
           if (st.frames % 120 === 1) buses()
           if (now - t0 < secs * 1000) requestAnimationFrame(frame)
           else { st.pairs = st.pairs.size; st.tickMax = Math.round(Math.max(0, ...(window.lifeMs || []))) // the worker's longest tick (ms) in the last 600
- st.judder = +(100 * st.judder / (st.moving || 1)).toFixed(2); st.pjudder = +(100 * st.pjudder / (st.pmoving || 1)).toFixed(2); delete st.moving; delete st.pmoving; done(st) }
+ st.judder = +(100 * st.judder / (st.moving || 1)).toFixed(2); st.pjudder = +(100 * st.pjudder / (st.pmoving || 1)).toFixed(2); delete st.moving; delete st.pmoving
+            const sum = (a) => { a.sort((x, y) => x - y); return a.length ? [a.reduce((s, x) => s + x, 0) / a.length, a[Math.floor(a.length * 0.95)], a[a.length - 1]].map((x) => +x.toFixed(3)) : null }
+            st.jerk = sum(jk.c); st.pjerk = sum(jk.p); done(st) }
         }
         requestAnimationFrame(frame)
       }), +o.secs)
-      console.log(JSON.stringify({ name, ...r, errors: errs.length }))
+      console.log(JSON.stringify({ name, fps: +o.fps, cpu: +o.cpu, ...r, errors: errs.length }))
       await browser.close()
     }
   } finally { srv.stop() }

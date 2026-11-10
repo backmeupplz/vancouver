@@ -1437,8 +1437,8 @@ function dodge(p, tx, ty) {
   return 0
 }
 function stepPeople(dt) {
-  for (const p of peds) { p.ox = p.x; p.oy = p.y; p.oh = p.h } // where they were: drawn between that and here (output())
-  for (const b of bikes) { b.ox = b.x; b.oy = b.y; b.oh = b.h }
+  for (const p of peds) { p.ox = p.x; p.oy = p.y; p.oh = p.h; p.oph = p.phase } // where they were: drawn between that and here (output())
+  for (const b of bikes) { b.ox = b.x; b.oy = b.y; b.oh = b.h; b.oph = b.phase }
   for (const p of statics) { if (p.fall && (p.fall.t += dt) >= p.fall.dur) p.fall = null; if (p.pet && (p.pet.t += dt) >= p.pet.dur) p.pet = null }
   for (const p of peds) {
     if (p.fall) { if ((p.fall.t += dt) >= p.fall.dur) p.fall = null; continue } // down (or stumbling): no walking
@@ -1546,11 +1546,11 @@ function stepBikes(dt) {
     b.u += b.dir * b.v * dt; b.phase += b.v * dt * 2.2
     const c = b.wp.c
     if (b.u > c.len || b.u < 0) {
-      const leg = b.wp.legs[b.u > c.len ? 1 : 0], n = leg.n
+      const leg = b.wp.legs[b.u > c.len ? 1 : 0], n = leg.n, over = b.u > c.len ? b.u - c.len : -b.u // (ridden on along the next path: no pause at each junction)
       const opts = n.bikes.filter((l) => l !== leg)
       let nx = opts.length ? opts[(Math.random() * opts.length) | 0] : Math.random() < 0.5 ? null : leg
       if (!nx || (b.x - area.vx) ** 2 + (b.y - area.vy) ** 2 > (area.vr + 200) ** 2) { if (!seen(b.x, b.y, b.h)) { b.dead = true; continue } nx = leg } // gone out of sight, else back the way it came
-      b.wp = nx.wp; b.dir = nx.end ? -1 : 1; b.u = nx.end ? nx.wp.c.len : 0
+      b.wp = nx.wp; b.dir = nx.end ? -1 : 1; b.u = nx.end ? Math.max(0, nx.wp.c.len - over) : Math.min(nx.wp.c.len, over)
     }
     at(b.wp.c, b.u, tmp)
     const off = -b.dir * Math.min(0.9, b.wp.w / 4)
@@ -1694,13 +1694,13 @@ function tick({ dt, buf }) {
 
 // 8 floats per thing: x, y (up), z (south), yaw, then per kind (cars: pitch, colour, brake, seed + 2 × shrink;
 // people: walk phase (fallen: how far over; petted, pose 5: for how long), pose + seed, shirt, trousers); then 2 per car in the same order: id,
-// speed; then 1 per person (not cyclists), from pbase: id; then 2 per person and cyclist, from vbase: their velocity
-// (x, z per second: the page moves them on between answers, like the cars)
+// speed; then 1 per person and cyclist, from pbase: id (the page finds each thing in the answer before by it, and
+// draws between the two); then 2 per person and cyclist, from vbase: their velocity (x, z per second)
 function output(buf) {
   const counts = [0, 0, 0, 0, 0, 0]
   for (const c of cars) counts[c.kind]++
   const nPeople = opts.people ? peds.length + statics.length : 0, nBikes = opts.people ? bikes.length : 0
-  const base = (cars.length + nPeople + nBikes) * 8, pbase = base + cars.length * 2, vbase = pbase + nPeople, need = vbase + (nPeople + nBikes) * 2
+  const base = (cars.length + nPeople + nBikes) * 8, pbase = base + cars.length * 2, vbase = pbase + nPeople + nBikes, need = vbase + (nPeople + nBikes) * 2
   let a = buf && buf.length >= need ? buf : new Float32Array(Math.max(need, 1024) * 1.5)
   const off = [0]
   for (let k = 1; k < 6; k++) off[k] = off[k - 1] + counts[k - 1]
@@ -1738,18 +1738,27 @@ function output(buf) {
   // people and cyclists between their last two steps, rem / STEP of the way (drawn as they stood after each step, they
   // moved every other frame at 60 fps); one who hopped far (a new path) at once, and one with no step behind them
   // (just come, or sitting: no ox) where they are: (x - undefined) * 0 is NaN, not 0 (#591: it blacked the view out)
-  const u = Math.min(1, rem / STEP)
+  const u = Math.min(1, rem / STEP), now = simT + rem
   const put = (p, pose) => {
     const f = p.fall ? fallAngle(p.fall) : 0, mv = p.ox != null && Math.abs(p.x - p.ox) + Math.abs(p.y - p.oy) < 2, k = mv ? 1 - u : 0, q = vbase + j / 4 - cars.length * 2
-    a[j] = mv ? p.x - (p.x - p.ox) * k : p.x; a[j + 1] = (mv ? p.h - (p.h - p.oh) * k : p.h) + Math.sin(f) * 0.13; a[j + 2] = -(mv ? p.y - (p.y - p.oy) * k : p.y); a[j + 3] = p.ang
+    let x = mv ? p.x - (p.x - p.ox) * k : p.x, y = mv ? p.y - (p.y - p.oy) * k : p.y
+    if (pose === 0 || pose === 3) { // set down somewhere else within a few metres (a new network's line for their path, a hop begun): drawn where they were, easing over, as the cars are
+      const d = now - p.qt, ex = x - p.qx, ey = y - p.qy, lim = (pose === 3 ? 8 : 4.5) * d + 0.15
+      if (d < 0.5 && ex * ex + ey * ey > lim * lim && ex * ex + ey * ey < 64) { p.jx = p.dx - x; p.jy = p.dy - y; p.jt = now }
+      p.qx = x; p.qy = y; p.qt = now
+      if (p.jt != null) { const e = (now - p.jt) / 0.5; if (e >= 1) p.jt = null; else { x += p.jx * (1 - ease(e)); y += p.jy * (1 - ease(e)) } }
+      p.dx = x; p.dy = y
+    }
+    a[j] = x; a[j + 1] = (mv ? p.h - (p.h - p.oh) * k : p.h) + Math.sin(f) * 0.13; a[j + 2] = -y; a[j + 3] = p.ang
     a[q] = mv ? (p.x - p.ox) / STEP : 0; a[q + 1] = mv ? -(p.y - p.oy) / STEP : 0
-    a[j + 4] = p.fall ? f : p.pet ? p.pet.t : p.mode === 'wait' ? 0 : p.phase; a[j + 5] = (p.fall ? 4 : p.pet && pose !== 2 ? 5 : p.mode === 'wait' ? 1 : pose) + p.seed * 0.9; a[j + 6] = p.shirt; a[j + 7] = p.pants
+    a[j + 4] = p.fall ? f : p.pet ? p.pet.t : p.mode === 'wait' ? 0 : mv ? p.phase - (p.phase - p.oph) * k : p.phase // (the legs' turn between the two steps, like the place)
+    a[j + 5] = (p.fall ? 4 : p.pet && pose !== 2 ? 5 : p.mode === 'wait' ? 1 : pose) + p.seed * 0.9; a[j + 6] = p.shirt; a[j + 7] = p.pants
     j += 8
   }
   if (opts.people) {
     for (const p of peds) { put(p, 0); a[q++] = p.id }
     for (const p of statics) { put(p, p.pose); a[q++] = p.id }
-    for (const b of bikes) put(b, 3)
+    for (const b of bikes) { put(b, 3); a[q++] = b.id }
   }
   return { type: 'frame', buf: a, counts, nPeople, nBikes, base, pbase, vbase, simT: simT + rem, cars: cars.length, people: peds.length + statics.length }
 }
