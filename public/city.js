@@ -6,6 +6,7 @@ export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll
   const handlers = new Map()
   const own = () => ownCamera?.active
   let animators = 0
+  const startCard = makeStart()
   const city = {
     version: 1,
     THREE,
@@ -88,8 +89,9 @@ export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll
       return () => { if (!stopped) { stopped = true; animators--; requestRender() } }
     },
     get animating() { return animators > 0 },
-    ui: makeUI(),
+    ui: makeUI(startCard),
   }
+  city.on('player', (p) => { if (p) startCard.done() })
   return city
 }
 
@@ -131,7 +133,37 @@ function sheet(el, close) {
   return x // call again after replacing the element's contents
 }
 
-function makeUI() {
+// The start card: what a first-time visitor can do, at the bottom of the map (it doesn't cover the map's middle, and the
+// map pans around it). Not built at all for someone who has closed it, used it or played before.
+const STARTED = 'vancouver.started'
+function makeStart() {
+  let seen = true
+  try { seen = !!localStorage.getItem(STARTED) } catch {}
+  if (seen) return { add() {}, done() {} }
+  const el = document.createElement('div'), row = document.createElement('div'), x = document.createElement('button')
+  el.id = 'start'; el.className = 'panel'; el.hidden = true
+  el.setAttribute('role', 'region'); el.setAttribute('aria-label', 'Start playing')
+  el.innerHTML = '<h2>Vancouver is yours to play</h2>'
+  row.className = 'start-row'
+  x.type = 'button'; x.className = 'start-x'; x.textContent = '×'; x.setAttribute('aria-label', 'Close')
+  el.append(x, row)
+  document.body.append(el)
+  const done = () => { if (seen) return; seen = true; el.remove(); try { localStorage.setItem(STARTED, '1') } catch {} }
+  x.onclick = done
+  return {
+    done,
+    add({ icon, label, sub, onClick, order = 0 }) {
+      if (seen) return
+      const b = document.createElement('button')
+      b.type = 'button'; b.style.order = order
+      for (const [cls, t] of [['ic', icon], ['lb', label], ['sub', sub]]) if (t) { const s = document.createElement('span'); s.className = cls; s.textContent = t; if (cls === 'ic') s.setAttribute('aria-hidden', 'true'); b.append(s) }
+      b.onclick = () => { done(); onClick() }
+      row.append(b); el.hidden = false
+    },
+  }
+}
+
+function makeUI(startCard) {
   const bar = document.getElementById('tools')
   // About (index.html) is a sheet too
   const about = document.getElementById('about'), aboutBtn = document.getElementById('aboutBtn')
@@ -195,6 +227,26 @@ function makeUI() {
     for (const m of moved) placeEl(m)
     if (!phone) closeMenu()
   })
+  const toasts = [], stack = document.createElement('div')
+  stack.id = 'toasts'; document.body.append(stack)
+  let toastEl = null, toastT = 0, toastAt = 0, toastMs = 0, holds = 0
+  function nextToast() {
+    if (holds || !toasts.length) return
+    if (toastEl) { // the one showing gives way after its reading time (about 25 characters a second)
+      const left = Math.min(toastMs, 700 + 40 * toastEl.textContent.length) - (performance.now() - toastAt)
+      clearTimeout(toastT); toastT = setTimeout(endToast, Math.max(0, left))
+      return
+    }
+    const [text, ms] = toasts.shift()
+    toastEl = document.createElement('div')
+    toastEl.className = 'panel toast'
+    toastEl.setAttribute('role', 'status')
+    toastEl.textContent = text
+    stack.prepend(toastEl)
+    toastAt = performance.now(); toastMs = ms; toastT = setTimeout(endToast, ms)
+    if (toasts.length) nextToast()
+  }
+  function endToast() { clearTimeout(toastT); toastEl?.remove(); toastEl = null; nextToast() }
   return {
     // a toolbar button at the top right (on phones: the dock at the bottom); with `panel: true` it opens a small
     // panel under it (on phones: a bottom sheet). `set({ icon, label })` changes what the button says.
@@ -244,14 +296,18 @@ function makeUI() {
     closeAll() { document.dispatchEvent(new Event(CLOSE_ALL)) },
     onCloseAll(fn) { document.addEventListener(CLOSE_ALL, fn); return () => document.removeEventListener(CLOSE_ALL, fn) },
     get compact() { return compact() },
+    // one thing at a time: a toast waits for the one on screen (which makes way once it has been read) and while a
+    // plugin holds them back (`release = hold()`: its how-to card is up); the same text isn't queued twice
     toast(text, ms = 3000) {
-      const t = document.createElement('div')
-      t.className = 'panel toast'
-      t.setAttribute('role', 'status')
-      t.textContent = text
-      document.body.append(t)
-      setTimeout(() => t.remove(), ms)
+      if (toastEl?.textContent === text || toasts.some((q) => q[0] === text)) return
+      toasts.push([text, ms]); nextToast()
     },
+    toasts: stack, // the column toasts show in: a plugin's own pops go in it too, and so never land on a toast
+    clearToasts() { toasts.length = 0; endToast() }, // a game ending: its hints, on screen or waiting, are stale
+    hold() { holds++; let done = false; return () => { if (!done) { done = true; holds--; nextToast() } } },
+    // the first visit's start card (index.html #start): a way in for a newcomer, e.g. { icon: '⛵', label: 'Sail',
+    // sub: 'the real wind', onClick }; `order` sorts them. Gone for good once closed, used, or a game has started
+    addStart: startCard.add,
     // on phones, `el` lives in the ⋯ sheet instead of where it is (its own CSS and `hidden` still apply there); it
     // is listed only while `home` (default: its parent) is on screen, so a game's toggles show only in that game
     inMenu(el, home = el.parentElement) { move(el, items, home === document.body ? null : home) },

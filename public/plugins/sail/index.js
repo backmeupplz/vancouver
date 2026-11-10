@@ -295,6 +295,7 @@ export default function sail(city) {
   let tgtNow = null, auto = null // tests (?drivedebug): the computer steers the player round the course
 
   const button = city.ui.addButton({ label: 'Sail', icon: '⛵', title: 'Sail a small boat on the real water, in the real wind', onClick: () => startPick(), dock: true })
+  city.ui.addStart?.({ icon: '⛵', label: 'Sail', sub: 'the real wind', order: 2, onClick: () => startPick() })
 
   // ---------------------------------------------------------------- pick where to start
   const picker = mapPicker(city, 'sl-picking', (x, z) => {
