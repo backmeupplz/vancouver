@@ -4,9 +4,11 @@
 // - sitting down (C): the camera drifts round for the view; on a beach it counts the beach, more at golden hour
 // - hikes: quarter marks with split times against your best (and a second wind), a medal for the time at the top,
 //   and now and then a deer or a raccoon by the trail to spot
+// - footsteps that sound of what is underfoot (paving, grass, sand, a wooden deck; wetter in the rain), a hop (Space)
 // Kept in localStorage ('drive.foot'); points go to city.progress when it is there.
 import { kit, kitMaterial } from '../../core/kit.js'
 import { clamp, wrap } from '../../core/util.js'
+import { noise, tone } from '../../core/play.js'
 
 // name, lat, lon, height (m, where to aim), from how far it counts (m); tall ones show over the roofs
 const SHOTS = [
@@ -25,7 +27,10 @@ const WILD = { grind: 'deer', quarry: 'deer', lynn: 'deer', dog: 'deer' } // the
 const KEY = 'drive.foot'
 const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
 
-// api: { man, walker, popup(big, line), sfx, wallHit(x0, y0, x1, y1), wet(x, y), fwdX, fwdY, flash(), hikeSpeed (m/s) }
+// a footstep by what is underfoot: a burst of noise through [filter, Hz, Q], seconds long, how loud
+const STEPS = { path: ['bandpass', 1500, 1.2, 0.05, 0.05], grass: ['lowpass', 700, 0.5, 0.11, 0.04], sand: ['lowpass', 1100, 0.3, 0.17, 0.045], wood: ['bandpass', 480, 2, 0.07, 0.06] }
+
+// api: { man, walker, popup(big, line), sfx, audio() (the game's sound output, or null), pathAt(x, y) (the nearest path or street: { d, drv }), wallHit(x0, y0, x1, y1), wet(x, y), fwdX, fwdY, flash(), hikeSpeed (m/s) }
 export function makeFoot(THREE, city, api) {
   const { man } = api
   let saved = { shots: {}, beaches: [], wild: 0, splits: {}, best: {} }
@@ -102,12 +107,37 @@ export function makeFoot(THREE, city, api) {
     if (pts > prev) { saved.shots[L.name] = pts; save(); award('photo', pts - prev, { label: `Photo: ${L.name}` }) }
     api.popup(`${L.name} · ${pts} pts`, !prev ? `New! ${n} of ${shots.length} landmarks` : pts > prev ? `Your best shot of it (was ${prev})` : `Best ${prev}: get closer, centre it`)
   }
+  // what is underfoot: a path or a street, a wooden deck (a pier, a boardwalk: a footway on a deck), sand, else grass
+  function surface() {
+    const r = api.pathAt(man.x, man.y)
+    if (r && r.d < 1.8) return man.deck && !r.drv ? 'wood' : 'path'
+    if (man.deck) return 'path'
+    // ponytail: sand = low ground by a named beach; ask the tiles' own sand areas if core ever publishes them
+    return man.h < 6 && beaches.some((b) => Math.hypot(b.x - man.x, b.y - man.y) < 320) ? 'sand' : 'grass'
+  }
+  let grain = null
+  function step() {
+    const dest = api.audio(); if (!dest) return
+    const c = dest.context, t = c.currentTime, r = (S.stepN * 0.618) % 1, wet = city.surface?.wet > 0.3, kind = surface()
+    grain ||= noise(c, 0.4)
+    const burst = ([type, f, q, dur, vol]) => {
+      const src = c.createBufferSource(), bq = c.createBiquadFilter(), g = c.createGain()
+      src.buffer = grain; bq.type = type; bq.frequency.value = f * (0.85 + 0.3 * r); bq.Q.value = q
+      g.gain.setValueAtTime(vol * (man.run ? 1.5 : 1), t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur)
+      src.connect(bq); bq.connect(g); g.connect(dest); src.start(t, r * 0.2, dur + 0.02)
+    }
+    burst(STEPS[kind])
+    if (kind === 'wood') tone(dest, 95 + 30 * r, t, 0.09, 0.05)
+    if (wet && kind !== 'sand') burst(['highpass', 2600, 0.5, 0.13, 0.03]) // a little splash
+  }
   function sit() {
     if (S.sit) { S.sit = null; return }
     S.sit = { t: 0, a: 0, done: false }
   }
   function key(code) { // true: taken
-    if (!S.on || S.hike) return false
+    if (!S.on) return false
+    if (code === 'Space' && !S.framing && !S.sit) { if (!man.air) man.air = 1e-3; return true }
+    if (S.hike) return false
     if (code === 'KeyP') { setFraming(!S.framing); return true }
     if (S.framing && (code === 'Space' || code === 'Enter')) { snap(); return true }
     if (code === 'KeyC' && !S.framing && Math.abs(man.speed) < 0.5) { sit(); return true }
@@ -194,6 +224,8 @@ export function makeFoot(THREE, city, api) {
     // each frame on foot, after the chase camera is set: cam may be taken over (the eye for a photo, a slow drift when sat)
     frame(dt, now, cam, hike, afoot) {
       S.hike = hike; S.cam = cam
+      const n = Math.floor(man.phase / Math.PI)
+      if (n !== S.stepN) { S.stepN = n; if (afoot && Math.abs(man.speed) > 0.3 && !man.air) step() }
       btns.hidden = !!hike || !afoot
       if (S.framing && !afoot) setFraming(false)
       if (hike) { if (!hike.photo) { hikeStep(hike, now); wild(dt) } return }

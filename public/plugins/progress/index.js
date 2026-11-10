@@ -23,13 +23,18 @@ const ITEMS = [
   ['horn:ferry', 'Ferry', [98, 131], 8, 2000], ['horn:train', 'Freight train', [311, 370, 415, 494], { leaves: 70 }],
   ['boat:teal', 'Harbour teal', '#2f6f8f', 1], ['boat:sunset', 'Sunset', '#e8703a', 3, 600], ['boat:orca', 'Orca', '#22252c', 5, 1200],
   ['boat:mint', 'Seawall mint', '#9fe0c8', 7, 1800], ['boat:cherry', 'Cherry', '#c81d3a', 10, 3000], ['boat:gold', 'Gold leaf', '#d9a520', { leaves: 20 }],
+  ['shirt:salmonberry', 'Salmonberry', '#e8735a', 1], ['shirt:slicker', 'Rain slicker', '#e9b93a', 2, 300], ['shirt:fern', 'Fern', '#5f9e6e', 3, 500],
+  ['shirt:harbour', 'Harbour blue', '#3f7fb5', 5, 900], ['shirt:charcoal', 'Charcoal', '#3a3f47', 7, 1400], ['shirt:maple', 'Maple red', '#d9352b', { leaves: 15 }],
+  ['pants:navy', 'Navy', '#3b4a5e', 1], ['pants:khaki', 'Khaki', '#b59a6a', 2, 300], ['pants:charcoal', 'Charcoal', '#2c2f35', 4, 700], ['pants:olive', 'Olive', '#5c6b3f', 6, 1100],
+  ['cap:salmonberry', 'Salmonberry', '#f2a07e', 1], ['cap:cream', 'Cream', '#f6ead2', 2, 300], ['cap:forest', 'Forest', '#2f5d46', 4, 700], ['cap:black', 'Black', '#22252c', 6, 1100],
+  ['cap:gold', 'Gold leaf', '#d9a520', { leaves: 10 }],
   // fishing gear (plugins/fish/rules.js has what each does)
   ['rod:spin', 'Seawall spinner', null, 1], ['rod:surf', 'Surf caster (casts further)', null, 3, 500], ['rod:mooch', 'Mooching rod (stronger, faster)', null, 6, 1500], ['rod:sturgeon', 'Sturgeon stick (very strong)', null, { leaves: 30 }],
   ['lure:worm', 'Worm and float', null, 1], ['lure:buzz', 'Buzz Bomb (coho, rockfish)', null, 2, 300], ['lure:hoochie', 'Pink hoochie (salmon)', null, 5, 900], ['lure:herring', 'Cut-plug herring (the big ones)', null, 8, 1800],
   ['trap:ring', 'Crab ring', null, 1], ['trap:fold', 'Folding trap (holds its crab)', null, 4, 700], ['trap:pot', 'Crab pot (holds six)', null, 9, 2200],
 ].map(([id, name, value, need, price]) => ({ id, slot: id.split(':')[0], name, value, lv: need.leaves ? 0 : need, leaves: need.leaves || 0, price: price || 0 }))
 const CAB_LEVELS = [1, 1, 1, 1, 2, 3, 4, 5, 6, 8, 10, 12] // Rush Fare cabs by their index in CABS: the first four are everyone's
-const SLOTS = [['van', 'Van'], ['horn', 'Horn'], ['boat', 'Boat'], ['rod', 'Rod'], ['lure', 'Lure'], ['trap', 'Crab trap'], ['cab', 'Rush Fare cabs']]
+const SLOTS = [['van', 'Van'], ['horn', 'Horn'], ['boat', 'Boat'], ['shirt', 'On foot: shirt'], ['pants', 'On foot: trousers'], ['cap', 'On foot: cap'], ['rod', 'Rod'], ['lure', 'Lure'], ['trap', 'Crab trap'], ['cab', 'Rush Fare cabs']]
 
 // the daily challenges: one from each group a day. [group, stat, text, min, max, step, award kind it needs]:
 // a challenge on an award kind is only drawn once the player has earned that kind (so it can always be done).
