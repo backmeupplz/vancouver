@@ -770,7 +770,7 @@ export default function drive(city) {
     <button data-m="bus"><span>🚌</span><div>Drive a bus<small>Real TransLink routes on their timetable: stops, riders, the bell</small></div></button>
     <button data-m="hike"><span>🥾</span><div>Hike a trail<small>Grouse Grind, Quarry Rock, Lynn Canyon and more</small></div></button>
     <button data-m="taxi"><span>🚕</span><div>Rush Fare<small>Arcade cabs against the clock: fares across town, stunts, nitro</small></div></button></div>`
-  city.ui.addStart?.({ icon: '🚐', label: 'Drive', sub: 'van, bus, cab', order: 1, onClick: () => button.button.click() })
+  city.ui.addStart?.({ icon: '🧭', label: 'Explore', sub: 'van, bus, cab, on foot', order: 1, onClick: () => button.button.click() })
   city.ui.addStart?.({ icon: '🚶', label: 'Walk', sub: 'any street', order: 3, onClick: () => startPick('foot') })
   const menuEl = button.panel.querySelector('.dlv-menu'), menuHTML = menuEl.innerHTML
   function hikeLog() { try { return JSON.parse(localStorage.getItem('drive.hikes') || '{}') } catch { return {} } }

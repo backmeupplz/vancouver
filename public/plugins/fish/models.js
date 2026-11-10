@@ -81,6 +81,7 @@ export function makeModels(THREE) {
       k.c(0xc0392b).box(-0.06, 0.06, 0.03, 0.12, -0.06, 0.06) // the bait
       return mesh(k)
     },
+    marker() { const k = kit(THREE); k.c(0x7fc4e8).cyl(0.06, 0.06, 2, 6, 1).move(0, 0, 1, 0); const s = k.at(); k.c(0x1a2a38).cyl(0.7, 0.7, 0.12, 14, 1).move(s, 0, 2, 0); return mesh(k) }, // a spot's pole and disc, 2.5 m up
     float() { const k = kit(THREE); k.c(0xf2f2ee).cyl(0.1, 0.12, 0.14, 8, 3).move(0, 0, -0.08, 0); const s = k.at(); k.c(0xe8703a).cyl(0.12, 0.05, 0.16, 8, 1).move(s, 0, 0.06, 0); return mesh(k) },
     bucket() { const k = kit(THREE); k.c(0xf2f2ee).cyl(0.13, 0.17, 0.3, 10, 2).c(0x2f6f8f).cyl(0.172, 0.176, 0.04, 10, 0).move(k.at() - 60, 0, 0.26, 0); return mesh(k) },
     seal() { const k = kit(THREE); k.c(0x4a4f55).cyl(0.2, 0.16, 0.26, 8, 1).c(0x5a6066).box(-0.08, 0.08, 0.1, 0.2, -0.26, -0.12).c(0x0c0d0f).box(-0.13, -0.08, 0.17, 0.22, -0.17, -0.13).box(0.08, 0.13, 0.17, 0.22, -0.17, -0.13); return mesh(k) },

@@ -417,7 +417,7 @@ export default function fish(city) {
     const row = (s) => `<button class="fs-it" data-s="${s.id}"><div>${esc(s.name)}<small class="fs-dim">${s.closed ? esc(s.blurb) : esc(bitingText(s))}</small></div><span>${s.closed ? 'no fishing' : s.crab != null ? s.kind + ' · crab' : s.kind}</span></button>`
     tool.panel.innerHTML = `<div class="fs-list"><h4>Today · ${esc(tideText())}</h4><div class="fs-dim">Walk to the water’s edge or out on a pier and a 🎣 prompt appears (F). Drop a crab trap off a pier (T). Under sail, F trolls a line.</div>
       <label><input type="checkbox" ${save.onMap ? 'checked' : ''}> Show the spots on the map</label><h4>Spots</h4><div class="sc" style="max-height:min(26vh,200px)">${spots.map(row).join('')}</div>${logHTML()}</div>`
-    tool.panel.querySelector('input').onchange = (e) => { save.onMap = e.target.checked; persist(); marks.visible = save.onMap; city.requestRender() }
+    tool.panel.querySelector('input').onchange = (e) => { save.onMap = e.target.checked; persist(); showMarks(); city.requestRender() }
     for (const b of tool.panel.querySelectorAll('[data-s]')) b.onclick = () => { // the map goes there
       const s = spots.find((q) => q.id === b.dataset.s)
       if (city.player || city.view.camera !== city.camera) return city.ui.toast(`${s.name}: ${s.blurb}`)
@@ -431,14 +431,24 @@ export default function fish(city) {
   { const g = cv.getContext('2d'); g.fillStyle = 'rgba(14,22,30,.86)'; g.beginPath(); g.arc(32, 32, 29, 0, 7); g.fill(); g.lineWidth = 3; g.strokeStyle = '#7fc4e8'; g.stroke(); g.font = '34px system-ui, "Apple Color Emoji", "Segoe UI Emoji", sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('🎣', 32, 35) }
   const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace
   const marks = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(spots.flatMap((s) => [s.x, 8, s.z]), 3)), new THREE.PointsMaterial({ map: tex, size: 26 * Math.min(2, devicePixelRatio), sizeAttenuation: false, transparent: true, depthTest: false, depthWrite: false, fog: false }))
-  marks.frustumCulled = false; marks.renderOrder = 5; marks.visible = save.onMap
+  marks.frustumCulled = false; marks.renderOrder = 5
+  const pole = M.marker(); pole.visible = false; city.scene.add(pole) // in a game: one depth-tested pole at the nearest spot, on foot or afloat
+  function showMarks() {
+    const P = city.player
+    marks.visible = save.onMap && !P
+    let best = null, bd = 250
+    if (P && (P.mode === 'foot' || P.mode === 'boat')) for (const s of spots) { const d = Math.hypot(s.x - P.x, s.z - P.z); if (d < bd) { bd = d; best = s } }
+    if (best) { pole.position.set(best.x, Math.max(city.world.heightAt(best.x, best.z), 0), best.z); pole.scale.setScalar(clamp(bd / 60, 1, 4)) }
+    if (pole.visible !== !!best) { pole.visible = !!best; city.requestRender() }
+  }
+  showMarks()
   city.overlay.add(marks)
 
   // ================================================================ the look-out: is the player at the water? (4 Hz, only while there is a player)
   let near = null, timer = 0
   function look() {
     const P = city.player
-    near = null
+    near = null; showMarks()
     let fishOn = false, trapText = ''
     if (P && !S) {
       if (P.mode === 'boat') { near = { place: placeAt(P.x, P.z, P.x, P.z), d: 16 }; near.place = { ...near.place, crab: undefined }; fishOn = true }
@@ -453,7 +463,7 @@ export default function fish(city) {
     if (fishOn) { const t = P.mode === 'boat' ? '🎣 Troll' : near.place.closed ? '🎣 Fish?' : '🎣 Fish'; if (el.chipFish.firstChild.data !== t) el.chipFish.firstChild.data = t }
     chips.hidden = !fishOn && !trapText
   }
-  const offPlayer = city.on('player', (p) => { clearInterval(timer); timer = 0; if (p) timer = setInterval(look, 250); else { stop(); look(); if (trap) { city.scene.remove(trap.m); trap = null } } })
+  const offPlayer = city.on('player', (p) => { clearInterval(timer); timer = 0; if (p) timer = setInterval(look, 250); else { stop(); look(); showMarks(); if (trap) { city.scene.remove(trap.m); trap = null } } })
 
   // ================================================================ keys
   const eat = (e) => { e.preventDefault(); e.stopImmediatePropagation() }
@@ -490,7 +500,7 @@ export default function fish(city) {
     dispose() {
       stop(); clearInterval(timer); offTiles(); offUnload(); offPlayer()
       removeEventListener('keydown', onKey, true); removeEventListener('keyup', onKeyUp, true); removeEventListener('blur', onBlur)
-      city.overlay.remove(marks); marks.geometry.dispose(); marks.material.dispose(); tex.dispose()
+      city.scene.remove(pole); pole.geometry.dispose(); city.overlay.remove(marks); marks.geometry.dispose(); marks.material.dispose(); tex.dispose()
       if (trap) city.scene.remove(trap.m)
       tool.remove(); css.remove(); chips.remove(); hud.remove(); card.remove(); delete city.fishing
       city.requestRender()
