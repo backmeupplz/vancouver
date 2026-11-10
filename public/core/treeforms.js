@@ -24,7 +24,7 @@ export function treeForm(THREE, shape, lo = false) {
   const ico = (d) => { if (!ICO.has(d)) ICO.set(d, new THREE.IcosahedronGeometry(1, d).attributes.position.array); return ICO.get(d) }
   // a lump of leaves: a jittered icosahedron (corners pushed in or out alike, so no cracks), each face shaded by
   // which way it faces (the underside darker) and `s` (lower lumps darker: the crown shades itself)
-  const lumps = [], limbEnds = [] // the crown's lumps (centre, radii, vertex range); where each limb ends, in which lump
+  const lumps = [], limbEnds = [] // the crown's closed lumps of leaves (centre, radii, vertex range); where each trunk and limb ends
   const blob = (x, y, z, rx, ry = rx, rz = rx, d = 0, s = 1) => {
     const L = { x, y, z, rx, ry, rz, s: k.at() }
     lumps.push(L)
@@ -45,16 +45,19 @@ export function treeForm(THREE, shape, lo = false) {
   // a cone of a conifer's tier: rim at y0 radius r, tip h above; `droop` bends the outer part of the layer down
   // (a shoulder at 70% of the radius), the rim ragged; the underside dark
   const tier = (y0, h, r, seg, s, droop = 0) => {
-    const from = k.at(), a0 = rnd() * T
+    const from = k.at(), a0 = rnd() * T, L = { s: from }
+    lumps.push(L)
     leaf(s)
     if (droop) { k.cyl(r * 0.7, 0, h * (1 - droop), seg, 0, a0, a0 + T).move(from, 0, y0 + h * droop, 0); const m = k.at(); leaf(s * 0.86); k.cyl(r, r * 0.7, h * droop, seg, 0, a0, a0 + T).move(m, 0, y0, 0) }
     else k.cyl(r, 0, h, seg, 0, a0, a0 + T).move(from, 0, y0, 0)
     leaf(s * 0.42)
     for (let i = 0; i < seg; i++) { const a = a0 + (i * T) / seg, b = a0 + ((i + 1) * T) / seg; k.tri([0, y0, 0], [Math.cos(b) * r, y0, -Math.sin(b) * r], [Math.cos(a) * r, y0, -Math.sin(a) * r]) }
     k.xf(from, (p) => { if (p.y < y0 + 1e-6 && p.x * p.x + p.z * p.z > r * r * 0.9) p.y -= h * 0.22 * hash(p.x, 0, p.z) })
+    L.e = k.at()
   }
-  const trunk = (top, r0, r1 = r0 * 0.7, hex) => { bark(hex); k.cyl(r0, r1, top, lo ? 5 : 6, 0) }
-  const limb = (a, b, r0, L, r1 = r0 * 0.6) => { bark(); k.rod(a, b, r0, r1, lo ? 4 : 5); limbEnds.push([...b, lumps.indexOf(L)]) }
+  const trunk = (top, r0, r1 = r0 * 0.7, hex) => { bark(hex); k.cyl(r0, r1, top, lo ? 5 : 6, 0); limbEnds.push([0, top, 0]) }
+  const rod = (a, b, r0, r1, seg) => { k.rod(a, b, r0, r1, seg); limbEnds.push(b) } // a crooked trunk's piece
+  const limb = (a, b, r0, L, r1 = r0 * 0.6) => { bark(); k.rod(a, b, r0, r1, lo ? 4 : 5); limbEnds.push(b) }
   // limbs fanning out of the trunk at y0 into the crown: each ends inside one of the lumps it is given (well inside: a
   // coarse lump's faces sit at 0.68 of its radius), the off-centre ones toward their own side, a central one spread
   // round it; so a limb reaches its leaves however the tree is sized or its crown pruned up (trees3d.js, the atlas)
@@ -79,7 +82,7 @@ export function treeForm(THREE, shape, lo = false) {
       if (!lo) blob(0.05, 0.9, 0, 0.26, 0.14, 0.26, 0, 1.06)
       break
     case 2: // spreading: a broad low dome on a stout trunk forking into limbs
-      trunk(0.42, 0.032, 0.026)
+      trunk(0.56, 0.032, 0.02) // (up into the dome: no stump under a hollow)
       blob(0, 0.72, 0, 0.36, 0.24, 0.36, 1, 1)
       limbs(lo ? 2 : 4, 0.3, 0.018, ring(lo ? 4 : 6, 0.32, 0.62, 0.12, 0.2, 0.17, 0.92))
       if (!lo) ring(3, 0.16, 0.86, 0.06, 0.2, 0.14, 1.06)
@@ -108,14 +111,14 @@ export function treeForm(THREE, shape, lo = false) {
       break
     }
     case 6: { // pine: a bare crooked trunk, flat clouds of needles on its branches
-      bark(); k.rod([0, 0, 0], [0.04, 0.5, 0], 0.032, 0.026, lo ? 5 : 6); k.rod([0.04, 0.5, 0], [-0.03, 0.88, 0.02], 0.026, 0.016, lo ? 5 : 6)
+      bark(); k.rod([0, 0, 0], [0.04, 0.5, 0], 0.032, 0.026, lo ? 5 : 6); rod([0.04, 0.5, 0], [-0.03, 0.88, 0.02], 0.026, 0.016, lo ? 5 : 6)
       const clumps = lo ? [[0, 0.88, 0, 0.3], [0.26, 0.66, 0.1, 0.24], [-0.24, 0.6, -0.14, 0.22]]
         : [[0, 0.9, 0, 0.3], [0.28, 0.7, 0.08, 0.24], [-0.26, 0.62, -0.12, 0.23], [0.06, 0.74, -0.3, 0.2], [-0.14, 0.8, 0.26, 0.2]]
       for (const [x, y, z, r] of clumps) { const L = blob(x, y, z, r, r * 0.45, r, x || z ? 0 : 1, 0.82 + y * 0.2); if (x || z) limb([0.02, y - 0.12, 0], [x * 0.8, y - 0.02, z * 0.8], 0.013, L) }
       break
     }
     case 7: { // palm: a ringed trunk, arching fronds
-      bark(PALM_BARK); k.rod([0, 0, 0], [0.03, 0.45, 0], 0.035, 0.03, 6); k.rod([0.03, 0.45, 0], [0, 0.86, 0], 0.03, 0.026, 6)
+      bark(PALM_BARK); k.rod([0, 0, 0], [0.03, 0.45, 0], 0.035, 0.03, 6); rod([0.03, 0.45, 0], [0, 0.86, 0], 0.03, 0.026, 6)
       const n = lo ? 7 : 11
       for (let i = 0; i < n; i++) {
         const a = (i * T) / n + rnd() * 0.3, up = i % 2 ? 0.08 : 0.14, len = 0.5 + rnd() * 0.06, ca = Math.cos(a), sa = Math.sin(a)
@@ -132,7 +135,7 @@ export function treeForm(THREE, shape, lo = false) {
       break
     }
     case 8: // vase: limbs fanning up and out from a short trunk to a broad flat-topped crown
-      trunk(0.3, 0.03, 0.026)
+      trunk(0.8, 0.03, 0.012) // (a leader up the middle into the crown: no stump under a hollow)
       limbs(lo ? 3 : 5, 0.26, 0.018, ring(lo ? 4 : 7, 0.3, 0.74, 0.08, 0.22, 0.16, 0.92))
       blob(0, 0.84, 0, 0.32, 0.17, 0.32, 1, 1.05)
       break
@@ -148,8 +151,8 @@ export function treeForm(THREE, shape, lo = false) {
   let top = 0, wide = 0
   for (let i = 0; i < part.length; i++) { top = Math.max(top, P[i * 3 + 1]); if (!part[i]) wide = Math.max(wide, Math.hypot(P[i * 3], P[i * 3 + 2])) }
   g.scale(0.5 / wide, 1 / top, 0.5 / wide)
-  // for tools/trees_check.mjs: each limb's end (unit size) and the lump it ends in (its vertex range)
-  g.userData = { limbs: limbEnds.map(([x, y, z, l]) => [(x * 0.5) / wide, y / top, (z * 0.5) / wide, l]), lumps: lumps.map((L) => [L.s, L.e]) }
+  // for tools/trees_check.mjs: where each trunk and limb ends (unit size), each closed lump of leaves' vertex range
+  g.userData = { limbs: limbEnds.map(([x, y, z]) => [(x * 0.5) / wide, y / top, (z * 0.5) / wide]), lumps: lumps.map((L) => [L.s, L.e]) }
   g.setAttribute('color', g.attributes.aCol)
   g.setAttribute('crown', new THREE.Float32BufferAttribute(part.map((p) => 1 - p), 1))
   for (const a of ['aCol', 'aPart', 'aSwing']) g.deleteAttribute(a)
