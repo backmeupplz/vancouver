@@ -64,14 +64,20 @@ export function wallGrid(P, starts, ground) {
   }
   for (let i = 0; i < N.length; i += 2) { const l = Math.hypot(N[i], N[i + 1]) || 1e-9; N[i] /= l; N[i + 1] /= l }
   const G = new Float32Array(P.length / 7)
-  for (let i = 0; i < G.length; i++) { const o = Math.min(P[i * 7 + 4], 4); G[i] = ground ? ground(P[i * 7] + N[i * 2] * o, P[i * 7 + 1] + N[i * 2 + 1] * o) : NaN }
+  for (let i = 0; i < G.length; i++) { const o = Math.min(P[i * 7 + 4], 4); G[i] = ground ? ground(P[i * 7] + N[i * 2] * o, P[i * 7 + 1] + N[i * 2 + 1] * o, i) : NaN }
   const segRun = new Int32Array(seg.length)
   for (let k = 0, r = 0; k < seg.length; k++) { while (seg[k] >= starts[r + 1]) r++; segRun[k] = r }
   return { P, N, G, runs: Int32Array.from(starts), seg: Int32Array.from(seg), segRun, start, idx: Int32Array.from(lists.flat()) }
 }
+// a wall within reach of the 32 m cell of (x, y): the ground there may be the wall's, not the terrain's alone
+export const wallNear = (W, x, y) => { const c = Math.max(0, Math.min(WALL_N - 1, Math.floor(y / WALL_C) + 1)) * WALL_N + Math.max(0, Math.min(WALL_N - 1, Math.floor(x / WALL_C) + 1)); return W.start[c + 1] > W.start[c] }
 // the drawn ground at tile-local (x, y) over the terrain's g there (tools/seawall.py height(), the same numbers): low
 // true for the ground classes at a wall's foot (water, sand) and what lies on them, else the walk's side (to 0.2 m out
 // over the wall's line: tools/tiles.py cuts the ground there, under the face)
+// The edge (#607, sitting on it): wallHeight(W, g, x, y) is the walk's top as far as 0.2 m out past the wall's line and
+// the foot beyond; wallHeight(W, g, x, y, true) the water or sand at its foot from 0.4 m in of the line outward. The
+// coping stone (tile-worker.js seawalls()) lies over the line from 0.25 m out to 0.45 m in, its top 0.06 m over the
+// walk's; the face stands 0.22 m out, down past the foot
 const B_IN = 10, LOW = 2, LOW_B = 8, FADE = 3
 export function wallHeight(W, g, x, y, low) {
   const c = Math.max(0, Math.min(WALL_N - 1, Math.floor(y / WALL_C) + 1)) * WALL_N + Math.max(0, Math.min(WALL_N - 1, Math.floor(x / WALL_C) + 1))

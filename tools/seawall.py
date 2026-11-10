@@ -14,9 +14,9 @@
 import glob, math, os, pickle, sys, time
 import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
-from common import densify, hr_lookup, line_kind, hnum, latlon, xy
+from common import densify, hr_lookup, line_kind, hnum, latlon, xy, L0
 
-OUT = 'data/seawalls.npz'
+OUT = os.environ.get('SEAWALLS', 'data/seawalls.npz')  # (a test bake's own: tools/tiles.py reads the same)
 STEP = 2.0  # metres between a run's points
 REACH = 18.0  # the furthest from the coastline a path may start and still be the seawall's walk
 GAP = 7.0  # metres of grass, planting or bench strip between two paths of one walk (the walk and its bike lane)
@@ -30,6 +30,7 @@ LOW, LOW_B = 2.0, 8.0  # the water at the wall's foot: flat this far out, back t
 SLIT = 0.2  # metres out from the line the walk's ground still is (tiles.py cuts the ground there: the face covers the cut)
 FADE = 3.0  # metres over which the nearest of two walls takes over from the other
 FOOT = 0.0  # the sea, as the tiles draw it (tiles.py flat_water)
+TWIN = 6.0  # metres: nearer than this along another edge's wall a wall is that wall again
 WALK = {'footway': 2.2, 'cycleway': 2.6, 'pedestrian': 7.0, 'path': 1.6}  # tiles.py road_shape's widths
 PAVED = {'asphalt', 'concrete', 'paved', 'paving_stones', 'concrete:plates', 'sett', 'compacted', 'fine_gravel'}  # a path, not a trail
 RAILS = {'fence', 'handrail', 'guard_rail', 'railing'}
@@ -113,8 +114,8 @@ def fit(P, n, z, w, pw, plines, ptree):
         _, k = near.query(Q)
         o = ((Q - P[k]) * n[k]).sum(1); a = ((Q - P[k]) * t[k]).sum(1)
         sel = (np.abs((d * t[k]).sum(1)) > 0.7) & (np.abs(a) <= STEP) & (o > -4) & (o < REACH + 2)
-        if sel.any(): S.append(np.c_[k[sel], o[sel], hr_lookup(Q[sel, 0], Q[sel, 1], 1), np.full(sel.sum(), pw[q][1] / 2)])
-    S = np.concatenate(S) if S else np.zeros((0, 4))
+        if sel.any(): S.append(np.c_[k[sel], o[sel], hr_lookup(Q[sel, 0], Q[sel, 1], 1), np.full(sel.sum(), pw[q][1] / 2), Q[sel]])
+    S = np.concatenate(S) if S else np.zeros((0, 6))
     S = S[np.isfinite(S[:, 2])]
     by = [S[S[:, 0] == k] for k in range(m)]
     # (to start: the ground a metre to 4 m in, the walk's paths' own LiDAR read low where one is mapped out over the edge)
@@ -134,6 +135,12 @@ def fit(P, n, z, w, pw, plines, ptree):
         for k in range(m):
             # what the walk stands on from its edge in: its paths (but those moved in), the ground to 4 m in; as far as one top fits them
             s = by[k][by[k][:, 1] - by[k][:, 3] >= ed[k] + CLEAR]
+            # (and a path mapped out at or over the edge where tools/tiles.py off_walls will put it: against the line, on the ground there)
+            mv = by[k][(by[k][:, 1] - by[k][:, 3] < ed[k] + CLEAR) & (by[k][:, 1] > ed[k] - SHIFT - 1)]
+            if len(mv):
+                o2 = ed[k] + CLEAR + 2 * mv[:, 3]; z2 = np.min([np.interp(o2 - mv[:, 3], off, D[q]) for q in range(max(k - 1, 0), min(k + 2, m))], 0) - 0.3  # (the lowest of the 2 m cells it runs over)
+                g2 = (o2 - mv[:, 1])[:, None] * n[k]; z2 = np.fmin(z2, hr_lookup(mv[:, 4] + g2[:, 0], mv[:, 5] + g2[:, 1], 1) - 0.3)  # (and the ground at its own moved points)
+                s = np.r_[s, np.c_[mv[:, 0], o2 - mv[:, 3], z2, mv[:, 3], mv[:, 4:6]][np.isfinite(z2)]]
             j = (off >= ed[k] + 0.5) & (off <= ed[k] + min(ext[k], 4.0)) & np.isfinite(D[k])
             v = np.r_[np.c_[s[:, 1] - s[:, 3], s[:, 2], np.ones(len(s))], np.c_[off[j], D[k][j], np.zeros(j.sum())]]
             v = v[np.argsort(v[:, 0])]
@@ -155,7 +162,29 @@ def fit(P, n, z, w, pw, plines, ptree):
         T = np.clip(T, lo, hi_)
         W = ext
     W = np.maximum(uniform_filter1d(minimum_filter1d(np.minimum(w - ed, W), 5, mode='nearest'), 5, mode='nearest'), 1.0)
+    # the walk reaches in only as far as the ground stays at its top: a cliff or a bank behind a narrow walk (Stanley
+    # Park), a second level with the bike path on it, are not the walk (from where the ground first is at the top: the
+    # 2 m LiDAR smears the edge's own cells with the sea)
+    lim = np.full(m, np.inf)
+    for k in range(m):
+        j = np.flatnonzero(off >= ed[k] + 0.5); on = np.abs(D[k][j] - T[k]) <= BAND - 0.25
+        if not on.any(): continue
+        a = int(np.argmax(on)); far = np.flatnonzero(~on[a:] & np.isfinite(D[k][j][a:]))
+        if len(far): lim[k] = off[j][a + far[0]] - 0.5 - ed[k]
+    W = np.maximum(np.minimum(W, minimum_filter1d(lim, 3, mode='nearest')), 1.0)
     return ed, T, W
+
+
+def off_edges(P, clear=0.8):
+    """a run's points kept clear of the detail tiles' edges (every L0 metres): a wall along an edge, or crossing it at
+    a low angle, has its walk in one tile and the water at its foot in the next over metres of their shared edge (a
+    step as high as the wall in the ground between them); moved at most clear, a run crosses an edge in one step"""
+    P = P.copy()
+    for ax in (0, 1):
+        r = (P[:, ax] + L0 / 2) % L0 - L0 / 2
+        for a, b in runs_of(np.abs(r) < clear, 0, 1):  # (a stretch along the edge whole to the side most of it is on: no zigzag over it)
+            P[a:b, ax] += (clear if r[a:b].sum() >= 0 else -clear) - r[a:b]
+    return P
 
 
 def unfold(P, Q):
@@ -202,6 +231,7 @@ def detect(coast, paths, sand, rails, why=None):
             r = np.asarray(poly.exterior.coords)
             if len(r) >= 4: edges.append((-1 - k, (r if poly.exterior.is_ccw else r[::-1])[::-1].tolist(), True))
     out = []
+    lines = []  # (edge, line) of the walls found so far
     taken = None  # the coastline's walls, once found: a beach's edge along one is that wall, not a second one over it
     for wid, pts, beach in edges:
         if beach and taken is None: taken = STRtree([LineString(r[1]) for r in out]) if out else False
@@ -270,14 +300,25 @@ def detect(coast, paths, sand, rails, why=None):
             w = np.minimum(uniform_filter1d(maximum_filter1d(w, 7), 7), EDGE)
             ed, z, w = fit(P[s:e], n[s:e], z, w, pw, plines, ptree)
             f = np.minimum(uniform_filter1d(median_filter(f, 9, mode='nearest'), 5, mode='nearest'), z - 0.8)
-            Pw = P[s:e] + n[s:e] * ed[:, None]
+            Pw = off_edges(P[s:e] + n[s:e] * ed[:, None])
             rail = np.zeros(e - s, bool)
             if rtree is not None:
                 ra, rb = rtree.query(shapely.points(Pw + 0.6 * n[s:e]), predicate='dwithin', distance=2.0)
                 rail[ra] = True
                 rail = uniform_filter1d(rail.astype(float), 5) > 0.5
             keep = unfold(P[s:e], Pw)  # (moved in round a tight bend the line folds over itself: those points go)
-            if keep.sum() >= 2: out.append((wid, Pw[keep], z[keep], w[keep], rail[keep], f[keep]))
+            # one wall per edge: a beach's landward edge drawn metres out from the coastline's wall is moved in onto the
+            # same edge of the ground (two faces and copings a hand apart, the walk between them cross-faded with the
+            # sand at the other's foot); the stretch along a wall already found goes, what is left stands if long enough
+            last = None  # (and a notch in the coastline, a slip's corner drawn in a metre: no spike a hand wide in the face)
+            for i in np.flatnonzero(keep):
+                if last is not None and np.hypot(*(Pw[i] - Pw[last])) < 1.0: keep[i] = False
+                else: last = i
+            other = [g for q, g in lines if q != wid]
+            if other: keep &= shapely.distance(shapely.points(Pw), shapely.MultiLineString(other)) > TWIN
+            for a, b in runs_of(keep, 2, int(16 / STEP)):
+                k = np.flatnonzero(keep[a:b]) + a
+                out.append((wid, Pw[k], z[k], w[k], rail[k], f[k])); lines.append((wid, LineString(Pw[k])))
     return out
 
 
@@ -357,6 +398,7 @@ def bake():
     ro = np.cumsum([0] + [len(r[1]) for r in R])
     pts = np.concatenate([r[1] for r in R]).astype(np.float32)
     np.savez_compressed(OUT, xy=pts, top=np.concatenate([r[2] for r in R]).astype(np.float32), reach=np.concatenate([r[3] for r in R]).astype(np.float32),
+                        gw=np.concatenate([walk_ground(r[1], r[3], r[2]) for r in R]).astype(np.float32),
                         rail=np.concatenate([r[4] for r in R]).astype(bool), foot=np.concatenate([r[5] for r in R]).astype(np.float32), ro=ro.astype(np.int32),
                         kit=np.array(K, np.float32).reshape(-1, 4))
     km = sum(np.hypot(*np.diff(r[1], axis=0).T).sum() for r in R) / 1000
@@ -371,6 +413,25 @@ def runs(path=OUT):
     d = np.load(path)
     return [(d['xy'][a:b].astype(float), d['top'][a:b].astype(float), d['reach'][a:b].astype(float), d['rail'][a:b], d['foot'][a:b].astype(float))
             for a, b in zip(d['ro'][:-1], d['ro'][1:])]
+
+
+def walk_ground(P, reach, top):
+    """per point of a run the ground on its walk, min(reach, 4) m in from its line: what the walk blends to toward the
+    run's ends. The LiDAR's (a median along the run), not a tile's terrain: every tile a run passes draws the same blend
+    (each read its own terrain and, past its edge, its 16 m margin: a step in the ground across the tiles' edges)"""
+    from scipy.ndimage import median_filter
+    Q = P + vnormals(P) * np.minimum(reach, 4.0)[:, None]
+    z = hr_lookup(Q[:, 0], Q[:, 1], 1)
+    return median_filter(np.where(np.isfinite(z), z, top), 5, mode='nearest')
+
+
+def walk_grounds(path=None):
+    """per run its walk_ground(), from data/seawalls.npz (made here for a file from before it had them)"""
+    path = path or OUT
+    if not os.path.exists(path): return []
+    d = np.load(path)
+    if 'gw' in d: return [d['gw'][a:b].astype(float) for a, b in zip(d['ro'][:-1], d['ro'][1:])]
+    return [walk_ground(P, reach, top) for P, top, reach, _, _ in runs(path)]
 
 
 def ends(P):
@@ -441,7 +502,7 @@ def inland(P, reach, ground):
 
 def tile_walls(path):
     """a baked detail tile's seawall pieces (its SEAW section, tools/tiles.py seawall_section) as height() reads them:
-    [(points, top, reach, rail, foot, end weight)]"""
+    [(points, top, reach, rail, foot, end weight[, the walk's ground: its SEAG section])]"""
     import struct
     from common import read_tile
     b, ox, oy, size, sec, ring = read_tile(path)
@@ -453,6 +514,9 @@ def tile_walls(path):
         n = struct.unpack_from('<I', b, o)[0]; o += 4
         a = np.frombuffer(b, np.dtype([('x', '<i2'), ('y', '<i2'), ('top', '<i2'), ('foot', '<i2'), ('reach', 'u1'), ('f', 'u1'), ('rail', 'u1')]), n, o); o += 11 * n
         out.append((np.c_[a['x'] * k + ox, a['y'] * k + oy], a['top'] / 100, a['reach'] / 10, a['rail'].astype(bool), a['foot'] / 100, a['f'] / 255))
+    if 'SEAG' in sec:
+        g = np.frombuffer(b, '<i2', sum(len(w[0]) for w in out), sec['SEAG'][0]) / 100; at = np.cumsum([0] + [len(w[0]) for w in out])
+        out = [(*w, g[a:c]) for w, a, c in zip(out, at[:-1], at[1:])]
     return out
 
 

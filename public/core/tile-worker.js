@@ -3,7 +3,7 @@
 // Walls by what they face and the single-arm street lights follow Slop Toronto's rules (MIT, © 2026 Mr.doob, © 2026 John
 // Fewell; THIRD_PARTY.md).
 import earcut, { refine as delaunay } from '../vendor/earcut.js'
-import { mulberry32 as mulberry, inPoly, sampleGrid, sampleTerr, wallGrid, wallHeight, gores, stripped } from './util.js'
+import { mulberry32 as mulberry, inPoly, sampleGrid, sampleTerr, wallGrid, wallHeight, wallNear, gores, stripped } from './util.js'
 const GROUND_LIFT = 0 // the ground is one non-overlapping layer (tools/tiles.py), so no class needs lifting
 const KIND = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living', 'pedestrian', 'footway', 'cycleway',
   'path', 'steps', 'track', 'rail', 'lightrail', 'runway', 'taxiway']
@@ -202,7 +202,8 @@ function terrain(t) {
       starts.push(P.length / 7)
     }
     const e = out.ext // (the walk's terrain a few metres in may lie in the next tile)
-    out.wall = wallGrid(Float32Array.from(P), starts, (x, y) => out.f && x >= 0 && y >= 0 && x <= t.size && y <= t.size ? sampleTerr(out, x, y) : e ? sampleGrid(e.h, e.n, e.size, x + e.off, y + e.off) : sampleGrid(h, n, t.size, x, y))
+    const sg = t.sections.SEAG // the walks' ground (tools/seawall.py walk_ground): the same in every tile a run passes; older tiles: this tile's terrain
+    out.wall = wallGrid(Float32Array.from(P), starts, sg ? (x, y, i) => dv.getInt16(sg.off + 2 * i, true) / 100 : (x, y) => out.f && x >= 0 && y >= 0 && x <= t.size && y <= t.size ? sampleTerr(out, x, y) : e ? sampleGrid(e.h, e.n, e.size, x + e.off, y + e.off) : sampleGrid(h, n, t.size, x, y))
   }
   return out
 }
@@ -271,10 +272,16 @@ function ground(t, terr, level) {
     if (ax > bx || (ax === bx && ay > by)) return bends(bx, by, ax, ay, c, tol) // one way along an edge, whichever side asks
     const L = Math.hypot(bx - ax, by - ay)
     if (L > cap) return true
-    if (cap === Infinity || L < 1.5) return false
-    const fine = fineOn(terr, ax, ay, bx, by)
-    if (fine && L < 2) return false // (the offsets have nothing finer than their 2 m)
-    const ha = heightAt(terr, ax, ay), hb = heightAt(terr, bx, by), k = Math.ceil(L / (fine ? 1 : cell / 2)) // (the terrain, also under a pier: its border with the water is split alike on both sides; every metre over the 2 m offsets)
+    // by a seawall (where it moves the ground: its walk, its foot, its blend into a bank or a cliff) the ground bends
+    // within a cell: followed to a centimetre, down to half-metre edges, so two tiles whose points along their shared edge
+    // differ still draw the same ground there (a 5 cm step showed between them)
+    const mv = (x, y) => Math.abs(heightAt(terr, x, y) - sampleTerr(terr, x, y)) > 0.01
+    const wall = terr.wall && L >= 0.5 && wallNear(terr.wall, (ax + bx) / 2, (ay + by) / 2) && (mv(ax, ay) || mv(bx, by) || mv((ax + bx) / 2, (ay + by) / 2))
+    if (wall) tol = Math.min(tol, 0.01)
+    else if (cap === Infinity || L < 1.5) return false
+    const fine = wall || fineOn(terr, ax, ay, bx, by)
+    if (fine && !wall && L < 2) return false // (the offsets have nothing finer than their 2 m)
+    const ha = heightAt(terr, ax, ay), hb = heightAt(terr, bx, by), k = Math.ceil(L / (wall ? 0.25 : fine ? 1 : cell / 2)) // (the terrain, also under a pier: its border with the water is split alike on both sides; every metre over the 2 m offsets)
     for (let i = 1; i < k; i++) { const f = i / k; if (Math.abs(heightAt(terr, ax + (bx - ax) * f, ay + (by - ay) * f) - ha - (hb - ha) * f) > tol) return true }
     return false
   }
@@ -1674,9 +1681,10 @@ function railings(W, Bal, lines, terr) {
   }
 }
 // the seawalls (tools/seawall.py, terrain()'s wall): a stone face from the walk's edge (the drawn ground on top) down
-// past the water or sand at its foot, a coping stone along its top, and a railing on it where OSM maps one. Its own
-// tile's stretch only (the pieces reach 60 m past it for the ground)
-const STONE = lin(0x9d978b), COPING = lin(0xc8c2b4), SW_FACE = 18 // materials.js pattern 18: stone courses
+// past the water or sand at its foot (SW_DEEP under it: under the lowest tide, #605), a coping stone along its top
+// (0.7 m wide over the line, 6 cm proud of the walk), closed at the ends of each stretch that stands, and a railing on
+// it where OSM maps one. Its own tile's stretch only (the pieces reach 60 m past it for the ground)
+const STONE = lin(0x9d978b), COPING = lin(0xc8c2b4), SW_FACE = 18, SW_DEEP = 3 // materials.js pattern 18: stone courses
 function seawalls(W, Bal, WL, terr) {
   const P = WL.P, R = WL.runs, inside = (x, y) => x >= 0 && y >= 0 && x <= terr.size && y <= terr.size
   for (let r = 0; r < R.length - 1; r++) {
@@ -1685,19 +1693,28 @@ function seawalls(W, Bal, WL, terr) {
     const side = sides(xy), top = [], low = []
     for (let i = 0; i < n; i++) { top.push(heightAt(terr, xy[i * 2], xy[i * 2 + 1], false)); low.push(heightAt(terr, xy[i * 2], xy[i * 2 + 1], true)) }
     const at = (i, off, y) => [xy[i * 2] + side[i][0] * off, y, -(xy[i * 2 + 1] + side[i][1] * off)]
+    const stands = (i) => i >= 0 && i < n - 1 && Math.max(top[i] - low[i], top[i + 1] - low[i + 1]) >= 0.3
     let u = 0
     for (let i = 0; i < n - 1; i++) {
       const j = i + 1, len = Math.hypot(xy[j * 2] - xy[i * 2], xy[j * 2 + 1] - xy[i * 2 + 1]); u += len
       const mx = (xy[i * 2] + xy[j * 2]) / 2, my = (xy[i * 2 + 1] + xy[j * 2 + 1]) / 2
-      if (!inside(mx, my) || Math.max(top[i] - low[i], top[j] - low[j]) < 0.3) continue
+      if (!inside(mx, my) || !stands(i)) continue
       const nx = side[i][0] + side[j][0], ny = side[i][1] + side[j][1], l = Math.hypot(nx, ny) || 1, out = [-nx / l, 0, ny / l], up = [0, 1, 0], inw = [nx / l, 0, -ny / l]
-      const c0 = top[i] + 0.06, c1 = top[j] + 0.06, f0 = Math.min(low[i], top[i] - 0.3) - 0.8, f1 = Math.min(low[j], top[j] - 0.3) - 0.8, seed = (o + i) % 7 / 7
+      const c0 = top[i] + 0.06, c1 = top[j] + 0.06, f0 = Math.min(low[i], top[i] - 0.3) - SW_DEEP, f1 = Math.min(low[j], top[j] - 0.3) - SW_DEEP, seed = (o + i) % 7 / 7
       const sw = (uu, z) => [SW_FACE, uu, z, seed]
       // (the face just out past the cut in the ground along the line, tools/tiles.py; the coping over the cut)
       quad(W, at(i, -0.22, f0), at(j, -0.22, f1), at(j, -0.22, c1), at(i, -0.22, c0), STONE, out, sw(u - len, f0), sw(u, f1), sw(u, c1), sw(u - len, c0))
       quad(W, at(i, -0.25, c0), at(j, -0.25, c1), at(j, 0.45, c1), at(i, 0.45, c0), COPING, up, ROOFW(0.5))
       quad(W, at(i, -0.25, c0 - 0.12), at(j, -0.25, c1 - 0.12), at(j, -0.25, c1), at(i, -0.25, c0), COPING, out, ROOFW(0.5))
       quad(W, at(i, 0.45, top[i] - 0.05), at(j, 0.45, top[j] - 0.05), at(j, 0.45, c1), at(i, 0.45, c0), COPING, inw, ROOFW(0.5))
+      // where the wall starts or stops standing (a run's end, where it fades into the ground): the stone's end closed
+      const ax = (xy[j * 2] - xy[i * 2]) / (len || 1), ay = (xy[j * 2 + 1] - xy[i * 2 + 1]) / (len || 1)
+      for (const [e, k, c, f, sg] of [[i - 1, i, c0, f0, -1], [j, j, c1, f1, 1]]) {
+        if (stands(e)) continue
+        const end = [sg * ax, 0, -sg * ay]
+        quad(W, at(k, -0.25, c - 0.12), at(k, 0.45, top[k] - 0.05), at(k, 0.45, c), at(k, -0.25, c), COPING, end, ROOFW(0.5))
+        quad(W, at(k, -0.22, f), at(k, 0.2, f), at(k, 0.2, c), at(k, -0.22, c), STONE, end, sw(0, f), sw(0.42, f), sw(0.42, c), sw(0, c))
+      }
       if (P[(o + i) * 7 + 6] && P[(o + j) * 7 + 6]) {
         const rw = (uu, h) => [12, uu, h, 0.5] // materials.js pattern 12 (railings())
         for (const want of [out, inw]) quad(Bal, at(i, 0.2, c0), at(j, 0.2, c1), at(j, 0.2, c1 + 1.1), at(i, 0.2, c0 + 1.1), RAILING, want, rw(u - len, 0.06), rw(u, 0.06), rw(u, 1.16), rw(u - len, 1.16))

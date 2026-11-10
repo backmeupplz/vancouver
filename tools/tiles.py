@@ -141,7 +141,7 @@ TREES = city_trees()
 SECTIONS = lidar_sections()
 BEACH = np.load('data/beachlogs.npz') if os.path.exists('data/beachlogs.npz') else None  # tools/beachlogs.py
 import seawall
-WALLS = [(P, top, foot, reach, seawall.ends(P), rail) for P, top, reach, rail, foot in seawall.runs()]  # tools/seawall.py, optional
+WALLS = [(P, top, foot, reach, seawall.ends(P), rail, gw) for (P, top, reach, rail, foot), gw in zip(seawall.runs(), seawall.walk_grounds())]  # tools/seawall.py, optional
 KIT = np.load(seawall.OUT)['kit'] if os.path.exists(seawall.OUT) else np.zeros((0, 4))  # the beach things OSM maps (tools/seawall.py amenities)
 print('inputs ready', len(TREES), 'city trees', len(SECTIONS), 'lidar sections', flush=True)
 
@@ -2695,9 +2695,10 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     sw = seawalls_near(tx, ty, size) if detail else []
     if sw:  # the ground cut along each seawall's line (tools/seawall.py SLIT): the walk's edge on one side, the water or sand at its foot on the other, the face between
         # (where the page draws the face: tile-worker.js seawalls(), the wall at least 0.3 m over its foot)
-        hi = [F * (top - foot) for P, top, foot, reach, F, rail in sw]
+        hi = [F * (top - foot) for P, top, foot, reach, F, *_ in sw]
         slit = unary_union([LineString(P[k:k + 2]).buffer(seawall.SLIT * 0.75, quad_segs=2) for (P, *_), d in zip(sw, hi) for k in range(len(P) - 1) if max(d[k], d[k + 1]) >= 0.3])
-        per = {k: g.difference(slit) for k, g in per.items()}
+        slit = edge_square(slit, tb, cut=True)  # (a slit a step wide there is a part too thin to keep: it joined the walk in one tile, the water in the next)
+        per = {k: g.difference(slit) for k, g in wall_sides(per, sw, hi, tb).items()}
     per = ground_partition(per, tx, ty, out.k, holes if detail else None)
     for k in GROUND:
         if k not in per: continue
@@ -2794,7 +2795,9 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     lb = [struct.pack('<hhBBBB', *out.q(x, y), int(round(a / (2 * math.pi) * 256)) & 255, int(min(255, round(ln * 10))), int(min(255, round(d * 100))), k)
           for x, y, a, ln, d, k in beach if tx <= x < tx + size and ty <= y < ty + size]
     if lb: out.section('LOGS', struct.pack('<I', len(lb)) + b''.join(lb))
-    if sw: out.section('SEAW', seawall_section(out, sw))
+    if sw:
+        out.section('SEAW', seawall_section(out, sw))
+        out.section('SEAG', np.round(np.concatenate([w[6] for w in sw]) * 100).astype('<i2').tobytes())  # (the walks' ground, tools/seawall.py walk_ground: per point, 1/100 m)
     return runs > 0 or nb > 0 or len(sel) > 0
 
 
@@ -2803,7 +2806,8 @@ WALL_M = 60  # metres round a detail tile its seawalls are kept to (the page's c
 
 def seawalls_near(x0, y0, size, m=WALL_M):
     """the pieces of the seawalls (WALLS) within m of a tile: [(points, top, foot, reach, end weight, rail)], each piece
-    a run's points in reach and one more each side (the end weight is the whole run's: a piece's cut is no end)"""
+    a run's points in reach and one more each side (the end weight is the whole run's: a piece's cut is no end), and the
+    walk's ground per point (seawall.walk_ground)"""
     out = []
     for R in WALLS:
         P = R[0]
@@ -2812,6 +2816,65 @@ def seawalls_near(x0, y0, size, m=WALL_M):
         for r in np.split(k, np.flatnonzero(np.diff(k) > 1) + 1):
             s_, e_ = max(0, r[0] - 1), min(len(P), r[-1] + 2)
             if e_ - s_ >= 2: out.append(tuple(v[s_:e_] for v in R))
+    return out
+
+
+def edge_square(g, tb, cut=False):
+    """a seawall's shape (its walk, its foot, the slit along its line) squared to the tile's edges: within band of an
+    edge it is what it is on the edge itself, carried straight in. ground_partition() puts every border within two grid
+    steps of the tile's edge onto it; a wall's line crossing the edge at a low angle then reached it metres apart in
+    the two tiles, the walk in one meeting the water at the foot in the other: a step as high as the wall in the ground
+    across the edge. Squared, both tiles have the same borders at the same points of the edge"""
+    if g.is_empty: return g
+    x0, y0, x1, y1 = tb.bounds
+    q = GROUND_SNAP * (x1 - x0) / 16383  # ground_partition()'s grid: the borders on its lines, where its rounding leaves them in both tiles
+    sn = lambda c: (x0 + round((c[0] - x0) / q) * q, y0 + round((c[1] - y0) / q) * q)
+    band = 3 * q  # (clear of the two steps that are put on the edge)
+    for line, strip, rect in ((LineString([(x0, y0), (x1, y0)]), box(x0, y0, x1, y0 + band), lambda a, b: box(a[0], y0, b[0], y0 + band)),
+                              (LineString([(x0, y1), (x1, y1)]), box(x0, y1 - band, x1, y1), lambda a, b: box(a[0], y1 - band, b[0], y1)),
+                              (LineString([(x0, y0), (x0, y1)]), box(x0, y0, x0 + band, y1), lambda a, b: box(x0, a[1], x0 + band, b[1])),
+                              (LineString([(x1, y0), (x1, y1)]), box(x1 - band, y0, x1, y1), lambda a, b: box(x1 - band, a[1], x1, b[1]))):
+        if not g.intersects(strip): continue
+        if cut: g = g.difference(strip); continue  # (the slit: none by the edge, where the walk and the foot meet on one line)
+        on = g.intersection(line)
+        rects = [rect(sn(p.coords[0]), sn(p.coords[-1])) for p in getattr(on, 'geoms', [on]) if p.geom_type == 'LineString' and p.length > 0]
+        rects = [r for r in rects if r.area > 0]
+        g = unary_union([g.difference(strip)] + rects)
+    return g
+
+
+def wall_sides(per, sw, hi, tb):
+    """the ground classes each on its side of the seawalls (per: class -> geometry; hi: per piece how high it stands,
+    as the slit's): OSM's beaches and coastline cross a wall's line by a metre here and there, the line itself is moved
+    in to the ground's edge, and the page draws the sand and water at a wall's foot and the rest on its walk (core/
+    util.js wallHeight), so a class on the wrong side is a spike of sand up the face, a pool on the walk, a wedge of
+    lawn in the sea. Sand and water on a walk (to its reach) become its paving; at the foot (seawall.LOW out, where
+    the ground is the foot's) everything but a pier becomes the water, or the sand where the wall stands on a beach"""
+    walk, wet, dry = [], [], []
+    for (P, top, foot, reach, *_), d in zip(sw, hi):
+        N = seawall.vnormals(P)
+        for k in range(len(P) - 1):
+            if max(d[k], d[k + 1]) < 0.3: continue
+            a, b, na, nb = P[k], P[k + 1], N[k], N[k + 1]
+            walk.append(Polygon([a, b, b + nb * reach[k + 1], a + na * reach[k]]))
+            (dry if min(foot[k], foot[k + 1]) > 0.05 else wet).append(Polygon([a, b, b - nb * seawall.LOW, a - na * seawall.LOW]))
+    if not walk: return per
+    U = lambda Q: unary_union([q if q.is_valid else q.buffer(0) for q in Q]) if Q else Polygon()
+    walk = edge_square(U(walk), tb); dry = edge_square(U(dry), tb).difference(walk); wet = edge_square(U(wet), tb).difference(walk).difference(dry)
+    out = dict(per); moved = {'walk': [], 'sand': [dry], 'water': [wet]}
+    for k, g in per.items():
+        if k in ('sand', 'water'):
+            moved['walk'].append(g.intersection(walk)); g = g.difference(walk)
+            g = g.difference(wet if k == 'sand' else dry)
+        elif k != 'pier': g = g.difference(dry).difference(wet)
+        else:  # (a pier over the line by a tile's edge: its walk's side the paving there, so it steps at the line in both tiles, not down a ramp each cuts its own way)
+            rim = walk.intersection(tb.difference(tb.buffer(-3 * GROUND_SNAP * (tb.bounds[2] - tb.bounds[0]) / 16383)))
+            moved['walk'].append(g.intersection(rim)); g = g.difference(rim)
+        out[k] = g
+    for k, add in moved.items():
+        g = unary_union([out.get(k, Polygon())] + add)
+        parts = [q for q in getattr(g, 'geoms', [g]) if q.geom_type == 'Polygon' and not q.is_empty]
+        if parts: out[k] = unary_union(parts)
     return out
 
 
@@ -2856,7 +2919,7 @@ def seawall_section(out, sw):
     """the SEAW section (the page's tile-worker.js terrain()): per piece its point count, per point x, north (Out.q), top
     and foot (1/100 m), reach (1/10 m), end weight (1/255), rail (1 a railing on its edge)"""
     b = bytearray(struct.pack('<I', len(sw)))
-    for P, top, foot, reach, f, rail in sw:
+    for P, top, foot, reach, f, rail, _ in sw:
         b += struct.pack('<I', len(P))
         for k in range(len(P)):
             b += struct.pack('<hhhhBBB', *out.q(*P[k]), int(round(top[k] * 100)), int(round(foot[k] * 100)), int(min(255, round(reach[k] * 10))), int(round(f[k] * 255)), int(rail[k]))

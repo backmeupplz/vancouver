@@ -101,7 +101,7 @@ def walled(tiles, d):
     f.terrain: the terrain alone"""
     import seawall
     G = Ground(tiles)
-    walls = {k: [(*w, seawall.inland(w[0], w[2], G)) for w in seawall.tile_walls(f'{d}/0/{k[0]}_{k[1]}.bin')] for k in tiles}
+    walls = {k: [w if len(w) > 6 else (*w, seawall.inland(w[0], w[2], G)) for w in seawall.tile_walls(f'{d}/0/{k[0]}_{k[1]}.bin')] for k in tiles}  # (the walk's ground: the tile's SEAG, an older tile's own terrain)
 
     def drawn(x, y, low=None):
         x, y = np.atleast_1d(np.asarray(x, float)), np.atleast_1d(np.asarray(y, float))
