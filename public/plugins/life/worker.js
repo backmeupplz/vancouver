@@ -76,7 +76,8 @@ onmessage = ({ data: m }) => {
     const p = peds.find((q) => q.id === m.id) || statics.find((q) => q.id === m.id)
     if (p && !p.fall) {
       const hard = m.v > 2.5
-      p.fall = { t: 0, dur: hard ? 3.4 : 1.0, max: hard ? 1.45 : 0.32 }
+      if (m.v < 1) p.pet = { t: 0, dur: 2.2 } // a pat (someone petting their dog): they stop and turn, the dog wags
+      else p.fall = { t: 0, dur: hard ? 3.4 : 1.0, max: hard ? 1.45 : 0.32 }
       p.ang = Math.atan2(-m.dy, -m.dx) // facing what hit them, falling back away from it
     }
   } else if (m.type === 'tick') { view = m.view || null; tick(m) }
@@ -1438,9 +1439,10 @@ function dodge(p, tx, ty) {
 function stepPeople(dt) {
   for (const p of peds) { p.ox = p.x; p.oy = p.y; p.oh = p.h } // where they were: drawn between that and here (output())
   for (const b of bikes) { b.ox = b.x; b.oy = b.y; b.oh = b.h }
-  for (const p of statics) if (p.fall && (p.fall.t += dt) >= p.fall.dur) p.fall = null
+  for (const p of statics) { if (p.fall && (p.fall.t += dt) >= p.fall.dur) p.fall = null; if (p.pet && (p.pet.t += dt) >= p.pet.dur) p.pet = null }
   for (const p of peds) {
     if (p.fall) { if ((p.fall.t += dt) >= p.fall.dur) p.fall = null; continue } // down (or stumbling): no walking
+    if (p.pet) { if ((p.pet.t += dt) >= p.pet.dur) p.pet = null; continue } // stopped for someone petting their dog
     p.life -= dt
     if (p.xcw && simT - p.xT > 30) hold(p, null) // (never hold the cars up for long)
     if (p.mode === 'walk') {
@@ -1691,7 +1693,7 @@ function tick({ dt, buf }) {
 }
 
 // 8 floats per thing: x, y (up), z (south), yaw, then per kind (cars: pitch, colour, brake, seed + 2 × shrink;
-// people: walk phase (fallen: how far over), pose + seed, shirt, trousers); then 2 per car in the same order: id,
+// people: walk phase (fallen: how far over; petted, pose 5: for how long), pose + seed, shirt, trousers); then 2 per car in the same order: id,
 // speed; then 1 per person (not cyclists), from pbase: id; then 2 per person and cyclist, from vbase: their velocity
 // (x, z per second: the page moves them on between answers, like the cars)
 function output(buf) {
@@ -1741,7 +1743,7 @@ function output(buf) {
     const f = p.fall ? fallAngle(p.fall) : 0, mv = p.ox != null && Math.abs(p.x - p.ox) + Math.abs(p.y - p.oy) < 2, k = mv ? 1 - u : 0, q = vbase + j / 4 - cars.length * 2
     a[j] = mv ? p.x - (p.x - p.ox) * k : p.x; a[j + 1] = (mv ? p.h - (p.h - p.oh) * k : p.h) + Math.sin(f) * 0.13; a[j + 2] = -(mv ? p.y - (p.y - p.oy) * k : p.y); a[j + 3] = p.ang
     a[q] = mv ? (p.x - p.ox) / STEP : 0; a[q + 1] = mv ? -(p.y - p.oy) / STEP : 0
-    a[j + 4] = p.fall ? f : p.mode === 'wait' ? 0 : p.phase; a[j + 5] = (p.fall ? 4 : p.mode === 'wait' ? 1 : pose) + p.seed * 0.9; a[j + 6] = p.shirt; a[j + 7] = p.pants
+    a[j + 4] = p.fall ? f : p.pet ? p.pet.t : p.mode === 'wait' ? 0 : p.phase; a[j + 5] = (p.fall ? 4 : p.pet && pose !== 2 ? 5 : p.mode === 'wait' ? 1 : pose) + p.seed * 0.9; a[j + 6] = p.shirt; a[j + 7] = p.pants
     j += 8
   }
   if (opts.people) {

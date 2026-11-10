@@ -281,8 +281,17 @@ being `(sin(heading), 0, cos(heading))`.
   (zoomed out, switched off). The array `out` is cleared and filled with objects that are reused on the next call, so
   asking every frame makes no garbage: read them right away. The page copies people out of the simulation only while
   someone has asked in the last two seconds.
+- `city.traffic.dogs(x, z, r, out = [])`: the dogs within `r` metres, `[{ id, x, y, z, heading }]`, reused like
+  `people()`: `x, y, z` is where the dog itself stands (on its lead, a metre ahead of its walker), `id` its walker's
+  id in `people()` (so the walker can be found, or stopped with `knock`). Their walker may be walking, waiting or sitting on a bench; empty while
+  people are hidden.
+- `city.traffic.benches(x, z, r, out = [])`: the benches within `r` metres, `[{ id, x, y, z, heading }]`, reused the
+  same way: `x, y, z` the middle of the bench on the ground (the seat is 0.45 m up), `heading` the way someone sitting
+  on it faces (`(sin heading, 0, cos heading)`, towards the path). Two seats, 0.45 m either side of the middle along
+  the bench (`(cos heading, 0, -sin heading)`); a seat is taken when `people(x, z, 0.4)` at it returns someone. `id`
+  is an index that changes when the street network around the player is rebuilt: look benches up by position.
 - `city.traffic.poles(x, z, r, out = [])`: the traffic signal poles within `r` metres, `[{ x, y, z, r }]` (`y` the foot,
   `r` the pole's radius), reused the same way.
 - `city.traffic.knock(id, dx, dz, speed)`: the player bumped into person `id`, pushing towards `(dx, dz)` at `speed` m/s:
-  a stumble at a walk, faster a fall onto their back (facing what hit them); they get up after a few seconds and walk
+  under 1 m/s a pat (they stop for two seconds and turn to it, and their dog wags its tail: petting it), a stumble at a walk, faster a fall onto their back (facing what hit them); they get up after a few seconds and walk
   on. People also hop out of the way of an obstacle coming at them faster than 3 m/s, when they can.

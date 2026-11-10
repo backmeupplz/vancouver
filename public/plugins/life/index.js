@@ -276,8 +276,10 @@ export default function life(city) {
     names.words.end()
   }
 
-  let benchMesh = null
+  let benchMesh = null, benchList = []
+  const DOG = 5 // models.js OUTFITS
   function buildBenches(b) {
+    benchList = b
     if (benchMesh) { benchMesh.removeFromParent(); benchMesh.dispose() }
     benchMesh = null
     const n = b.length / 4
@@ -409,8 +411,8 @@ export default function life(city) {
     // the people for city.traffic.people, while a game asks for them: x, y, z, yaw and id
     snap.np = 0
     if (performance.now() - snap.asked < 2000) {
-      if (snap.ppos.length < snap.pn * 5) snap.ppos = new Float32Array(snap.pn * 8)
-      for (let i = 0; i < snap.pn; i++) { const q = i * 5, o = i * 8; snap.ppos[q] = Q[o]; snap.ppos[q + 1] = Q[o + 1]; snap.ppos[q + 2] = Q[o + 2]; snap.ppos[q + 3] = Q[o + 3]; snap.ppos[q + 4] = snap.pid[i] }
+      if (snap.ppos.length < snap.pn * 6) snap.ppos = new Float32Array(snap.pn * 9)
+      for (let i = 0; i < snap.pn; i++) { const q = i * 6, o = i * 8; snap.ppos[q] = Q[o]; snap.ppos[q + 1] = Q[o + 1]; snap.ppos[q + 2] = Q[o + 2]; snap.ppos[q + 3] = Q[o + 3]; snap.ppos[q + 4] = snap.pid[i]; snap.ppos[q + 5] = Q[o + 5] }
       snap.np = snap.pn
     }
   }
@@ -430,7 +432,7 @@ export default function life(city) {
 
   // ---------------------------------------------------------------- city.traffic, for games
   const snap = { raw: new Float32Array(0), pos: new Float32Array(0), aux: new Float32Array(0), n: 0, counts: [], t: 0, ppos: new Float32Array(0), np: 0, asked: 0, praw: new Float32Array(0), pq: new Float32Array(0), pv: new Float32Array(0), pid: new Float32Array(0), pn: 0, bn: 0 }
-  const pools2 = { people: [], poles: [] } // reused result objects, so a game can ask every frame without garbage
+  const pools2 = { people: [], poles: [], dogs: [], benches: [] } // reused result objects, so a game can ask every frame without garbage
   const rec = (k, i) => pools2[k][i] || (pools2[k][i] = { id: 0, x: 0, y: 0, z: 0, heading: 0, r: 0 })
   const obstacles = new Map()
   let obsT = 0, obsAt = 0
@@ -468,10 +470,43 @@ export default function life(city) {
       if (!active || !peopleOn) return out
       const P = snap.ppos, r2 = r * r
       for (let i = 0; i < snap.np; i++) {
-        const q = i * 5, dx = P[q] - x, dz = P[q + 2] - z
+        const q = i * 6, dx = P[q] - x, dz = P[q + 2] - z
         if (!(dx * dx + dz * dz <= r2)) continue // (not a NaN one either)
         const o = rec('people', out.length)
         o.id = P[q + 4]; o.x = P[q]; o.y = P[q + 1]; o.z = P[q + 2]; o.heading = P[q + 3] + Math.PI / 2; o.r = 0.3
+        out.push(o)
+      }
+      return out
+    },
+    // the dogs within r metres of (x, z), into `out` like people(): { id (its walker's, as in people()), x, y, z,
+    // heading }: where the dog itself is drawn, on its lead ahead of its walker to their right (models.js 'dog')
+    dogs(x, z, r, out = []) {
+      out.length = 0
+      snap.asked = performance.now()
+      if (!active || !peopleOn) return out
+      const P = snap.ppos, r2 = r * r
+      for (let i = 0; i < snap.np; i++) {
+        const q = i * 6, f = P[q + 5]
+        if (OUTFIT((f % 1) / 0.9) !== DOG || Math.floor(f) === 4) continue // (not while their walker lies knocked over)
+        const c = Math.cos(P[q + 3]), s = Math.sin(P[q + 3]), dx = P[q] + c * 0.95 + s * 0.45 - x, dz = P[q + 2] - s * 0.95 + c * 0.45 - z
+        if (!(dx * dx + dz * dz <= r2)) continue
+        const o = rec('dogs', out.length)
+        o.id = P[q + 4]; o.x = x + dx; o.y = P[q + 1]; o.z = z + dz; o.heading = P[q + 3] + Math.PI / 2; o.r = 0.3
+        out.push(o)
+      }
+      return out
+    },
+    // the benches within r metres of (x, z), into `out` like people(): { id, x, y (the ground under it), z, heading
+    // (the way someone on it faces) }; two seats, 0.45 m either side of the middle along the bench
+    benches(x, z, r, out = []) {
+      out.length = 0
+      const B = benchList, r2 = r * r
+      if (!active || !peopleOn) return out
+      for (let i = 0; i < B.length; i += 4) {
+        const dx = B[i] - x, dz = -B[i + 1] - z
+        if (dx * dx + dz * dz > r2) continue
+        const o = rec('benches', out.length)
+        o.id = i / 4; o.x = B[i]; o.y = B[i + 2]; o.z = -B[i + 1]; o.heading = B[i + 3] + Math.PI / 2; o.r = 0.8
         out.push(o)
       }
       return out
