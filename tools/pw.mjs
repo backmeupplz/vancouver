@@ -22,15 +22,15 @@ export async function server(port) { // own python static server on public/ unle
   return { port, stop: () => p.kill() }
 }
 
-export async function open({ port, dpr = 1, size = '1400x900', tier = 'auto', weather = 'clear', hour = 13, season, query = '', hash = '', init, gpuFlags = [], tiles = '' }) {
+export async function open({ port, dpr = 1, size = '1400x900', tier = 'auto', weather = 'clear', hour = 13, tide = 0, season, query = '', hash = '', init, gpuFlags = [], tiles = '' }) {
   const [w, h, pd] = SIZES[size] || [...size.split('x').map(Number), +dpr]
   const phone = !!SIZES[size]
   const browser = await chromium.launch({ channel: 'chrome', args: ['--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=metal', ...gpuFlags] })
   const ctx = await browser.newContext({ viewport: { width: w, height: h }, deviceScaleFactor: phone ? pd : +dpr, isMobile: phone, hasTouch: phone })
-  await ctx.addInitScript(([wx, hr, t]) => {
-    localStorage.setItem('vancouver.weather', JSON.stringify({ mode: wx, hour: hr }))
+  await ctx.addInitScript(([wx, hr, t, td]) => { // (a fixed tide, metres above chart datum: nothing live decides the sea level)
+    localStorage.setItem('vancouver.weather', JSON.stringify({ mode: wx, hour: hr, tide: td }))
     localStorage.setItem('vancouver.graphics', t)
-  }, [weather, +hour, tier])
+  }, [weather, +hour, tier, +tide])
   if (init) await ctx.addInitScript(init)
   if (tiles) { // --tiles https://vancouver.borodutch.com/tiles: the published tiles instead of public/tiles (kept in a folder in the temp dir)
     const dir = `${os.tmpdir()}/vancouver-tiles-${tiles.replace(/\W+/g, '_')}`

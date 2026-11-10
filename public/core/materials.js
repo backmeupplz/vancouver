@@ -1,7 +1,7 @@
 // Shared materials for the streamed map. All surfaces are Lambert (so the sun, the shadows and the ink pass
 // work) with their detail drawn procedurally in the fragment shader: crisp at any zoom, nothing to download.
 import * as THREE from 'three'
-import { NOISE_GLSL } from './util.js'
+import { NOISE_GLSL, SEA0, SEA_RISE } from './util.js'
 import { LOOK_GLSL, lookUniforms } from './look.js'
 import { treeForm, FORMS, ASPECT } from './treeforms.js'
 
@@ -25,7 +25,9 @@ const COMMON = `
 // grazing angles (puddles shine most); snow whitens flat ground, roofs and, less, the roads.
 // seaHole (x, sea level, z, radius; radius 0 = off): the map's sea is left out within radius of (x, z) and below sea
 // level + 3 m, where a plugin draws its own water (the sail plugin's waves)
-export const surface = { wet: { value: 0 }, snow: { value: 0 }, sky: { value: new THREE.Color(0x8090a0) }, seaHole: { value: new THREE.Vector4() } }
+// tide (city.sea.level): metres the sea stands above the baked one. The ground's water and piers (floating docks) rise
+// with it, up to SEA_RISE; the sand it covers is drawn as water, the sand it has left is wet (util.js SEA0, SEA_RISE)
+export const surface = { wet: { value: 0 }, snow: { value: 0 }, sky: { value: new THREE.Color(0x8090a0) }, seaHole: { value: new THREE.Vector4() }, tide: { value: 0 } }
 const SURF = `uniform float wet, snow; uniform vec3 skyCol;
   // the sky seen in a wet surface at p (up-facing): Schlick fresnel towards the camera
   float sheenAt(vec3 p) { float c = max(dot(normalize(cameraPosition - p), vec3(0.0, 1.0, 0.0)), 0.0); return pow(1.0 - c, 5.0); }`
@@ -80,17 +82,25 @@ export function groundMaterial(far = false) {
   if (far) m.defines = { FAR: '' }
   m.onBeforeCompile = (s) => {
     surfUniforms(s); lightUniforms(s)
-    s.uniforms.seaHole = surface.seaHole
+    s.uniforms.seaHole = surface.seaHole; s.uniforms.tide = surface.tide
     s.vertexShader = s.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute float cls;\nflat varying float vCls;\nvarying vec3 vW;\nvarying float vSlope;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCls = cls;\nvW = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvSlope = 1.0 - objectNormal.y;')
+      .replace('#include <common>', '#include <common>\nattribute float cls;\nattribute float tidal;\nuniform float tide;\nflat varying float vCls;\nvarying float vTidal;\nvarying vec3 vW;\nvarying float vSlope;')
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\nif (cls > 19.5 && cls < 20.5) transformed.y = max(transformed.y, ${SEA0.toFixed(2)} + tide + 0.45); // a dock stays above the water\nelse if (cls > 18.5 && cls < 19.5) transformed.y = transformed.y > ${SEA0.toFixed(2)} ? max(transformed.y, ${SEA0.toFixed(2)} + tide) : transformed.y + tide; // the sea (util.js seaSurface); a lake or a shelf above it only once the sea reaches it\nvCls = cls;\nvTidal = tidal;\nvW = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvSlope = 1.0 - objectNormal.y;`)
     s.fragmentShader = s.fragmentShader
-      .replace('#include <common>', `#include <common>\nflat varying float vCls;\nvarying vec3 vW;\nvarying float vSlope;\nuniform vec4 seaHole;\nuniform float night;\n${COMMON}\n${SURF}\n${LIGHT}
+      .replace('#include <common>', `#include <common>\nflat varying float vCls;\nvarying float vTidal;\nvarying vec3 vW;\nvarying float vSlope;\nuniform vec4 seaHole;\nuniform float tide;\nuniform float night;\n${COMMON}\n${SURF}\n${LIGHT}
         const vec3 CL[${GROUND_COLOURS.length}] = vec3[](${GROUND_COLOURS.map((c) => `vec3(${c.map((v) => (v / 255).toFixed(4)).join(',')})`).join(',')});`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         int c = int(vCls + 0.5);
         vec2 p = vW.xz;
-        if (c == 19 && seaHole.w > 0.0 && vW.y < seaHole.y + 3.0 && distance(p, seaHole.xz) < seaHole.w) discard;
+        // the tide: the water is baked up to the high water line, lying on the shore's slope there. By a beach (vTidal:
+        // tile-worker.js ground), what of that slope stands above the sea now is the sand it has left, wet up to the
+        // highest tide's line; the sand the sea covers is water, and wet above it
+        float seaY = ${SEA0.toFixed(2)} + tide, wetSand = 0.0, foam = 0.0, shore = 0.0;
+        const float TOP = ${(SEA0 + SEA_RISE + 0.25).toFixed(2)};
+        if (c == 19) shore = smoothstep(seaY + 0.02, seaY + 0.1, vW.y) * (1.0 - smoothstep(2.6, 3.0, vW.y)) * smoothstep(0.0, 0.45, vTidal);
+        else if (c == 10 && vW.y < seaY) { c = 19; foam = 1.0 - smoothstep(0.0, 0.07, seaY - vW.y); }
+        if ((c == 10 || shore > 0.0) && vW.y < TOP) wetSand = 1.0 - smoothstep(TOP - 0.35, TOP, vW.y);
+        if (c == 19 && shore < 0.5 && seaHole.w > 0.0 && vW.y < seaHole.y + 3.0 && distance(p, seaHole.xz) < seaHole.w) discard;
         vec3 col = srgb(CL[c]);
         float n = fbm(p * 0.08), fine = noise(p * 1.7);
         float px = max(fwidth(p.x), 1e-3); // metres per pixel, to fade detail before it can shimmer
@@ -118,6 +128,8 @@ export function groundMaterial(far = false) {
         } else {
           col *= 0.9 + 0.2 * n + 0.05 * (fine - 0.5) * near;
         }
+        if (shore > 0.0) col = mix(col, srgb(CL[10]) * (0.9 + 0.2 * n), shore);
+        col = mix(col * mix(vec3(1.0), vec3(0.66, 0.68, 0.7), wetSand), vec3(0.86, 0.9, 0.9), foam * 0.55);
         if (c == 0) { // untagged land: lawns down in town, mountain forest up high
           float up = smoothstep(150.0, 450.0, vW.y + 60.0 * (n - 0.5));
           vec3 wild = srgb(vec3(0.24, 0.42, 0.24)) * (0.72 + 0.55 * fbm(p * 0.03 + vec2(n)));

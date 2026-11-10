@@ -5,7 +5,7 @@ import * as THREE from 'three'
 import { FAMILY, night } from './materials.js'
 import { kit, kitMaterial } from './kit.js'
 import { FORMS, ASPECT } from './treeforms.js'
-import { sampleGrid, sampleTerr, wallHeight } from './util.js'
+import { sampleGrid, sampleTerr, wallHeight, seaSurface } from './util.js'
 
 const SIZES = [1024, 4096]
 const ij = (level, i, j) => (level * 4096 + i + 2048) * 4096 + j + 2048 // a tile's number (|i|, |j| < 2048)
@@ -509,13 +509,14 @@ export class Tiles {
       const geo = new THREE.BufferGeometry()
       geo.setAttribute('position', new THREE.BufferAttribute(res.ground.position, 3))
       geo.setAttribute('cls', new THREE.BufferAttribute(res.ground.cls, 1))
+      if (res.ground.tidal) geo.setAttribute('tidal', new THREE.BufferAttribute(res.ground.tidal, 1, true))
       geo.setAttribute('normal', new THREE.BufferAttribute(res.ground.normal, 3, true))
       // a mesh per cell of the tile (tile-worker.js cells), all on the one vertex and index buffer
       const ground = (index, cells) => {
         const ia = new THREE.BufferAttribute(index, 1), G = new THREE.Group()
         cellMeshes(cells, (first, count, b) => {
           const cg = new THREE.BufferGeometry()
-          for (const k of ['position', 'cls', 'normal']) cg.setAttribute(k, geo.attributes[k])
+          for (const k of ['position', 'cls', 'normal', 'tidal']) if (geo.attributes[k]) cg.setAttribute(k, geo.attributes[k])
           cg.setIndex(ia); cg.setDrawRange(first, count)
           return add(cg, mt.ground, { receiveShadow: true }, b, G)
         })
@@ -575,17 +576,14 @@ export class Tiles {
     }
     if (res.parked) for (const k of ['lot', 'kerb']) if (res.parked[k]) { t[k] = this.parkedCars(res.parked[k]); g.add(t[k]); t[k].visible = this.cars > (k === 'lot' ? 0 : 1) }
     if (res.boats) { // berthed boats: hull (instance colour), deck and cabin, a mast on the sailboats
-      const B = res.boats, n = B.length / 6, M = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), sc = new THREE.Vector3(), c = new THREE.Color(), up = new THREE.Vector3(0, 1, 0)
+      const B = res.boats, n = B.length / 6, c = new THREE.Color()
       const sails = []
       for (let i = 0; i < n; i++) if (B[i * 6 + 5] & 1) sails.push(i)
       const parts = [['hull', n], ['top', n], ['mast', sails.length]].map(([k, m]) => { const im = new THREE.InstancedMesh(this.boatGeo[k], this.unitMat, m); im.receiveShadow = true; im.castShadow = k !== 'mast'; return im })
-      for (let i = 0; i < n; i++) {
-        M.compose(p.set(B[i * 6], B[i * 6 + 1], B[i * 6 + 2]), q.setFromAxisAngle(up, B[i * 6 + 3]), sc.setScalar(B[i * 6 + 4]))
-        parts[0].setMatrixAt(i, M); parts[1].setMatrixAt(i, M)
-        parts[0].setColorAt(i, c.setHex(HULLS[(B[i * 6 + 5] >> 1) & 3])); parts[1].setColorAt(i, c.setHex(0xe6e4de))
-      }
-      sails.forEach((i, k) => { parts[0].getMatrixAt(i, M); parts[2].setMatrixAt(k, M); parts[2].setColorAt(k, c.setHex(0xd4d6d8)) })
-      for (const im of parts) if (im.count) { im.computeBoundingSphere(); im.matrixAutoUpdate = false; g.add(im) }
+      for (let i = 0; i < n; i++) { parts[0].setColorAt(i, c.setHex(HULLS[(B[i * 6 + 5] >> 1) & 3])); parts[1].setColorAt(i, c.setHex(0xe6e4de)) }
+      sails.forEach((i, k) => parts[2].setColorAt(k, c.setHex(0xd4d6d8)))
+      t.berths = { B, sails, parts }; this.float(t.berths)
+      for (const im of parts) if (im.count) { im.matrixAutoUpdate = false; g.add(im) }
     }
     if (res.beach) { t.logs = res.beach.d; t.beach = this.beachMeshes(res.beach.d); for (const o of t.beach) { o.visible = this.fine; g.add(o) } } // from 0.3 on the map (1-2 px a metre)
     this.scene.add(g)
@@ -785,6 +783,19 @@ export class Tiles {
 
   // ground height (metres) at world x east, y north: from the finest loaded tile
   // (called hundreds of times a frame: looked up by number, nothing allocated)
+  setSea(level) { // the tide (city.sea.level): the berthed boats ride it
+    this.sea = level
+    for (const t of this.tiles.values()) if (t.berths) this.float(t.berths)
+  }
+  float({ B, sails, parts }) { // a tile's berthed boats, each on the water at its berth
+    const M = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), sc = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0)
+    for (let i = 0; i < B.length / 6; i++) {
+      M.compose(p.set(B[i * 6], seaSurface(B[i * 6 + 1], this.sea || 0), B[i * 6 + 2]), q.setFromAxisAngle(up, B[i * 6 + 3]), sc.setScalar(B[i * 6 + 4]))
+      parts[0].setMatrixAt(i, M); parts[1].setMatrixAt(i, M)
+    }
+    sails.forEach((i, k) => { parts[0].getMatrixAt(i, M); parts[2].setMatrixAt(k, M) })
+    for (const im of parts) if (im.count) { im.instanceMatrix.needsUpdate = true; im.computeBoundingSphere() }
+  }
   heightAt(x, y) {
     for (let level = 0; level < 2; level++) {
       const s = SIZES[level], t = this.byIJ.get(ij(level, Math.floor(x / s), Math.floor(y / s)))

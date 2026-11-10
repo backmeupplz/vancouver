@@ -48,7 +48,7 @@ const vessel = (models) => (r, kind, L, B) => { const m = pick(r, models[kind]);
 export default async function ships(city) {
   const { THREE } = city
   const data = await getJSON(DATA)
-  const ground = (x, z) => city.world.heightAt(x, z)
+  const ground = (x, z) => (city.sea?.at ? city.sea.at(x, z) : city.world.heightAt(x, z)) // the water there, with the tide
   const xz = (lat, lon) => { const v = city.world.fromLatLon(lat, lon); return [v.x, v.z] }
 
   const V = vessel(shipModels(THREE))
@@ -246,11 +246,15 @@ export default async function ships(city) {
     mesh.setVisibleAt(v.id, true)
   }
   const hide = (v) => mesh.setVisibleAt(v.id, false)
-  for (const v of stat) put(v, v.x, v.z, v.h)
-  for (const v of moored) {
-    pos.set(v.x, water(v.x, v.z, v.h, v.L), v.z)
-    moor.setMatrixAt(v.id, M4.compose(pos, q.setFromAxisAngle(up, Math.PI / 2 - v.h), one.set(v.L / v.m.L, v.B / v.m.B, v.B / v.m.B)))
+  function place() { // the ones that lie still: now, and again when the tide has moved the water
+    for (const v of stat) put(v, v.x, v.z, v.h)
+    for (const v of moored) {
+      pos.set(v.x, water(v.x, v.z, v.h, v.L), v.z)
+      moor.setMatrixAt(v.id, M4.compose(pos, q.setFromAxisAngle(up, Math.PI / 2 - v.h), one.set(v.L / v.m.L, v.B / v.m.B, v.B / v.m.B)))
+    }
+    city.requestRender()
   }
+  place(); const offTide = city.on('tide', place)
   for (const v of dyn) hide(v)
   const out = [0, 0, 0, 0]
   function update() {
@@ -360,6 +364,7 @@ export default async function ships(city) {
       clearInterval(tick); clearTimeout(aisT); clearTimeout(viewT); offFrame(); offView()
       document.removeEventListener('visibilitychange', check)
       stop?.()
+      offTide()
       for (const m of [mesh, moor, wakes]) { m.removeFromParent(); m.dispose() }
       for (const m of usedBy([...all, ...moored])) m.geo.dispose()
       wakeGeo.dispose()

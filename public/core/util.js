@@ -35,6 +35,15 @@ export function sampleGrid(h, n, size, x, y) {
 // [x, y north (tile-local), top, foot, reach, end weight (0 at a run's ends), rail], 7 floats each; starts: each run's
 // first point, then the total; ground(x, y): the terrain (its walk's, min(reach, 4) m in, is what the walk blends to at
 // a run's ends: tools/seawall.py inland()). -> { seg, start, idx, G } segments in 32 m cells over the tile (tools/seawall.py height())
+// The tide. The terrain has the sea's surface at SEA0 around Vancouver (no sea bed under it), and the map's water is
+// baked as far as the high water line, lying on the shore's slope above SEA0. The lowest tide is the sea at SEA0, the
+// highest SEA_RISE above it (city.sea.level; the real range is 5 m, drawn at 28% so that the low banks, the docks and
+// the seawall's foot keep their places); the ground shader (materials.js) flattens the water to that level and draws
+// the slope above it as wet shore
+export const SEA0 = -0.7, SEA_RISE = 1.4
+// the still water's height where the baked water lies at h, with the sea `level` above the baked one: the sea itself (and
+// lower water) rises by it; water baked above the sea (a shelf, a lagoon) only once the sea reaches it
+export const seaSurface = (h, level) => (h > SEA0 ? Math.max(h, SEA0 + level) : h + level)
 const WALL_C = 32, WALL_N = 34, WALL_R = 32 // cell, cells across (one past each edge), the furthest a wall reaches (REACH + 4 + B_IN)
 export function wallGrid(P, starts, ground) {
   const seg = []

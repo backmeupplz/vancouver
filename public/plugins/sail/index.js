@@ -515,7 +515,7 @@ export default function sail(city) {
     // the sea level under her (the lowest ground under the hull; the shore is interpolated up into it): only out on
     // open water, so the sea doesn't climb the beach with her
     if (water.shoreAt(B.x, B.z) > 12 || !B.y) {
-      const wy = Math.min(city.world.heightAt(B.x, B.z), city.world.heightAt(B.x + fx * 3, B.z + fz * 3), city.world.heightAt(B.x - fx * 3, B.z - fz * 3))
+      const H = city.sea?.at || city.world.heightAt, wy = Math.min(H(B.x, B.z), H(B.x + fx * 3, B.z + fz * 3), H(B.x - fx * 3, B.z - fz * 3)) // (with the tide)
       B.y += (wy - B.y) * (1 - Math.exp(-0.5 * dt))
     }
   }

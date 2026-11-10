@@ -1,5 +1,6 @@
 // The plugin host: one `city` object that every plugin gets. See PLUGINS.md.
 // A plugin is an ES module whose default export is `(city) => ({ dispose() })` (dispose optional).
+import { seaSurface } from './core/util.js'
 import * as THREE from 'three'
 
 export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll, toLatLon, sun, hemi, setSun, post, requestRender, data, tiles, night, late, surface, suppressBuildings, ownCamera, quality }) {
@@ -67,9 +68,15 @@ export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll
       get sky() { return surface?.sky.value },
       get seaHole() { return surface?.seaHole.value }, // Vector4 (x, sea level, z, radius): no map sea in there (radius 0: off)
     },
-    // the sea: `level`, metres the water stands above the map's baked sea (the tide; 0 until something sets it), and
-    // `surfaceAt(x, z)`, a plugin's own water surface (the sail plugin's waves while sailing), else null
-    sea: { level: 0, surfaceAt: null },
+    // the sea: `level`, metres the water stands above the map's baked sea (the tide, set by the weather plugin: the
+    // map's water, docks and berthed boats rise with it, 'tide' is emitted), and `surfaceAt(x, z)`, a plugin's own
+    // water surface (the sail plugin's waves while sailing), else null
+    sea: {
+      get level() { return surface?.tide.value ?? 0 },
+      set level(v) { if (!surface || v === surface.tide.value) return; surface.tide.value = v; tiles?.setSea(v); requestRender(); city.emit('tide', v) },
+      at(x, z) { return seaSurface(zAt(x, -z), surface?.tide.value ?? 0) }, // the still water's height at a point on the water
+      surfaceAt: null,
+    },
     post, // { uniforms: { gain (vec3), sat (float) } } colour grade of the final image
     data, // static data the core has loaded
     // the streamed map: loaded tiles (tiles.tiles), and 'tile:load' / 'tile:unload' events with each tile's

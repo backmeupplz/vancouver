@@ -423,7 +423,12 @@ function ground(t, terr, level) {
   const nv = pos.length / 3
   if (!nv) return null
   const P = new Float32Array(pos), I = nv > 65535 ? Uint32Array : Uint16Array
-  return { position: P, normal: normals(terr, P), cls: new Uint8Array(cls), index: new I(idx), coarse: coarse && new I(coarse) }
+  // tidal: the water's vertices on a beach's edge (within 2-4 m of the sand's), 255: the water lying on the shore between
+  // them and the sea is the beach the tide uncovers (materials.js). Not where the water is rough under a marina's boats
+  const tidal = new Uint8Array(nv), sandAt = new Set(), tk = (i, dx, dz) => (Math.round(P[i * 3] / 2) + dx) * 65536 + Math.round(P[i * 3 + 2] / 2) + dz
+  for (let i = 0; i < nv; i++) if (cls[i] === SAND) sandAt.add(tk(i, 0, 0))
+  if (sandAt.size) for (let i = 0; i < nv; i++) if (cls[i] === WATER) for (let d = 0; d < 9 && !tidal[i]; d++) if (sandAt.has(tk(i, (d % 3) - 1, Math.floor(d / 3) - 1))) tidal[i] = 255
+  return { position: P, normal: normals(terr, P), cls: new Uint8Array(cls), tidal, index: new I(idx), coarse: coarse && new I(coarse) }
 }
 
 // earcut's triangles made conforming: earcut can run an edge straight over one of the polygon's points (it leaves out a

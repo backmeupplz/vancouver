@@ -4,7 +4,7 @@
 // vessels lying within 8 m of each mark and of the start); exits 1 on a dry or blocked mark.
 import { args, server, open, settle } from './pw.mjs'
 const srv = await server()
-const [o] = args(process.argv.slice(2), { tiles: '' }) // --tiles https://vancouver.borodutch.com/tiles: the published ones
+const [o] = args(process.argv.slice(2), { tiles: '', tide: 0 }) // --tiles https://vancouver.borodutch.com/tiles: the published ones; --tide 0 and 5: the lowest and the highest water
 const { browser, page } = await open({ ...o, port: srv.port, query: '?drivedebug' })
 let bad = 0
 try {

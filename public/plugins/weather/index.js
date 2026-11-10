@@ -2,12 +2,13 @@
 // Weather data: Open-Meteo (https://open-meteo.com), CC BY 4.0, current conditions refreshed every 15 minutes.
 // Sun position: the NOAA general solar position equations (fractional-year series), no library.
 // Sets `city.weather = { kind, intensity, isNight, hour, live, wind, atmosphere }` and emits 'weather' whenever it
-// changes. `atmosphere` ({ horizon, zenith, fogNear, fogFar }) is the look for a plugin's perspective camera
+// changes; `city.tide` and `city.sea.level` are the tide (tides.js: live from the Canadian Hydrographic Service). `atmosphere` ({ horizon, zenith, fogNear, fogFar }) is the look for a plugin's perspective camera
 // (city.view.useCamera): a sky gradient and a THREE.Fog for it to apply. Under a perspective camera this plugin also
 // draws a sky dome (sun, moon and stars, clouds, lightning bolts), and the rain and snow are a world-space volume
 // around the camera instead of the map's screen-space layer, with ripples that stay where they landed. The ground gets wet or snowy in both
 // views (city.surface).
-import { vancouver, getJSON, NOISE_GLSL } from '../../core/util.js'
+import { vancouver, getJSON, NOISE_GLSL, SEA_RISE } from '../../core/util.js'
+import { predicted, outlook, fetchTides, TIDE_MIN, TIDE_MAX } from './tides.js'
 
 const LAT = 49.2827, LON = -123.1207 // downtown Vancouver
 const API = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&current=temperature_2m,weather_code,cloud_cover,precipitation,wind_speed_10m,wind_direction_10m&wind_speed_unit=ms`
@@ -99,9 +100,9 @@ export default function weather(city) {
   const { sun, hemi } = city.light, U = city.post.uniforms
   const saved = { sunC: sun.color.clone(), sunI: sun.intensity, sky: hemi.color.clone(), gnd: hemi.groundColor.clone(), hemiI: hemi.intensity, dir: sun.position.clone().sub(sun.target.position).normalize() }
 
-  let state = { mode: 'live', hour: null } // mode: 'live' or a kind; hour: null = live time
+  let state = { mode: 'live', hour: null, tide: null } // mode: 'live' or a kind; hour: null = live time; tide: null = the real one, or metres above chart datum
   try { Object.assign(state, JSON.parse(localStorage.getItem(KEY)) || {}) } catch {}
-  let live = null, fetchedAt = 0
+  let live = null, fetchedAt = 0, tides = null // tides: { curve, surge } from the CHS
   const v3 = new THREE.Vector3(), c3 = new THREE.Color(), cx = new THREE.Color(), ca = new THREE.Color(), cb = new THREE.Color()
 
   // ---------- atmosphere: one full-screen quad that multiplies the image (cloud shadows) and veils it (haze),
@@ -388,6 +389,11 @@ export default function weather(city) {
       city.surface.sky?.copy(ca).lerp(c3.setHex(0x8a6c48), dark * 0.7)
     }
     effects()
+    // the tide: at the time shown, the gauge's surge on top while that is now; or the one picked
+    const height = state.tide ?? predicted(c.t, tides?.curve) + (state.hour == null ? tides?.surge || 0 : 0), ol = outlook(c.t, tides?.curve)
+    const level = Math.round(SEA_RISE * THREE.MathUtils.clamp((height - TIDE_MIN) / (TIDE_MAX - TIDE_MIN), 0, 1) * 100) / 100
+    city.tide = { height: +height.toFixed(2), level, rising: state.tide == null ? ol.rising : null, rate: state.tide == null ? +ol.rate.toFixed(2) : null, next: state.tide == null ? ol.next : null, live: state.tide == null && state.hour == null, source: tides ? 'chs' : 'harmonic' }
+    if (city.sea) city.sea.level = level
     // the contract
     w = { kind: c.kind, intensity: +c.intensity.toFixed(2), isNight, hour: +c.hour.toFixed(2), live: state.mode === 'live' && state.hour == null, wind: fx.wind.map((x) => +x.toFixed(1)), atmosphere }
     city.weather = w
@@ -565,7 +571,8 @@ export default function weather(city) {
       const j = await getJSON(API)
       live = fromOpenMeteo(j.current); fetchedAt = Date.now()
       apply()
-    } catch (e) { console.warn('weather: Open-Meteo', e); if (!live) { live = false; ui() } } finally { busy = false }
+    } catch (e) { console.warn('weather: Open-Meteo', e); if (!live) { live = false; ui() } }
+    try { if (state.tide == null) { tides = await fetchTides(getJSON, Date.now(), tides); apply() } } catch (e) { console.warn('weather: CHS tides (the harmonic ones meanwhile)', e) } finally { busy = false }
   }
 
   // ---------- UI
@@ -578,6 +585,7 @@ export default function weather(city) {
     .wx .row { display: flex; align-items: center; gap: 8px; }
     .wx input[type=range] { flex: 1; accent-color: var(--accent); }
     .wx .clock { font-variant-numeric: tabular-nums; color: var(--text); min-width: 3em; text-align: right; }
+    .wx .tide { margin-top: 6px; color: var(--muted); font-variant-numeric: tabular-nums; }
     .wx .credit { margin-top: 10px; color: var(--muted); font-size: 11.5px; }`
   document.head.append(style)
   const btn = city.ui.addButton({ label: 'Weather', title: 'Weather and time of day', panel: true })
@@ -586,22 +594,33 @@ export default function weather(city) {
   P.innerHTML = `<div class="now"></div>
     <h3>Weather</h3><div class="chips">${['live', 'clear', 'cloudy', 'rain', 'storm', 'snow', 'fog'].map((k) => `<button type="button" data-k="${k}">${k[0].toUpperCase() + k.slice(1)}</button>`).join('')}</div>
     <h3>Time of day</h3><div class="row"><button type="button" data-t="live">Live</button><input type="range" min="0" max="24" step="0.25" aria-label="Hour of day"><span class="clock"></span></div>
-    <div class="credit">Vancouver weather by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a> (CC BY 4.0)</div>`
+    <h3>Tide</h3><div class="row"><button type="button" data-tide="live">Live</button><input type="range" class="tr" min="${TIDE_MIN}" max="${TIDE_MAX}" step="0.1" aria-label="Tide height in metres"><span class="clock th"></span></div>
+    <div class="tide"></div>
+    <div class="credit">Vancouver weather by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a> (CC BY 4.0). Tides: <a href="https://tides.gc.ca/en/stations/07735" target="_blank" rel="noopener">Canadian Hydrographic Service</a>, station Vancouver (07735)</div>`
   const range = P.querySelector('input'), clock = P.querySelector('.clock'), now = P.querySelector('.now')
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)) } catch {} }
   P.addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return
     if (b.dataset.k) state.mode = b.dataset.k
     if (b.dataset.t) state.hour = null
+    if (b.dataset.tide) { state.tide = null; if (!tides) refresh() }
     save(); apply()
   })
   range.addEventListener('input', () => { state.hour = +range.value; save(); apply() })
+  const tr = P.querySelector('.tr'), th = P.querySelector('.th'), tideLine = P.querySelector('.tide')
+  tr.addEventListener('input', () => { state.tide = +tr.value; save(); apply() })
   const hhmm = (h) => `${String(Math.floor(h) % 24).padStart(2, '0')}:${String(Math.floor((h % 1) * 60 + 1e-6)).padStart(2, '0')}`
   function ui() {
     for (const b of P.querySelectorAll('[data-k]')) b.setAttribute('aria-pressed', String(b.dataset.k === state.mode))
     P.querySelector('[data-t]').setAttribute('aria-pressed', String(state.hour == null))
     if (document.activeElement !== range) range.value = String(w.hour)
     clock.textContent = hhmm(w.hour)
+    const T = city.tide
+    P.querySelector('[data-tide]').setAttribute('aria-pressed', String(state.tide == null))
+    if (document.activeElement !== tr) tr.value = String(T.height)
+    th.textContent = `${T.height.toFixed(1)} m`
+    tideLine.textContent = state.tide != null ? 'Set by hand (0 m: the lowest tides, 5 m: the highest)'
+      : `${T.rising ? 'Rising' : 'Falling'}${T.next ? `, ${T.next.high ? 'high' : 'low'} water ${T.next.height.toFixed(1)} m at ${hhmm(vanTime(T.next.t).hour)}` : ''}${T.source === 'chs' ? '' : ' (estimate, offline)'}`
     now.textContent = live ? `Live: ${Math.round(live.temp)}°C, ${live.desc}` : live === false ? 'Live: Open-Meteo unreachable, retrying' : 'Live: loading Vancouver weather…'
     const ic = w.isNight && (w.kind === 'clear' || w.kind === 'cloudy') ? ICON.night : ICON[w.kind]
     btn.set({ icon: ic, label: state.mode === 'live' && live ? `${Math.round(live.temp)}°` : 'Weather' })
@@ -618,6 +637,7 @@ export default function weather(city) {
       for (const m of [atmo, drops, fall3, splash]) { city.overlay.remove(m); m.geometry.dispose(); m.material.dispose() }
       city.scene.remove(dome); dome.geometry.dispose(); dome.material.dispose()
       if (city.surface) { city.surface.wet = 0; city.surface.snow = 0 }
+      if (city.sea) city.sea.level = 0; city.tide = null
       sun.color.copy(saved.sunC); sun.intensity = saved.sunI
       hemi.color.copy(saved.sky); hemi.groundColor.copy(saved.gnd); hemi.intensity = saved.hemiI
       city.light.setSunDirection(saved.dir)
