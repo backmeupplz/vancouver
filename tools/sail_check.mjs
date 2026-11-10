@@ -1,8 +1,11 @@
 // node tools/sail_check.mjs: every race and docking mark of the sail plugin (goals.js COURSES) is on open water, in the
-// baked tiles. Prints one line per course (length, dry points within 30 m of each mark); exits 1 on a dry mark.
-import { server, open, settle } from './pw.mjs'
+// baked tiles, and clear of the moored boats and ships at anchor (city.ships.nearby: the boat bumps into them): each mark,
+// and where the boat is put for the start. Prints one line per course (length, dry points within 30 m of each mark,
+// vessels lying within 8 m of each mark and of the start); exits 1 on a dry or blocked mark.
+import { args, server, open, settle } from './pw.mjs'
 const srv = await server()
-const { browser, page } = await open({ port: srv.port, query: '?drivedebug' })
+const [o] = args(process.argv.slice(2), { tiles: '' }) // --tiles https://vancouver.borodutch.com/tiles: the published ones
+const { browser, page } = await open({ ...o, port: srv.port, query: '?drivedebug' })
 let bad = 0
 try {
   await settle(page, 800)
@@ -16,10 +19,11 @@ try {
   for (const id of await page.evaluate(() => sailDebug.goals.courses.map((c) => c.id))) {
     await page.evaluate((id) => { const p = sailDebug.goals.startRace(id); sailDebug.teleport(p.x, p.z, p.h) }, id)
     await page.waitForTimeout(6000) // the tiles there
-    const r = await page.evaluate(() => { const c = sailDebug.goals.S.race.c, w = sailDebug.wet; let L = 0
+    const r = await page.evaluate(() => { const c = sailDebug.goals.S.race.c, w = sailDebug.wet, B = sailDebug.B; let L = 0
+      const lying = (x, z) => (city.ships?.nearby?.(x, z, 8) || []).filter((s) => !s.speed).length
       for (let i = 1; i < c.pts.length; i++) L += Math.hypot(c.pts[i].x - c.pts[i - 1].x, c.pts[i].z - c.pts[i - 1].z)
-      return { len: Math.round(L), dry: c.pts.map((p) => (w(p.x, p.z) ? 0 : 9) + [0, 1, 2, 3, 4, 5, 6, 7].filter((k) => !w(p.x + 30 * Math.cos(k * 0.785), p.z + 30 * Math.sin(k * 0.785))).length) } })
-    if (r.dry.some((n) => n > 2)) bad++
+      return { len: Math.round(L), moored: [lying(B.x, B.z), ...c.pts.map((p) => lying(p.x, p.z))], dry: c.pts.map((p) => (w(p.x, p.z) ? 0 : 9) + [0, 1, 2, 3, 4, 5, 6, 7].filter((k) => !w(p.x + 30 * Math.cos(k * 0.785), p.z + 30 * Math.sin(k * 0.785))).length) } })
+    if (r.dry.some((n) => n > 2) || r.moored.some((n) => n)) bad++
     console.log(id, JSON.stringify(r))
   }
 } finally { await browser.close(); srv.stop() }

@@ -2,6 +2,8 @@
 import { createRequire } from 'node:module'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import fs from 'node:fs'
+import os from 'node:os'
 const { chromium } = createRequire('/Users/borodutch/code/agentboard/')('playwright')
 export const SIZES = { phone: [390, 844, 3], 'phone-land': [844, 390, 3] }
 
@@ -20,7 +22,7 @@ export async function server(port) { // own python static server on public/ unle
   return { port, stop: () => p.kill() }
 }
 
-export async function open({ port, dpr = 1, size = '1400x900', tier = 'auto', weather = 'clear', hour = 13, season, query = '', hash = '', init, gpuFlags = [] }) {
+export async function open({ port, dpr = 1, size = '1400x900', tier = 'auto', weather = 'clear', hour = 13, season, query = '', hash = '', init, gpuFlags = [], tiles = '' }) {
   const [w, h, pd] = SIZES[size] || [...size.split('x').map(Number), +dpr]
   const phone = !!SIZES[size]
   const browser = await chromium.launch({ channel: 'chrome', args: ['--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=metal', ...gpuFlags] })
@@ -30,9 +32,21 @@ export async function open({ port, dpr = 1, size = '1400x900', tier = 'auto', we
     localStorage.setItem('vancouver.graphics', t)
   }, [weather, +hour, tier])
   if (init) await ctx.addInitScript(init)
+  if (tiles) { // --tiles https://vancouver.borodutch.com/tiles: the published tiles instead of public/tiles (kept in a folder in the temp dir)
+    const dir = `${os.tmpdir()}/vancouver-tiles-${tiles.replace(/\W+/g, '_')}`
+    await ctx.route('**/tiles/**', async (route) => {
+      const rel = new URL(route.request().url()).pathname.split('/tiles/')[1], f = `${dir}/${rel}`
+      if (!fs.existsSync(f)) {
+        const r = await fetch(`${tiles}/${rel}`).catch(() => null)
+        if (!r?.ok) return route.fulfill({ status: r?.status || 504 })
+        fs.mkdirSync(f.slice(0, f.lastIndexOf('/')), { recursive: true }); fs.writeFileSync(f + '.part' + process.pid, Buffer.from(await r.arrayBuffer())); fs.renameSync(f + '.part' + process.pid, f)
+      }
+      route.fulfill({ path: f })
+    })
+  }
   const page = await ctx.newPage(), errs = []
   page.on('console', (m) => m.type() === 'error' && errs.push(m.text()))
-  page.on('pageerror', (e) => errs.push(e.message))
+  page.on('pageerror', (e) => errs.push(e.message + (e.stack?.split('\n')[1] || '').replace(/^\s*at/, ' at').replace(/http:\/\/[^/]+/, '')))
   if (season) query += (query ? '&' : '?') + 'season=' + season // core/tiles.js reads ?season=
   await page.goto(`http://127.0.0.1:${port}/${query}${hash}`)
   await page.waitForFunction(() => window.city && window.view?.tiles && !document.querySelector('#loading'), null, { timeout: 240000 })

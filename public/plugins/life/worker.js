@@ -56,6 +56,7 @@ onmessage = ({ data: m }) => {
   if (m.type === 'tiles') {
     for (const k of m.drop) tiles.delete(k)
     for (const t of m.add) tiles.set(t.key, t)
+    if (m.masks) masks = m.masks.map((r) => ({ ox: -1e9, oy: -1e9, size: 2e9, fp: { pts: Float32Array.from(r.flat()), start: [0, r.length * 2] } }))
     dirty = walkDirty = true
   } else if (m.type === 'area') {
     area = m.area; dirty = walkDirty = true
@@ -1143,7 +1144,8 @@ function* buildWalk() {
     near.near(x, y, (w) => { for (let i = 0; i < w.c.x.length; i++) { const d = (w.c.x[i] - x) ** 2 + (w.c.y[i] - y) ** 2; if (d < bd) { bd = d; bx = w.c.x[i]; by = w.c.y[i] } } })
     return bd < 1e9 ? Math.atan2(by - y, bx - x) : Math.random() * 6.28
   }
-  const benches = poisOf([4], area.vx, area.vy, r).map((q) => ({ x: q.x, y: q.y, h: groundH(q.x, q.y) + 0.1, ang: face(q.x, q.y), id: q.id }))
+  const benches = poisOf([4], area.vx, area.vy, r).filter((q) => !wallOut(q.x, q.y, 0)).map( // (not the ones mapped indoors, on a roof terrace)
+    (q) => ({ x: q.x, y: q.y, h: groundH(q.x, q.y) + 0.1, ang: face(q.x, q.y), id: q.id }))
   const stops = poisOf([5], area.vx, area.vy, r).map((q) => ({ x: q.x, y: q.y, h: groundH(q.x, q.y) + 0.13, ang: face(q.x, q.y), id: q.id }))
   return { nodes, foot, cycl, cum: cumWeights(foot, (w) => w.weight), bcum: cumWeights(cycl, (w) => w.bikeWeight),
     weight: foot.reduce((s, w) => s + w.weight, 0), bikeWeight: cycl.reduce((s, w) => s + w.bikeWeight, 0), benches, stops, rg }
@@ -1241,7 +1243,9 @@ function makeStatics() {
     const n = Math.floor(rnd(s.id, 4) * (1 + 3.5 * (0.15 + day)))
     for (let i = 0; i < n; i++) {
       const a = rnd(s.id, 5 + i) * 6.28, d = 0.6 + rnd(s.id, 9 + i) * 1.4
-      sit(`s${s.id}:${i}`, person(s.x + Math.cos(a) * d, s.y + Math.sin(a) * d, s.h, s.ang + (rnd(s.id, 13 + i) - 0.5) * 1.2, 1, seeded(s.id + i)))
+      const p = person(s.x + Math.cos(a) * d, s.y + Math.sin(a) * d, s.h, s.ang + (rnd(s.id, 13 + i) - 0.5) * 1.2, 1, seeded(s.id + i))
+      outdoors(p) // (a stop by a wall)
+      sit(`s${s.id}:${i}`, p)
     }
   }
   for (const p of old.values()) if (seen(p.x, p.y, p.h)) statics.push(p)
@@ -1337,11 +1341,49 @@ function hopAt(p, n, o, then) {
   p.mode = 'wait'; p.waitT = 0; p.xhop = { o: { x: o.x, y: o.y, h: o.h }, leg, cn, then }
   kerbside(p)
 }
+// Buildings (the detail tiles' footprints, the landmarks' outlines): OpenStreetMap's footways and the sidewalks beside
+// a street run through a good many of them (an arcade, a wall drawn a metre over the sidewalk, a mall's corridor).
+// wallOut: the step that takes (x, y) out of the building it is in, to m metres clear of its nearest wall (null in the open)
+const FC = 16
+let masks = []
+function fpGrid(t) {
+  const F = t.fp, n = F.start.length - 1
+  t.fg = new Map(); t.fbb = new Float32Array(n * 4)
+  for (let r = 0; r < n; r++) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+    for (let q = F.start[r]; q < F.start[r + 1]; q += 2) { x0 = Math.min(x0, F.pts[q]); x1 = Math.max(x1, F.pts[q]); y0 = Math.min(y0, F.pts[q + 1]); y1 = Math.max(y1, F.pts[q + 1]) }
+    t.fbb.set([x0, y0, x1, y1], r * 4)
+    for (let cx = Math.floor(x0 / FC); cx <= Math.floor(x1 / FC); cx++) for (let cy = Math.floor(y0 / FC); cy <= Math.floor(y1 / FC); cy++) { const k = cx * 65536 + cy, a = t.fg.get(k); if (a) a.push(r); else t.fg.set(k, [r]) }
+  }
+}
+const wout = { x: 0, y: 0 }
+function wallOut(x, y, m) {
+  const k = Math.floor(x / FC) * 65536 + Math.floor(y / FC)
+  for (const t of [...tiles.values(), ...masks]) {
+    if (!t.fp || x < t.ox - 100 || x > t.ox + t.size + 100 || y < t.oy - 100 || y > t.oy + t.size + 100) continue
+    if (!t.fg) fpGrid(t)
+    const P = t.fp.pts, B = t.fbb
+    for (const r of t.fg.get(k) || []) {
+      if (x < B[r * 4] || y < B[r * 4 + 1] || x > B[r * 4 + 2] || y > B[r * 4 + 3]) continue
+      let inside = false, bd = Infinity, bx = 0, by = 0
+      for (let q = t.fp.start[r], e = t.fp.start[r + 1], w = e - 2; q < e; w = q, q += 2) {
+        const ax = P[w], ay = P[w + 1], cx = P[q], cy = P[q + 1]
+        if ((cy > y) !== (ay > y) && x < ((ax - cx) * (y - cy)) / (ay - cy) + cx) inside = !inside
+        const dx = cx - ax, dy = cy - ay, u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy || 1))), d = Math.hypot(ax + dx * u - x, ay + dy * u - y)
+        if (d < bd) { bd = d; bx = ax + dx * u; by = ay + dy * u }
+      }
+      if (inside && bd > 1e-4) { wout.x = ((bx - x) / bd) * (bd + m); wout.y = ((by - y) / bd) * (bd + m); return wout }
+    }
+  }
+  return null
+}
+const outdoors = (p) => { for (let k = 0; k < 2; k++) { const o = wallOut(p.x, p.y, 0.35); if (!o) return; p.x += o.x; p.y += o.y } } // (twice: out of one into its neighbour)
 function pedPos(p) {
   const w = p.wp
   at(w.c, p.u, tmp)
   const off = p.side * w.off + p.lat
   p.x = tmp.x - tmp.ty * off; p.y = tmp.y + tmp.tx * off; p.h = tmp.h + w.lift
+  if (!w.c.deck) outdoors(p)
   p.ang = Math.atan2(tmp.ty * p.dir, tmp.tx * p.dir)
 }
 function release(p) {
@@ -1418,6 +1460,7 @@ function stepPeople(dt) {
       }
       const f = p.hlen > 0.01 ? Math.min(1, p.ht / p.hlen) : 1
       p.x = p.hx0 + (p.hx1 - p.hx0) * f; p.y = p.hy0 + (p.hy1 - p.hy0) * f; p.h = p.hh0 + (p.hh1 - p.hh0) * f
+      outdoors(p)
       if (p.hlen > 0.05) p.ang = Math.atan2(p.hy1 - p.hy0, p.hx1 - p.hx0)
       if (f >= 1) p.then()
     } else if (p.mode === 'wait') {

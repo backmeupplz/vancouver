@@ -323,6 +323,12 @@ export default function sail(city) {
   function start(x, z) {
     document.activeElement?.blur?.()
     windStep(10, 0)
+    // among moored boats (a marina's rows hold a boat that starts between them): from the nearest water clear of them
+    const clear = (px, pz) => wet(px, pz) && !city.ships?.nearby?.(px, pz, 10, true).length
+    for (let d = 10, k = 0; !clear(x, z) && d <= 200; k = (k + 1) % 12, d += k ? 0 : 10) {
+      const px = x + Math.sin(k * Math.PI / 6) * d, pz = z + Math.cos(k * Math.PI / 6) * d
+      if (clear(px, pz)) { x = px; z = pz }
+    }
     // set off on a beam reach, the way with more water ahead
     const from = Math.atan2(-wind.x, -wind.z)
     let h = from + Math.PI / 2

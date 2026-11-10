@@ -108,7 +108,7 @@ export default function drive(city) {
     let bx0 = t.ox, by0 = t.oy, bx1 = t.ox + 1024, by1 = t.oy + 1024 // what its roads cover: a long bridge sticks out of its tile
     for (const s of segs) { bx0 = Math.min(bx0, s.x0, s.x1); by0 = Math.min(by0, s.y0, s.y1); bx1 = Math.max(bx1, s.x0, s.x1); by1 = Math.max(by1, s.y0, s.y1) }
     for (let r = 0; r < bb.length; r += 4) { bx0 = Math.min(bx0, bb[r]); by0 = Math.min(by0, bb[r + 1]); bx1 = Math.max(bx1, bb[r + 2]); by1 = Math.max(by1, bb[r + 3]) } // (a landmark's outline too)
-    const b = { t, segs, rg, fg, fp, lo, bb, box: [bx0, by0, bx1, by1], segSeen: new Uint32Array(segs.length), fpSeen: new Uint32Array(bb.length / 4) }
+    const b = { t, segs, rg, fg, fp, lo, bb, m0: M.length ? nF + nO : Infinity, box: [bx0, by0, bx1, by1], segSeen: new Uint32Array(segs.length), fpSeen: new Uint32Array(bb.length / 4) }
     furniture(b)
     return b
   }
@@ -237,16 +237,17 @@ export default function drive(city) {
   }
   // push a circle out of building footprints: returns the summed push (x, y) or null. h: the height it is at (the
   // camera's), when the raised parts of buildings that reach down to there are solid too
-  function collide(x, y, rad, h = -Infinity) {
+  function collide(x, y, rad0, h = -Infinity, pad = 0) { // pad: further off the landmarks' outlines (their scanned meshes stand out past them: steps, porticos, cornices)
     let px = 0, py = 0, hit = false
-    const mark = ++stamp
-    for (const b of tilesNear(x, y, rad)) {
+    const mark = ++stamp, R = rad0 + pad
+    for (const b of tilesNear(x, y, R)) {
       if (!b.fp) continue
-      for (let cx = Math.floor((x - rad) / CELL); cx <= Math.floor((x + rad) / CELL); cx++) for (let cy = Math.floor((y - rad) / CELL); cy <= Math.floor((y + rad) / CELL); cy++) {
+      for (let cx = Math.floor((x - R) / CELL); cx <= Math.floor((x + R) / CELL); cx++) for (let cy = Math.floor((y - R) / CELL); cy <= Math.floor((y + R) / CELL); cy++) {
         for (const r of b.fg.get(ckey(cx, cy)) || NONE) {
           if (b.fpSeen[r] === mark) continue
           b.fpSeen[r] = mark
           if (b.lo && b.lo[r] > h) continue
+          const rad = r >= b.m0 ? R : rad0
           if (x + rad < b.bb[r * 4] || x - rad > b.bb[r * 4 + 2] || y + rad < b.bb[r * 4 + 1] || y - rad > b.bb[r * 4 + 3]) continue
           const P = b.fp.pts, s0 = b.fp.start[r], s1 = b.fp.start[r + 1]
           let inside = false, bd = Infinity, bx = 0, by = 0
@@ -1001,10 +1002,15 @@ export default function drive(city) {
       const len = Math.hypot(cx - P.x, cy - P.y) || 1, k = Math.max(0, k0 - 1 / len)
       chase.pos.x = P.x + (cx - P.x) * k; chase.pos.z = -(P.y + (cy - P.y) * k)
     }
-    const side = !tube && collide(chase.pos.x, -chase.pos.z, 1, ch)
+    const side = !tube && collide(chase.pos.x, -chase.pos.z, 1, ch, 2)
     if (side) { chase.pos.x += side.x; chase.pos.z -= side.y }
+    // and out of tree trunks (their crowns dissolve between the lens and the player: materials.js occluder)
+    if (!tube) propsNear(chase.pos.x, -chase.pos.z, 1.3, (x, y, r, kind, ang, g) => {
+      const dx = chase.pos.x - x, dy = -chase.pos.z - y, d = Math.hypot(dx, dy), m = r + nearPlane() + 0.2 - d
+      if (!kind && m > 0 && d > 1e-3 && chase.pos.y - g < 8) { chase.pos.x += (dx / d) * m; chase.pos.z -= (dy / d) * m }
+    })
     // the near plane comes in when a wall is close, so it never cuts through one
-    const wall = !tube && collide(chase.pos.x, -chase.pos.z, 2.5, ch)
+    const wall = !tube && collide(chase.pos.x, -chase.pos.z, 2.5, ch, 2)
     chase.near = wall ? clamp((2.5 - Math.hypot(wall.x, wall.y)) * 0.6, 0.2, nearPlane()) : nearPlane()
     const ahead = onFoot ? 3 : doors ? car.V.hl - 3 : 6 + big * 0.3, right = doors ? car.V.hw + 1.2 : 0
     v4.set(P.x + fwdX(P.yaw) * ahead + fwdY(P.yaw) * right, P.h + lift + (onFoot ? 1.3 : 1.0), -(P.y + fwdY(P.yaw) * ahead - fwdX(P.yaw) * right))
@@ -1214,7 +1220,7 @@ export default function drive(city) {
     const P = r.s.p.pts, m = P.length - 2, end = Math.min(Math.hypot(x - P[0], y - P[1]), Math.hypot(x - P[m], y - P[m + 1])) < 10
     const dz = r.z + 0.58
     if (r.over > 0.8 && !joined(r)) return { y: g, deck: false, end } // past a deck's end where nothing raised goes on: the street (not a disc of deck round its end)
-    if (r.d < 1.2 && Math.abs(dz - curY) < (end ? 4 : 1.2)) return r.s.p.tunnel ? { y: dz, deck: true, end, roof: r.z + r.s.p.tunnel } : { y: Math.max(g, dz), deck: dz - g > 1.2, end }
+    if (r.d < (r.s.p.band ? 2.2 : 1.2) && Math.abs(dz - curY) < (end ? 4 : 1.2)) return r.s.p.tunnel ? { y: dz, deck: true, end, roof: r.z + r.s.p.tunnel } : { y: Math.max(g, dz), deck: dz - g > 1.2, end }
     return { y: g, deck: false, end }
   }
   // does another deck go on from the end of r's piece that (x, y) is past (a joint, not an abutment)
@@ -1277,7 +1283,10 @@ export default function drive(city) {
     const blocked = (x, y) => {
       const s = surface(x, y, car.h)
       if (car.deck && !s.deck && car.h - s.y > 2 && !s.end) return 'edge' // off the deck's side
-      if (car.deck) { const p = railPast(x, y, car.h - 0.58); if (p + car.V.hw > 0 && p > railPast(car.x, car.y, car.h - 0.58)) return 'rail' } // its railing, a tunnel's wall
+      if (car.deck) { // its railing, a tunnel's wall: the van's side, and its leading corners (turned across the deck its nose is the first through)
+        const z = car.h - 0.58, a = Math.sign(car.speed || 1) * (car.V.hl - 0.2), w = car.V.hw
+        for (const [ox, oy, m] of [[0, 0, w], [fx * a + fy * w, fy * a - fx * w, 0], [fx * a - fy * w, fy * a + fx * w, 0]]) { const p = railPast(x + ox, y + oy, z); if (p + m > 0 && p > railPast(car.x + ox, car.y + oy, z)) return 'rail' }
+      }
       const ax = x + fx * Math.sign(car.speed || 1) * 2, ay = y + fy * Math.sign(car.speed || 1) * 2
       if (!s.deck && isWater(ax, ay) && !roadAt(ax, ay, car.h)) return 'water'
       return null
@@ -1328,17 +1337,19 @@ export default function drive(city) {
     }
     carVsPeople(performance.now())
     kerbs()
-    // stand on the surface: height from the middle, pitch and roll from the wheels
+    // stand on the surface, on all four wheels: the height, pitch and roll of the plane through the road under them
+    // (so a long bus over a crest, a van across a camber or half on the next deck has its wheels on the road; what is
+    // left is the road's twist). The deck and the tunnel are the ones under the middle
     const s = surface(car.x, car.y, car.h), h0 = car.h
     car.deck = s.deck; car.roof = s.roof
-    car.h += (s.y - car.h) * (1 - Math.exp(-18 * dt))
     const near = (v) => (Math.abs(v - car.h) < 1.5 ? v : car.h) // a wheel over a deck edge or a kerb drop doesn't tip the van
     const wb = car.V.wb, ax = wb / 2, tw = car.V.hw * 0.9
-    const f = near(surface(car.x + fx * ax, car.y + fy * ax, car.h).y), b = near(surface(car.x - fx * ax, car.y - fy * ax, car.h).y)
     const rx = Math.cos(car.yaw), ry = Math.sin(car.yaw) // right in (x, north)
-    const l = city.world.heightAt(car.x - rx * tw, -(car.y - ry * tw)), r = city.world.heightAt(car.x + rx * tw, -(car.y + ry * tw))
-    car.pitch += (Math.atan2(f - b, wb) - car.pitch) * (1 - Math.exp(-10 * dt))
-    car.roll += ((car.deck ? 0 : Math.atan2(near(r + 0.2) - near(l + 0.2), tw * 2)) - car.roll) * (1 - Math.exp(-10 * dt))
+    const at = (a, t) => near(surface(car.x + fx * a + rx * t, car.y + fy * a + ry * t, car.h).y)
+    const fl = at(ax, -tw), fr = at(ax, tw), bl = at(-ax, -tw), br = at(-ax, tw)
+    car.h += ((Math.abs(s.y - car.h) < 1.5 ? (fl + fr + bl + br) / 4 : s.y) - car.h) * (1 - Math.exp(-18 * dt)) // (off a deck, down a drop: to the surface under the middle)
+    car.pitch += (Math.atan2((fl + fr - bl - br) / 2, wb) - car.pitch) * (1 - Math.exp(-10 * dt))
+    car.roll += (Math.atan2((fr + br - fl - bl) / 2, tw * 2) - car.roll) * (1 - Math.exp(-10 * dt))
     car.spin += (car.speed * dt) / car.V.wheel
     if (car.V.airYaw) fly(dt, h0)
   }
@@ -1484,7 +1495,7 @@ export default function drive(city) {
     }
     const s = footSurface(man.x, man.y, man.h)
     man.deck = s.deck; man.roof = s.roof
-    man.h += (s.y - man.h) * (1 - Math.exp(-14 * dt))
+    man.h = clamp(man.h + (s.y - man.h) * (1 - Math.exp(-14 * dt)), s.y - 0.25, s.y + 0.25) // (a bank, a wall in the terrain: up or down it at once, not through it)
     man.phase += dt * Math.abs(man.speed) * (man.run ? 2.3 : 3.6)
   }
   // the walker (radius 0.32) out of a circle at (x, y) of radius r: true if it touched

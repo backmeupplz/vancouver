@@ -527,13 +527,14 @@ export default function life(city) {
       if (sent.has(k) || !t.graph || !(near(t, simA.x, simA.y, simA.r) || near(t, pedA.vx, pedA.vy, pedA.vr))) continue
       sent.add(k)
       add.push({ key: k, level: t.level, ox: t.ox, oy: t.oy, size: t.level ? 4096 : 1024, terrain: { n: t.terrain.n, h: t.terrain.h, wall: t.terrain.wall },
-        pieces: t.graph.pieces.filter((p) => p.kind <= 13), pois: (t.graph.pois || []).filter((q) => q.kind !== 3) })
+        pieces: t.graph.pieces.filter((p) => p.kind <= 13), pois: (t.graph.pois || []).filter((q) => q.kind !== 3),
+        fp: t.footprints ? { pts: t.footprints.pts, start: t.footprints.start } : null }) // (the buildings: people keep out of them)
     }
     for (const k of sent) {
       const t = tiles.get(k)
       if (!t || !(near(t, simA.x, simA.y, simA.r) || near(t, pedA.vx, pedA.vy, pedA.vr))) { sent.delete(k); drop.push(k) }
     }
-    if (add.length || drop.length) worker.postMessage({ type: 'tiles', add, drop })
+    if (add.length || drop.length) worker.postMessage({ type: 'tiles', add, drop, masks: city.tiles?.masks || [] }) // (masks: the landmarks' outlines)
     if (moved) worker.postMessage({ type: 'area', area: { ...simA, ...pedA } })
   }
 

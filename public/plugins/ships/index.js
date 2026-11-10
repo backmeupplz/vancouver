@@ -342,7 +342,7 @@ export default async function ships(city) {
   // for games (the sail plugin): vessels within r metres of their hull's end, like city.traffic.nearby
   // ({ id, x, y, z, heading, length, width, speed }, forward = (sin heading, cos heading) in x / z)
   city.ships = {
-    nearby(x, z, r) {
+    nearby(x, z, r, hidden = false) { // hidden: the moored boats too while the map is too far out to show them (where a game is about to start)
       const res = [], t = Date.now() / 1000, zoom = city.view.zoom
       const near = (v, px, pz, h, sp, k) => {
         if (Math.hypot(px - x, pz - z) > r + (v.L * k) / 2) return
@@ -350,7 +350,7 @@ export default async function ships(city) {
       }
       for (const v of dyn) if (!(v.small && zoom < SMALL_ZOOM) && v.place(t, out, v)) near(v, out[0], out[1], out[2], out[3], v.k || 1)
       for (const v of stat) near(v, v.x, v.z, v.h, 0, 1)
-      if (moor.visible) for (const v of moored) near(v, v.x, v.z, v.h, 0, 1)
+      if (moor.visible || hidden) for (const v of moored) near(v, v.x, v.z, v.h, 0, 1)
       return res
     },
   }

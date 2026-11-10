@@ -1,17 +1,22 @@
-// node tools/clip_check.mjs [--routes downtown-van,beach-walk] [--secs 45] [--procs 3] [--out file.json] [--shots dir] [--tier high]
+// node tools/clip_check.mjs [--routes downtown-van,beach-walk] [--secs 45] [--procs 4] [--out file.json] [--shots dir] [--tier high] [--tiles https://vancouver.borodutch.com/tiles]
 // Clipping at play time (#587): the real page in Chrome, an autopilot in each third-person mode (van, cab, bus,
 // walker, hiker, boat) over places across the map; every frame it counts
 //   camera:  inside  the view shows the back of solid geometry (a second, tiny render of the solid meshes through the
 //                    game's camera with back faces in red: inside a building, under the ground or a deck, in a tunnel wall)
 //                    counted when back faces within 6 m fill > 1% of the view, or any > 8%
 //            under   the camera is under the terrain
+//            camTree the lens is in a tree's trunk; camShip (sailing) in a ship's hull or a bridge pier
 //   player:  nan (its position is not a number: nothing is drawn), bldg (in a building footprint), tree / post (a trunk or a pole in the body), car / ped (traffic, people
-//            in the body), wheel (a wheel > 20 cm under or over the road), feet (the walker's feet > 35 cm under or
+//            in the body), wheel (a wheel > 20 cm under or over the road), feet (the walker's feet > 30 cm under or
 //            over the ground), shore / ship (the boat's hull on land, in a ship or a bridge pier)
 //   others:  npcBldg (a simulated car or pedestrian near the player inside a building), npcProp (in a trunk or pole),
 //            npcCar (two simulated cars in each other)
 // The autopilot follows the road or path, and every few seconds swerves off it into whatever stands beside it, then
 // reverses, so walls, trees, poles and parked cars get hit and the camera is squeezed against them.
+// Repeatable: once the game is on, the page runs on a clock of exactly 1/60 s a frame (performance.now, the frame's
+// time, Date.now) with seeded Math.random (the traffic worker's too), for --secs × 60 frames however fast the machine
+// draws them; two runs of the same code agree but for what streams in at its own pace (tiles, the traffic network).
+// Looking into one: --routes one --at wheel[:n] stops at the (n-th) frame counted as that kind, --js 'expression' prints its value in the page then.
 // Prints one line per route (frames, then the count of frames per kind) and the total; --out writes them with the
 // first spots of each kind; --shots saves a frame of each kind as it happens (for tools/sheet.py).
 import { args, server, open, settle } from './pw.mjs'
@@ -22,24 +27,28 @@ const ROUTES = { // name: [kind, lat, lon, option]
   'downtown-van': ['car', 49.2838, -123.1185],
   'gastown-taxi': ['taxi', 49.2836, -123.1085],
   'bridge-van': ['car', 49.2755, -123.1368, 'deck'], // Burrard Bridge: starts on the nearest deck
-  'tunnel-van': ['car', 49.2775, -123.0312, 'tunnel'], // Cassiar tunnel: starts in the nearest tube
+  'tunnel-van': ['car', 49.2775, -123.0312, 'tunnel'], // Cassiar tunnel: starts in the nearest tube (in the published tiles: --tiles)
+  'massey-van': ['car', 49.1217, -123.0757, 'tunnel'], // George Massey tunnel
   'suburb-van': ['car', 49.2335, -123.156],
   'northshore-van': ['car', 49.342, -123.073],
   'bus-14': ['bus', 0, 0, '14'],
   'downtown-walk': ['foot', 49.2827, -123.1207],
   'beach-walk': ['foot', 49.2745, -123.153],
   'seawall-walk': ['foot', 49.287, -123.143],
+  'slope-walk': ['foot', 49.2416, -123.1128], // Queen Elizabeth Park: the quarry's banks, steps and paths
   'grind-hike': ['hike', 0, 0, 'grind'],
   'falsecreek-sail': ['sail', 49.2728, -123.131],
+  'bridge-sail': ['sail', 49.2752, -123.1372], // under Burrard Bridge: its piers, Granville Island's docks
+  'marina-sail': ['sail', 49.2916, -123.125], // Coal Harbour: moored boats, floats
 }
-const [o, rest] = args(process.argv.slice(2), { routes: Object.keys(ROUTES).join(','), secs: 45, procs: 4, out: '', shots: '', rt: '', tier: 'high', dpr: 1 })
+const [o, rest] = args(process.argv.slice(2), { routes: Object.keys(ROUTES).join(','), secs: 45, procs: 4, out: '', shots: '', rt: '', tier: 'high', dpr: 1, tiles: '', at: '', js: '' })
 const names = String(o.routes).split(',')
 
 if (names.length > 1) { // the parent: a process per route, a few at a time
   const res = [], todo = [...names]
   const one = (n) => new Promise((done) => {
     let buf = ''
-    const p = spawn(process.execPath, [process.argv[1], '--routes', n, '--secs', o.secs, '--tier', o.tier, ...(o.shots ? ['--shots', o.shots] : [])], { stdio: ['ignore', 'pipe', 'inherit'] })
+    const p = spawn(process.execPath, [process.argv[1], '--routes', n, '--secs', o.secs, '--tier', o.tier, ...(o.tiles ? ['--tiles', o.tiles] : []), ...(o.port ? ['--port', o.port] : []), ...(o.shots ? ['--shots', o.shots] : [])], { stdio: ['ignore', 'pipe', 'inherit'] })
     p.stdout.on('data', (d) => (buf += d)); p.on('close', () => { try { res.push(JSON.parse(buf.trim().split('\n').pop())) } catch { res.push({ route: n, error: buf.slice(-200) }) } done() })
   })
   await Promise.all(Array.from({ length: +o.procs }, async () => { while (todo.length) await one(todo.shift()) }))
@@ -57,8 +66,66 @@ if (names.length > 1) { // the parent: a process per route, a few at a time
 // ---------------------------------------------------------------- one route, in the page
 const name = names[0], [kind, lat, lon, option] = ROUTES[name]
 const srv = await server(o.port)
-const init = () => { const raf = window.requestAnimationFrame.bind(window); window.requestAnimationFrame = (fn) => raf((ts) => { fn(ts); window.__clip?.sample?.() }) }
-const { browser, page } = await open({ ...o, port: srv.port, query: '?drivedebug', hash: '#13645,11243,0.1295', init })
+const init = () => { // __vclock(): from then on the page runs on its own clock, 1/60 s a frame, in step with its workers
+  const raf = window.requestAnimationFrame.bind(window), real = performance.now.bind(performance), date = Date.now
+  const st = window.setTimeout.bind(window), si = window.setInterval.bind(window), ct = window.clearTimeout.bind(window), ci = window.clearInterval.bind(window)
+  const rnd = (s) => () => { let t = (s = (s + 0x6d2b79f5) | 0); t = Math.imul(t ^ (t >>> 15), 1 | t); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296 }
+  let vt = null, v0 = 0, seen = -1, go = true, held = 0, ticks = 0, nid = 1e7, stalled = 0, last = 0, renew = null, fresh = false
+  const timers = new Map() // setTimeout / setInterval on the page's clock
+  window.__vclock = () => { d0 = date(); vt = v0 = last; Math.random = rnd(7); fresh = true } // (from the last frame's time: the first step is 1/60 s too)
+  performance.now = () => vt ?? real()
+  let d0 = 0
+  Date.now = () => (vt == null ? date() : d0 + Math.round(vt - v0)) // (on from the real time: a bus leaves its first stop by the timetable)
+  window.setTimeout = (fn, ms = 0, ...a) => { if (vt == null || typeof fn !== 'function') return st(fn, ms, ...a); timers.set(++nid, { at: vt + ms, fn, a }); return nid }
+  window.setInterval = (fn, ms = 0, ...a) => { if (vt == null || typeof fn !== 'function') return si(fn, ms, ...a); timers.set(++nid, { at: vt + ms, fn, a, every: Math.max(1, ms) }); return nid }
+  window.clearTimeout = (id) => { if (!timers.delete(id)) ct(id) }
+  window.clearInterval = (id) => { if (!timers.delete(id)) ci(id) }
+  // a frame waits for the tiles being fetched and decoded and for the traffic worker's answer to the last frame, so
+  // what they bring arrives in the same frame every run (not for ever: 30 s)
+  const waiting = () => ticks > 0 || [...window.view.tiles.tiles.values()].some((t) => t.state === 'loading' && !t.res)
+  window.__waits = () => ({ stalled, ticks, loading: [...window.view.tiles.tiles].filter(([, t]) => t.state === 'loading' && !t.res).map(([k]) => k) }) // (for --js)
+  window.requestAnimationFrame = (fn) => raf(function cb(ts) {
+    if (vt == null) { last = ts; return fn(ts) }
+    if (ts !== seen) { // a new frame: the one before is drawn, count it
+      seen = ts
+      if (fresh && !ticks) { fresh = false; renew?.() } // (once the old one has answered: the page waits for that)
+      go = stalled > 2 || !waiting() || ++held >= 1800
+      if (go && held >= 1800) { stalled++; ticks = 0 } // (a tile or an answer that never comes: after three of those the run goes on without waiting, and says so)
+      if (go) {
+        held = 0; try { window.__clip?.sample?.() } catch (e) { window.__clip.error = String(e.stack || e).slice(0, 300) } vt += 1000 / 60
+        for (const [id, t] of [...timers]) if (t.at <= vt && timers.has(id)) { if (t.every) t.at += t.every; else timers.delete(id); t.fn(...t.a) }
+      }
+    }
+    if (go) fn(vt); else raf(cb)
+  })
+  // the traffic and people (a worker with no imports): seeded random numbers, its time budget counted in calls; and at
+  // __vclock() a new one, given the tiles it had in a fixed order, so the cars and people of a run don't hang on what
+  // happened while the page loaded (the run then waits WARM frames for the streets to fill)
+  const W = window.Worker
+  window.Worker = function (url, opt) {
+    if (!/life\/worker/.test(String(url))) return new W(url, opt)
+    const src = URL.createObjectURL(new Blob([`{ let c = 0; Math.random = (${rnd})(11); performance.now = () => (c += 0.01) }\nimportScripts(${JSON.stringify(String(url))})`], { type: 'text/javascript' }))
+    const had = { tiles: new Map(), masks: [], area: null, opts: null }
+    let w
+    const make = () => { w = new W(src, opt); w.onmessage = (e) => { if (e.data?.type === 'frame' && ticks) ticks--; F.onmessage?.(e) } }
+    const F = { onmessage: null, terminate: () => w.terminate(),
+      postMessage(m, tr) {
+        if (m?.type === 'tick') ticks++
+        else if (m?.type === 'tiles') { for (const k of m.drop) had.tiles.delete(k); for (const t of m.add) had.tiles.set(t.key, t); had.masks = m.masks }
+        else if (m?.type === 'area' || m?.type === 'opts') had[m.type] = m
+        w.postMessage(m, tr)
+      } }
+    renew = () => {
+      w.terminate(); make()
+      if (had.opts) w.postMessage(had.opts)
+      w.postMessage({ type: 'tiles', add: [...had.tiles.values()].sort((a, b) => (a.key < b.key ? -1 : 1)), drop: [], masks: had.masks })
+      if (had.area) w.postMessage(had.area)
+    }
+    make()
+    return F
+  }
+}
+const { browser, page, errs } = await open({ ...o, port: srv.port, query: '?drivedebug', hash: '#13645,11243,0.1295', init })
 await settle(page, 500)
 await page.waitForFunction(() => window.driveDebug, null, { timeout: 30000 })
 const goto = (la, lo) => page.evaluate(([la, lo]) => { const c = city, d = c.world.fromLatLon(la, lo).sub(c.controls.target); c.camera.position.add(d); c.controls.target.add(d); c.camera.zoom = 0.12; c.camera.updateProjectionMatrix(); c.controls.update(); c.requestRender() }, [la, lo])
@@ -70,7 +137,7 @@ if (kind === 'sail') {
 } else if (kind === 'bus') await page.evaluate((r) => driveDebug.startBus(r, 0), option)
 else if (kind === 'hike') await page.evaluate((id) => driveDebug.startHike(id), option)
 else {
-  if (option) { await goto(lat, lon); await settle(page, 1500) }
+  await goto(lat, lon); await settle(page, 1500) // (its tiles first: the start is on its street, deck or tube)
   await page.evaluate(([kind, la, lo, option]) => {
     const p = city.world.fromLatLon(la, lo), D = driveDebug
     let x = p.x, y = -p.z, yaw = 0, z = null
@@ -84,22 +151,29 @@ else {
       if (z == null) throw new Error('no ' + option + ' near')
       window.__deck = z + 0.58
     }
+    if (!option && kind === 'car') { const r = D.nearestRoad(x, y, 80); if (r) { x = r.px; y = r.py; yaw = Math.atan2(r.s.y1 - r.s.y0, r.s.x1 - r.s.x0) - Math.PI / 2 } } // on the street, along it
     if (kind === 'taxi') D.startTaxi(x, y); else D.start(kind, x, y, yaw)
   }, [kind, lat, lon, option]).catch((e) => { console.log(JSON.stringify({ route: name, error: String(e.message).split('\n')[0] })); process.exit(0) })
 }
 await page.waitForFunction(() => city.player && (!window.driveDebug || driveDebug.state === 'play' || city.player.mode === 'boat'), null, { timeout: 180000 })
 await page.evaluate(() => { if (window.__deck) Object.assign(driveDebug.car, { h: __deck, deck: true }) }) // (the dive keeps it on the ground until now)
 await page.waitForTimeout(kind === 'sail' ? 4500 : 1500)
+await settle(page, 300) // the tiles round the start all there: from here on every run sees the same
 
-await page.evaluate(async ([kind]) => {
+await page.evaluate(async ([kind, stopAt, atN, maxFrames]) => {
   const THREE = await import('three'), D = window.driveDebug, W = city.world, T = city.traffic
-  const C = (window.__clip = { px: null, frames: 0, counts: {}, spots: {}, shot: null, dist: 0, cat: {} })
+  const WARM = 600 // frames
+  __vclock()
+  const C = (window.__clip = { px: null, frames: 0, counts: {}, spots: {}, shot: null, dist: 0, cat: {}, trace: [], warm: kind === 'sail' ? 60 : WARM })
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v)), boat = kind === 'sail', foot = kind === 'foot' || kind === 'hike'
   // ---- the back-face pass: solid, one-sided, static meshes only (no instances, sprites, glass or shader effects)
   const rt = new THREE.WebGLRenderTarget(160, 100), px = new Uint8Array(160 * 100 * 4), R = view.renderer
   C.px = px
-  const mat = new THREE.ShaderMaterial({ side: THREE.DoubleSide, uniforms: { cat: { value: 0 } }, vertexShader: 'varying float d; void main() { vec4 p = modelViewMatrix * vec4(position, 1.0); d = -p.z; gl_Position = projectionMatrix * p; }',
-    fragmentShader: 'uniform float cat; varying float d; void main() { gl_FragColor = gl_FrontFacing ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(1.0, cat / 255.0, d < 6.0 ? 1.0 : 0.0, 1.0); }' })
+  // (the back faces first, then the front faces over them where they are as near or nearer: a wall built of two
+  // faces back to back, as a tunnel's tube is, shows its front)
+  const vertexShader = 'varying float d; void main() { vec4 p = modelViewMatrix * vec4(position, 1.0); d = -p.z; gl_Position = projectionMatrix * p; }'
+  const mat = new THREE.ShaderMaterial({ side: THREE.BackSide, uniforms: { cat: { value: 0 } }, vertexShader, fragmentShader: 'uniform float cat; varying float d; void main() { gl_FragColor = vec4(1.0, cat / 255.0, d < 6.0 ? 1.0 : 0.0, 1.0); }' })
+  const front = new THREE.ShaderMaterial({ side: THREE.FrontSide, depthFunc: THREE.LessEqualDepth, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -8, vertexShader, fragmentShader: 'void main() { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); }' })
   const CATS = ['', 'building', 'ground', 'road', 'landmark', 'other']
   const catOf = (o) => { const a = o.geometry.attributes; return a.aFac ? 1 : a.cls ? 2 : a.aRoad ? 3 : o.userData.landmarks || a.aWin ? 4 : 5 }
   const solid = (o) => { const M = o.material; return o.isMesh && !o.isInstancedMesh && !o.geometry.isInstancedBufferGeometry && !Array.isArray(M) && M.side === THREE.FrontSide && !M.transparent && !M.isShaderMaterial && M.depthWrite }
@@ -111,7 +185,8 @@ await page.evaluate(async ([kind]) => {
       if (!solid(o)) { o.visible = false; hidden.push(o) } else if (!o.__cat) { o.__cat = catOf(o); const f = o.onBeforeRender; o.onBeforeRender = function (...a) { if (a[4] === mat) { mat.uniforms.cat.value = o.__cat; mat.uniformsNeedUpdate = true } f.apply(this, a) } }
     })
     city.scene.overrideMaterial = mat; city.scene.background = null; R.shadowMap.autoUpdate = false
-    R.setRenderTarget(rt); R.clear(); R.render(city.scene, cam); R.readRenderTargetPixels(rt, 0, 0, 160, 100, px)
+    const ac = R.autoClear
+    R.setRenderTarget(rt); R.clear(); R.autoClear = false; R.render(city.scene, cam); city.scene.overrideMaterial = front; R.render(city.scene, cam); R.autoClear = ac; R.readRenderTargetPixels(rt, 0, 0, 160, 100, px)
     R.setRenderTarget(was); city.scene.overrideMaterial = null; city.scene.background = bg; R.shadowMap.autoUpdate = auto
     for (const o of hidden) o.visible = true
     hidden.length = 0
@@ -149,6 +224,10 @@ await page.evaluate(async ([kind]) => {
   C.sample = () => {
     const P = city.player
     if (!P || C.off) return
+    if (C.warm > 0) { if (!--C.warm) t0 = performance.now(); return } // (the streets fill; then the autopilot's clock starts)
+    if (C.frames >= maxFrames) { C.off = true; return }
+    C.pilot?.()
+    if (C.frames % 300 === 0) C.trace.push(+P.x.toFixed(2), +P.z.toFixed(2)) // where it is every 5 s: two runs side by side show where they part
     const cam = city.view.camera, bad = {}
     const hit = (k, note) => { bad[k] = note ?? true }
     C.frames++
@@ -174,7 +253,7 @@ await page.evaluate(async ([kind]) => {
         for (const r of city.tiles.masks || []) if (inP(r.flat(), 0, r.length * 2)) within.push('landmark')
         const ll = W.toLatLon(cam.position.x, cam.position.z)
         const rc = new THREE.Raycaster(); rc.setFromCamera(new THREE.Vector2(0, 0.5), cam); rc.far = 80 // what is ahead (a little up): the mesh, how far
-        const meshes = []; city.scene.traverseVisible((o) => { if (solid(o)) meshes.push(o) })
+        const meshes = []; city.scene.traverseVisible((o) => { if (solid(o) && o.geometry.attributes.position?.array) meshes.push(o) }) // (the tiles' meshes keep no arrays once uploaded)
         const sides = meshes.map((o) => o.material.side); for (const o of meshes) o.material.side = THREE.DoubleSide
         const h = rc.intersectObjects(meshes, false)[0]
         meshes.forEach((o, i) => { o.material.side = sides[i] })
@@ -185,8 +264,13 @@ await page.evaluate(async ([kind]) => {
     }
     const c = D?.car, m = D?.man, body = boat ? null : P.mode === 'foot' ? m : c
     if (cam.position.y < W.heightAt(cam.position.x, cam.position.z) + 0.1 && body?.roof == null) hit('under')
+    if (D && body?.roof == null) D.propsNear(cam.position.x, -cam.position.z, 0.3, (x, y, r, k, ang, g) => { if (!k && Math.hypot(x - cam.position.x, y + cam.position.z) < r + Math.min(0.3, cam.near) && cam.position.y - g < 6) hit('camTree') })
     if (boat) {
       const fx = Math.sin(P.heading), fz = Math.cos(P.heading)
+      const cx = cam.position.x, cz = cam.position.z // the lens in a tall hull (a small boat's is under it) or a pier
+      for (const s of city.ships?.nearby?.(cx, cz, 60) || []) if (s.length > 20 && circleIn(boxOf(s.x, s.z, Math.sin(s.heading), Math.cos(s.heading), s.length / 2, s.width / 2), cx, cz, 0) > 0.5) hit('camShip')
+      const Qc = city.landmarks?.piers
+      if (Qc) for (let i = 0; i < Qc.length; i += 5) if (circleIn(boxOf(Qc[i], Qc[i + 1], Math.cos(Qc[i + 4]), -Math.sin(Qc[i + 4]), Qc[i + 2], Qc[i + 3]), cx, cz, 0) > 0.3) hit('camShip', 'pier')
       for (const a of [-2.5, 0, 2.5]) {
         const x = P.x + fx * a, z = P.z + fz * a
         if (dry(x, z)) hit('shore')
@@ -214,7 +298,8 @@ await page.evaluate(async ([kind]) => {
           if (Math.abs(gap) > 0.2 && Math.abs(c.h - D.surface(c.x, c.y, c.h).y) < 0.15) { hit('wheel', `${gap.toFixed(2)} (h ${(c.h - D.surface(c.x, c.y, c.h).y).toFixed(2)}, hz ${(c.hz || 0).toFixed(2)}, pitch ${c.pitch.toFixed(2)}, roll ${c.roll.toFixed(2)}, ${(c.speed * 3.6).toFixed(0)} km/h${c.deck ? ', deck' : ''}})`); break }
         }
       } else if (!free) { // feet on the ground (a step ahead and behind too)
-        if (C.frames > 200) for (const a of [-0.25, 0, 0.25]) { const gap = m.h - 0.15 - W.heightAt(m.x + fx * a, -(m.y + fy * a)); if ((gap < -0.35 || gap > 0.35) && Math.abs(gap) < 1.5) { hit('feet', gap.toFixed(2)); break } }
+        const gap = m.h - 0.15 - W.heightAt(m.x, -m.y)
+        if (Math.abs(gap) > 0.3) hit('feet', gap.toFixed(2))
       }
       // the others near the player
       const cars = (T?.nearby?.(P.x, P.z, 70) || []).filter((q) => !String(q.id).startsWith('player') && !String(q.id).startsWith('mp:'))
@@ -228,26 +313,37 @@ await page.evaluate(async ([kind]) => {
       }
       for (const q of T?.people?.(P.x, P.z, 40) || []) {
         if (!ground(q)) continue
-        if (deepIn(q.x, -q.z)) hit('npcBldg', `ped ${Math.hypot(...Object.values(D.collide(q.x, -q.z, 0.01))).toFixed(1)} m in, ${(D.nearestRoad(q.x, -q.z, 3, false, true)?.d ?? 9).toFixed(1)} m off a path`)
+        if (deepIn(q.x, -q.z) && !(D.nearestRoad(q.x, -q.z, 3, true, true)?.d === 0)) hit('npcBldg', `ped ${Math.hypot(...Object.values(D.collide(q.x, -q.z, 0.01))).toFixed(1)} m in, ${(D.nearestRoad(q.x, -q.z, 3, false, true)?.d ?? 9).toFixed(1)} m off a path`)
         D.propsNear(q.x, -q.z, 1, (x, y, r, k, ang, g) => { if (k !== BENCH && Math.hypot(x - q.x, y + q.z) < r + 0.1 && Math.abs(g - q.y) < 2.5) hit('npcProp', k ? 'ped in post' : 'ped in tree') }) // (people sit on benches)
       }
     }
     for (const k in bad) {
       C.counts[k] = (C.counts[k] || 0) + 1
+      if (k === stopAt && C.counts[k] >= atN) { C.off = true; D && (D.autopilot = () => ({ steer: 0, up: false, down: false, hand: true, run: false, boost: false })) }
       const S = C.spots[k] || (C.spots[k] = []), ll = W.toLatLon ? W.toLatLon(P.x, P.z) : null
       if (S.length < 6 && !(S.length && C.frames - S[S.length - 1].f < 90)) { S.push({ f: C.frames, x: +P.x.toFixed(1), z: +P.z.toFixed(1), ll, note: bad[k] }); if (!C.shot) C.shot = k + S.length }
     }
   }
   // ---- the autopilot
-  const t0 = performance.now()
+  let t0 = performance.now()
   let stuck = 0, back = 0, at = { x: 0, y: 0 }
-  if (boat) { // tacks about, towards whatever is near
-    const key = (code, on) => dispatchEvent(new KeyboardEvent(on ? 'keydown' : 'keyup', { code, key: code }))
+  if (boat) { // at whatever is nearest (a moored boat, a ship, a pier), then tacks away, and again
+    const down = {}, key = (code, on) => { if (!!down[code] !== on) { down[code] = on; dispatchEvent(new KeyboardEvent(on ? 'keydown' : 'keyup', { code, key: code })) } }
     key('KeyW', true)
-    setInterval(() => { const ph = ((performance.now() - t0) / 1000) % 14; key('KeyA', ph > 6 && ph < 9); key('KeyD', ph > 11) }, 100)
+    C.pilot = () => {
+      const P = city.player, ph = ((performance.now() - t0) / 1000) % 20
+      let bd = 150, tx = 0, tz = 0
+      for (const s of city.ships?.nearby?.(P.x, P.z, 150) || []) { const d = Math.hypot(s.x - P.x, s.z - P.z); if (d < bd) { bd = d; tx = s.x; tz = s.z } }
+      const Q = city.landmarks?.piers
+      if (Q) for (let i = 0; i < Q.length; i += 5) { const d = Math.hypot(Q[i] - P.x, Q[i + 1] - P.z); if (d < bd) { bd = d; tx = Q[i]; tz = Q[i + 1] } }
+      let turn = 0
+      if (ph < 13 && bd < 150) { const a = Math.atan2(tx - P.x, tz - P.z) - P.heading, w = Math.atan2(Math.sin(a), Math.cos(a)); turn = w > 0.15 ? 1 : w < -0.15 ? -1 : 0 } else if (ph > 13 && ph < 17) turn = -1
+      key('KeyA', turn > 0); key('KeyD', turn < 0)
+    }
     return
   }
   D.autopilot = () => {
+    if (C.warm > 0) return { steer: 0, up: false, down: false, hand: true, run: false, boost: false }
     const P = city.player, b = P.mode === 'foot' ? D.man : D.car, t = (performance.now() - t0) / 1000
     const fx = -Math.sin(b.yaw), fy = Math.cos(b.yaw), sp = Math.abs(b.speed), L = b === D.man ? 5 : 9 + sp * 0.8
     const r = D.nearestRoad(b.x + fx * L, b.y + fy * L, 30, b === D.car && !!b.deck, b === D.man, kind === 'bus', b.deck ? b.h - 0.58 : null)
@@ -265,18 +361,21 @@ await page.evaluate(async ([kind]) => {
     if (ph >= 12.5 && ph < 15) return { steer: -side * 0.6, up: false, down: true, hand: false, run: false, boost: false } // and back out
     return { steer, up: sp < (kind === 'taxi' ? 20 : 12), down: false, hand: false, run: false, boost: false }
   }
-}, [kind])
+}, [kind, String(o.at).split(':')[0], +String(o.at).split(':')[1] || 1, +o.secs * 60])
 
 const t1 = Date.now()
 let shots = 0
 if (o.shots) fs.mkdirSync(o.shots, { recursive: true })
-while (Date.now() - t1 < +o.secs * 1000) {
+while (!(await page.evaluate(() => __clip.off)) && Date.now() - t1 < +o.secs * 8000) { // (a loaded machine draws them slower)
   await page.waitForTimeout(200)
   if (!o.shots) continue
   const k = await page.evaluate(() => { const k = __clip.shot; __clip.shot = null; return k })
   if (k && shots++ < 8) await page.screenshot({ path: `${o.shots}/${name}-${k}.png` })
 }
+if (o.shots) await page.screenshot({ path: `${o.shots}/${name}-end.png` })
 if (o.rt) fs.writeFileSync(o.rt, Buffer.concat([Buffer.from('P6 160 100 255\n'), Buffer.from(await page.evaluate(() => { const a = []; const px = __clip.rt || __clip.px; for (let y = 99; y >= 0; y--) for (let x = 0; x < 160; x++) a.push(...px.slice((y * 160 + x) * 4, (y * 160 + x) * 4 + 3).map((v, i) => (i === 1 ? px[(y * 160 + x) * 4 + 2] : v))); return a }))])) // the worst back-face view (PPM: red = back faces, white = those within 6 m)
-const r = await page.evaluate(() => { __clip.off = true; return { frames: __clip.frames, dist: __clip.dist, counts: __clip.counts, worst: __clip.worst, spots: __clip.spots } })
+const r = await page.evaluate(() => { __clip.off = true; return { frames: __clip.frames, dist: __clip.dist, counts: __clip.counts, worst: __clip.worst, spots: __clip.spots, error: __clip.error, stalled: __waits().stalled || undefined, trace: __clip.trace.join(' ') } })
+if (o.js) r.js = await page.evaluate(o.js).catch((e) => String(e))
+if (errs.length) r.errors = [...new Set(errs)].slice(0, 5) // (the page's own: nothing above is to be trusted then)
 console.log(JSON.stringify({ route: name, ...r }))
 await browser.close(); srv.stop()
