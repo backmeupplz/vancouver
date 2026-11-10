@@ -35,10 +35,12 @@ export async function open({ port, dpr = 1, size = '1400x900', tier = 'auto', we
   if (tiles) { // --tiles https://vancouver.borodutch.com/tiles: the published tiles instead of public/tiles (kept in a folder in the temp dir)
     const dir = `${os.tmpdir()}/vancouver-tiles-${tiles.replace(/\W+/g, '_')}`
     await ctx.route('**/tiles/**', async (route) => {
-      const rel = new URL(route.request().url()).pathname.split('/tiles/')[1], f = `${dir}/${rel}`
-      if (!fs.existsSync(f)) {
-        const r = await fetch(`${tiles}/${rel}`).catch(() => null)
-        if (!r?.ok) return route.fulfill({ status: r?.status || 504 })
+      // each file under the version the page asks for (?v=, from index.json), and index.json anew every run: a rebake
+      // publishes new files under the same names, and a copy kept by name alone was the tiles of the day it was made (#599)
+      const u = new URL(route.request().url()), rel = u.pathname.split('/tiles/')[1], f = `${dir}/v${u.searchParams.get('v') || 0}/${rel}`
+      if (rel === 'index.json' || !fs.existsSync(f)) {
+        const r = await fetch(`${tiles}/${rel}${u.search}`).catch(() => null)
+        if (!r?.ok) return fs.existsSync(f) ? route.fulfill({ path: f }) : route.fulfill({ status: r?.status || 504 })
         fs.mkdirSync(f.slice(0, f.lastIndexOf('/')), { recursive: true }); fs.writeFileSync(f + '.part' + process.pid, Buffer.from(await r.arrayBuffer())); fs.renameSync(f + '.part' + process.pid, f)
       }
       route.fulfill({ path: f })
