@@ -5,7 +5,7 @@
 // changes. `atmosphere` ({ horizon, zenith, fogNear, fogFar }) is the look for a plugin's perspective camera
 // (city.view.useCamera): a sky gradient and a THREE.Fog for it to apply. Under a perspective camera this plugin also
 // draws a sky dome (sun, moon and stars, clouds, lightning bolts), and the rain and snow are a world-space volume
-// around the camera instead of the map's screen-space layer, with splashes. The ground gets wet or snowy in both
+// around the camera instead of the map's screen-space layer, with ripples that stay where they landed. The ground gets wet or snowy in both
 // views (city.surface).
 import { vancouver, getJSON, NOISE_GLSL } from '../../core/util.js'
 
@@ -195,9 +195,9 @@ export default function weather(city) {
         vec3 along = uSnow > 0.5 ? normalize(cross(toCam, side)) : uDir;
         float w0 = uWid * (0.7 + 0.6 * seed.x), w = max(w0, dist * uPix); // never thinner than a pixel: fainter instead
         float len = uSnow > 0.5 ? w * 2.2 : uLen * k;
-        p += along * (position.x - 0.5) * len + side * position.y * w;
+        p += along * (position.x - 0.5) * len + side * position.y * w * 0.5;
         vec3 a = abs(r) / (uBox * 0.5);
-        vA = (1.0 - smoothstep(0.7, 1.0, max(max(a.x, a.y), a.z))) * smoothstep(1.2, 4.0, dist) * (uSnow > 0.5 ? pow(w0 / w, 1.5) : w0 / w);
+        vA = (1.0 - smoothstep(0.7, 1.0, max(max(a.x, a.y), a.z))) * smoothstep(1.5, 5.0, dist) * (uSnow > 0.5 ? pow(w0 / w, 1.5) : w0 / w);
         vUv = position.xy;
         gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
       }`,
@@ -210,25 +210,23 @@ export default function weather(city) {
   }))
   fall3.frustumCulled = false; fall3.renderOrder = 1000; fall3.visible = false
   city.overlay.add(fall3)
-  // splashes: rings on the ground around the player, each one respawning at a hashed new spot every cycle, on a
-  // plane fitted to the ground there (the CPU samples three heights per frame)
-  const SPL = 600
+  // splashes: a pool of rings, each lying where its drop landed (a spot around the player, with the height of the
+  // ground, the deck or the sea there, looked up once on the CPU) until it has spread, then recycled to a new spot
+  const SPL = 240, RIPR = 14, at = new Float32Array(SPL * 4).fill(-1e3) // x, y, z, the time it landed
   const gs = new THREE.InstancedBufferGeometry()
   gs.setAttribute('position', new THREE.Float32BufferAttribute([-1, 0, -1, 1, 0, -1, 1, 0, 1, -1, 0, 1], 3))
   gs.setIndex([0, 2, 1, 0, 3, 2])
   gs.setAttribute('seed', pg.attributes.seed)
+  gs.setAttribute('at', new THREE.InstancedBufferAttribute(at, 4).setUsage(THREE.DynamicDrawUsage))
   gs.instanceCount = 0
+  const rippleLife = (i) => 0.4 + 0.3 * seeds[i * 3 + 1] // seconds (the shader's too)
   const splash = new THREE.Mesh(gs, new THREE.ShaderMaterial({
-    uniforms: { uT: { value: 0 }, uC: { value: new THREE.Vector3() }, uG: { value: new THREE.Vector2() }, uR: { value: 14 }, uCol: { value: new THREE.Vector4(1, 1, 1, 0.5) } },
-    vertexShader: `attribute vec3 seed; uniform float uT, uR; uniform vec3 uC; uniform vec2 uG; varying vec2 vUv; varying float vE;
+    uniforms: { uT: { value: 0 }, uCol: { value: new THREE.Vector4(1, 1, 1, 0.5) } },
+    vertexShader: `attribute vec3 seed; attribute vec4 at; uniform float uT; varying vec2 vUv; varying float vE;
       void main() {
-        float ph = uT / (0.35 + 0.25 * seed.y) + seed.z * 7.0, cyc = floor(ph);
-        vE = fract(ph);
-        vec2 h = fract(sin(vec2(cyc * 12.9898 + seed.x * 78.233, cyc * 39.346 + seed.y * 11.135)) * 43758.5453);
-        vec2 xz = uC.xz + vec2(cos(h.x * 6.2832), sin(h.x * 6.2832)) * uR * sqrt(h.y);
-        vec3 at = vec3(xz.x, uC.y + dot(uG, xz - uC.xz) + 0.04, xz.y);
+        vE = (uT - at.w) / (0.4 + 0.3 * seed.y);
         vUv = position.xz;
-        gl_Position = projectionMatrix * viewMatrix * vec4(at + position * (0.03 + 0.26 * vE), 1.0);
+        gl_Position = vE < 0.0 || vE > 1.0 ? vec4(2.0, 2.0, 2.0, 1.0) : projectionMatrix * viewMatrix * vec4(at.xyz + position * (0.03 + 0.26 * vE), 1.0);
       }`,
     fragmentShader: `uniform vec4 uCol; varying vec2 vUv; varying float vE;
       void main() { float r = length(vUv); gl_FragColor = vec4(uCol.rgb, uCol.a * (1.0 - vE) * smoothstep(0.5, 0.78, r) * (1.0 - smoothstep(0.84, 1.0, r))); }`,
@@ -446,8 +444,8 @@ export default function weather(city) {
     u.uBox.value = snow ? 26 : 22
     u.uLen.value = 1.0 + 0.8 * fx.precip
     u.uWid.value = snow ? 0.045 : 0.011
-    if (snow) u.uCol.value.set(0.97 * b, 0.98 * b, b, 1); else u.uCol.value.set(0.78 * b, 0.84 * b, 0.94 * b, 0.55)
-    g3.instanceCount = Math.round(MAXP * (0.25 + 0.75 * fx.precip) * (coarse ? 0.5 : 1) * share())
+    if (snow) u.uCol.value.set(0.97 * b, 0.98 * b, b, 1); else u.uCol.value.set(0.78 * b, 0.84 * b, 0.94 * b, 0.7)
+    g3.instanceCount = Math.round((snow ? 3600 : 2400) * (0.25 + 0.75 * fx.precip) * (coarse ? 0.5 : 1) * share()) // few, in the box ahead: their fill is the cost
     gs.instanceCount = snow ? 0 : Math.round(SPL * (0.25 + 0.75 * fx.precip) * share())
     splash.material.uniforms.uCol.value.set(u.uCol.value.x, u.uCol.value.y, u.uCol.value.z, 0.55)
   }
@@ -468,7 +466,7 @@ export default function weather(city) {
     if (fall3.visible) {
       const C = city.view.camera, u = fall3.material.uniforms, B = u.uBox.value
       C.getWorldDirection(v3)
-      u.uC.value.copy(C.position).addScaledVector(v3, B * 0.3)
+      u.uC.value.copy(C.position).addScaledVector(v3, B * 0.4)
       u.uT.value = t % 600
       // gusts: the slant swings; the drift is integrated so the drops never jump (wrapped by whole boxes)
       const gust = fx.storm ? 1 + 0.7 * Math.sin(t * 0.9) * Math.sin(t * 0.37 + 1) : 1 + 0.25 * Math.sin(t * 0.5)
@@ -477,12 +475,24 @@ export default function weather(city) {
       u.uFall.value = (u.uFall.value + fall * dt) % (B * 20)
       u.uDir.value.set(wx, -fall, wz).normalize()
       u.uPix.value = (2 * Math.tan((C.fov * RAD) / 2)) / innerHeight // metres per CSS pixel at 1 m
-      if (splash.visible) { // around the player (or ahead of the camera), on the ground's slope there
-        const P = city.player, H = city.world.heightAt, su = splash.material.uniforms
-        const x = P ? P.x : C.position.x + v3.x * 10, z = P ? P.z : C.position.z + v3.z * 10
-        su.uC.value.set(x, P ? P.y : H(x, z), z)
-        su.uG.value.set(THREE.MathUtils.clamp((H(x + 4, z) - H(x - 4, z)) / 8, -0.2, 0.2), THREE.MathUtils.clamp((H(x, z + 4) - H(x, z - 4)) / 8, -0.2, 0.2))
-        su.uT.value = t % 600
+      // under the ground (a tunnel): no rain in the tube
+      const P = city.player, H = city.world.heightAt, under = !!P && P.y < H(P.x, P.z) - 2
+      fall3.material.visible = splash.material.visible = !under
+      if (splash.visible && !under) { // rings that have spread land again: around the player (a little ahead at speed), or ahead of the camera
+        const sea = P?.mode === 'boat' && city.sea?.surfaceAt, deck = !!P && !sea && P.y - H(P.x, P.z) > 1.2
+        const lead = P ? Math.min(12, Math.abs(P.speed || 0) * 0.5) * Math.sign(P.speed || 0) : 10
+        const x0 = P ? P.x + Math.sin(P.heading) * lead : C.position.x + v3.x * lead, z0 = P ? P.z + Math.cos(P.heading) * lead : C.position.z + v3.z * lead
+        let moved = false
+        for (let i = 0, n = gs.instanceCount; i < n; i++) {
+          if (t - at[i * 4 + 3] < rippleLife(i)) continue
+          const a = Math.random() * 6.2832, r = RIPR * Math.sqrt(Math.random()), x = x0 + Math.cos(a) * r, z = z0 + Math.sin(a) * r
+          // the sea's waves from a boat; on a bridge the deck beside the player (the ground far below it is not where this rain lands)
+          const y = sea ? sea(x, z) : deck && Math.hypot(x - P.x, z - P.z) < 4 ? P.y : H(x, z)
+          at[i * 4] = x; at[i * 4 + 1] = y + (sea ? 0.12 : 0.04); at[i * 4 + 2] = z; at[i * 4 + 3] = at[i * 4 + 3] < 0 ? t - Math.random() * 0.7 : t // (the first ones: spread in time)
+          moved = true
+        }
+        if (moved) gs.attributes.at.needsUpdate = true
+        splash.material.uniforms.uT.value = t
       }
     }
     if (atmo.visible) {

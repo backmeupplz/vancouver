@@ -362,6 +362,7 @@ export default function sail(city) {
     const hue = city.progress?.choice('boat')?.value || COLOUR // the hull colour picked in the progress panel
     if (hue !== player.colour) { repaint(THREE, boat, player.colour, hue); player.colour = hue }
     city.player = player; city.emit('player', player)
+    if (city.sea) city.sea.surfaceAt = seaAt
   }
   function exit() {
     if (state === 'pick') return cancelPick()
@@ -380,7 +381,7 @@ export default function sail(city) {
     anim?.(); anim = null
     city.scene.remove(boat, goals.group, water.mesh)
     city.overlay.remove(wake, spray, goals.fx)
-    water.off()
+    water.off(); if (city.sea) city.sea.surfaceAt = null
     city.scene.background = saved.bg; city.scene.fog = saved.fog
     if (city.player === player) { city.player = null; city.emit('player', null) }
     document.body.classList.remove('sail-on', 'dlv-on', 'sl-touchy', 'dlv-touchy', 'sl-learning')

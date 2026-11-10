@@ -67,6 +67,9 @@ export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll
       get sky() { return surface?.sky.value },
       get seaHole() { return surface?.seaHole.value }, // Vector4 (x, sea level, z, radius): no map sea in there (radius 0: off)
     },
+    // the sea: `level`, metres the water stands above the map's baked sea (the tide; 0 until something sets it), and
+    // `surfaceAt(x, z)`, a plugin's own water surface (the sail plugin's waves while sailing), else null
+    sea: { level: 0, surfaceAt: null },
     post, // { uniforms: { gain (vec3), sat (float) } } colour grade of the final image
     data, // static data the core has loaded
     // the streamed map: loaded tiles (tiles.tiles), and 'tile:load' / 'tile:unload' events with each tile's

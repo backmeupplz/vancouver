@@ -63,6 +63,7 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.light.late` | 0 (evening) to 1 (the small hours): fewer windows lit, offices first (set by the weather plugin from the hour) |
 | `city.surface.wet`, `.snow`, `.sky` | weather on the map's ground, roads and roofs: `wet` (0–1) darkens them and makes paving mirror `sky` (a `THREE.Color`) at grazing angles; `snow` (0–1) whitens flat ground and roofs, the roads less (set by the weather plugin) |
 | `city.surface.seaHole` | a `Vector4` (x, sea level, z, radius): the map's sea is left out within radius of (x, z), up to 3 m above sea level, where a plugin draws its own water (the sail plugin's waves); radius 0 (the default) turns it off |
+| `city.sea.level`, `city.sea.surfaceAt` | the sea: `level` is how many metres the water stands above the map's baked sea (the tide; 0 until the weather plugin's tides set it, then `'tide'` is emitted when it changes); `surfaceAt` is `null`, or while a plugin draws its own water (the sail plugin's waves) a function `(x, z)` → the height of that surface there now |
 | `city.post.uniforms.tint` / `.desat` | grade of the final image: multiply (`Vector3`, 1 = none) and desaturate (0–1) |
 | `city.post.lookFor(elevation)` | the camera's look for the sun this many degrees up (`core/look.js`: exposure, white balance, contrast, saturation, the ACES tone curve and, on High at night, the bloom), after the grade above; the weather plugin calls it |
 | `city.tiles` | the tile streamer (advanced); `city.tiles.logsNear(x, z, r, out = [])` → the beaches' driftwood logs within `r` metres, `[{ x, y, z, angle, length, dia }]` (world coordinates; `y` the sand under its middle, `angle` from east towards north) |
@@ -177,7 +178,7 @@ Plugins may import from `core/` (relative paths, e.g. `'../../core/util.js'`):
   (inside the camera's far plane, only where nothing else is; its horizon follows `scene.fog.color`; it fades in as
   the camera's `fov` passes 14°–40°, so a dive from the map looks like the map first) with the sun or moon and
   stars, drifting clouds or a low deck, and lightning bolts; rain and snow as a world-space volume around the camera
-  with splashes around `city.player`; the scene lit up in lightning. The map view keeps its screen-space layer.
+  with ripples that stay where they landed (a pool recycled around `city.player`, on the ground, the deck or `city.sea.surfaceAt`); the scene lit up in lightning. The map view keeps its screen-space layer.
   Both views get wet or snowy ground through `city.surface`.
 - **Traffic** (`plugins/life`): `city.traffic.nearby(x, z, r)` → `[{ id, x, y, z, heading, length, width, speed }]`
   (forward = `(sin heading, 0, cos heading)`), `city.traffic.setObstacle(id, obj | null)` (a player's vehicle or walker
