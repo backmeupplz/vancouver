@@ -75,6 +75,7 @@ function build(t, level) {
   const out = { terrain: terr }
   out.ground = ground(t, terr, level)
   const lines = readLines(t)
+  if (level === 0) tubeWalls(lines)
   const ps = pois(t)
   const carriage = level === 0 ? roadMask(t) : null
   const rd = roads(t, terr, lines, level, ps, carriage)
@@ -1050,7 +1051,7 @@ function graph(t, lines) {
   for (const L of lines) {
     const pts = new Float32Array(L.pts.length)
     for (let i = 0; i < L.pts.length / 2; i++) { pts[i * 2] = L.pts[i * 2] + t.ox; pts[i * 2 + 1] = L.pts[i * 2 + 1] + t.oy }
-    pieces.push({ kind: L.kind, lanes: L.lanes, oneway: L.oneway, drive: L.drive, band: L.band, tunnel: L.tunnel ? TUBE_H(L.kind) : 0, roof: L.roof, turns: L.turns, w: L.w, a: L.a, b: L.b, pts, z: L.z })
+    pieces.push({ kind: L.kind, lanes: L.lanes, oneway: L.oneway, drive: L.drive, band: L.band, tunnel: L.tunnel ? TUBE_H(L.kind) : 0, tw: L.tw, roof: L.roof, turns: L.turns, w: L.w, a: L.a, b: L.b, pts, z: L.z })
   }
   return { pieces }
 }
@@ -1468,7 +1469,7 @@ function lights(t, terr, lines, ps, b, R, S) {
   const taken = (x, y) => { for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) if (mapped.has(key(x + di * 14, y + dj * 14))) return true; return false }
   for (const L of lines) {
     const lit = LAMP[L.kind]
-    if (!lit || L.layer < 0 || L.crossing) continue
+    if (!lit || L.layer < 0 || L.tunnel || L.crossing) continue
     const P = L.pts, big = L.kind <= K.primary, [bright, step] = lit
     let s = L.a % step, k = 0, run = 0 // the same lamps whichever tile draws the street
     for (let i = 0; i < P.length / 2 - 1; i++) {
@@ -1655,27 +1656,56 @@ function seawalls(W, Bal, WL, terr) {
 // box, roof flush with the ground, and at the portal a face with the opening in it
 const TUBE_H = (kind) => (kind === K.rail || kind === K.lightrail ? 6 : kind >= K.pedestrian ? 3 : 5), SLAB = 0.6 // tools/tiles.py tube_h, SLAB
 const TUBE_IN = lin(0x38393c), TUBE_FLOOR = lin(0x2e3033), CONCRETE = lin(0xb4b0a6)
+// Twin tubes mapped closer than they are wide (the George Massey tunnel's two) share the wall between them, halfway:
+// each tunnel piece's inner half width at its points, to its left and right (L.wall), and the least of them (L.tw:
+// the drive plugin's walls)
+function tubeWalls(lines) {
+  const T = lines.filter((L) => L.tunnel && L.z && L.pts.length >= 4)
+  for (const L of T) {
+    const P = L.pts, n = P.length / 2, hw = L.w / 2 + 0.6, side = sides(P), wall = new Float32Array(n * 2).fill(hw)
+    for (const Q of T) {
+      if (Q === L) continue
+      const B = Q.pts, m = B.length / 2 - 2
+      for (let i = 0; i < n; i++) {
+        const x = P[i * 2], y = P[i * 2 + 1]
+        let d = 1e9, at = null
+        for (let k = 0; k <= m; k++) {
+          const ax = B[k * 2], ay = B[k * 2 + 1], dx = B[k * 2 + 2] - ax, dy = B[k * 2 + 3] - ay, l2 = dx * dx + dy * dy || 1, u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)), e = Math.hypot(x - ax - dx * u, y - ay - dy * u)
+          if (e < d) { d = e; at = [ax + dx * u, ay + dy * u, Q.z[k] + (Q.z[k + 1] - Q.z[k]) * u, dx, dy, (k === 0 && u === 0) || (k === m && u === 1)] }
+        }
+        if (!at || at[5] || d >= hw + Q.w / 2 + 0.6 + 0.3 || Math.abs(at[2] - L.z[i]) > 3) continue // (Q goes on from L's end; clear of it; over or under it)
+        if (Math.abs(at[3] * side[i][2] + at[4] * side[i][3]) < 0.77 * Math.hypot(at[3], at[4])) continue // (across it)
+        const e = (at[0] - x) * side[i][0] + (at[1] - y) * side[i][1] > 0 ? 0 : 1
+        wall[i * 2 + e] = Math.min(wall[i * 2 + e], Math.max(1.5, d / 2 - 0.15))
+      }
+    }
+    L.wall = wall; L.tw = Math.min(...wall)
+  }
+}
 function tubes(W, lines) {
   const pw = ROOFW(0.5)
   for (const L of lines) {
     if (!L.tunnel || !L.z || !L.tube) continue
-    const P = L.pts, z = L.z, n = P.length / 2, H = TUBE_H(L.kind), hw = L.w / 2 + 0.6, ho = hw + SLAB, side = sides(P)
-    const at = (i, off, y) => [P[i * 2] + side[i][0] * off, y, -(P[i * 2 + 1] + side[i][1] * off)]
+    const P = L.pts, z = L.z, n = P.length / 2, H = TUBE_H(L.kind), hw = L.w / 2 + 0.6, side = sides(P)
+    const wl = (i, sg) => L.wall ? L.wall[i * 2 + (sg > 0 ? 0 : 1)] : hw // the wall's inside, from the centre line
+    const at = (i, sg, off, y) => [P[i * 2] + side[i][0] * sg * off, y, -(P[i * 2 + 1] + side[i][1] * sg * off)]
+    const in_ = (i, sg, y) => at(i, sg, wl(i, sg), y), out = (i, sg, y) => at(i, sg, wl(i, sg) + SLAB, y)
     const both = (a, b, c, d, col, want) => { quad(W, a, b, c, d, col, want, pw); quad(W, a, b, c, d, col, want.map((v) => -v), pw) }
     for (let i = 0; i < n - 1; i++) {
       const j = i + 1, nx = side[i][0] + side[j][0], nn = side[i][1] + side[j][1], l = Math.hypot(nx, nn) || 1
-      for (const sg of [1, -1]) both(at(i, sg * hw, z[i]), at(j, sg * hw, z[j]), at(j, sg * hw, z[j] + H), at(i, sg * hw, z[i] + H), TUBE_IN, [(sg * nx) / l, 0, (-sg * nn) / l])
-      both(at(i, -hw, z[i] + H), at(j, -hw, z[j] + H), at(j, hw, z[j] + H), at(i, hw, z[i] + H), TUBE_IN, [0, -1, 0])
-      quad(W, at(i, -hw, z[i] + 0.25), at(j, -hw, z[j] + 0.25), at(j, hw, z[j] + 0.25), at(i, hw, z[i] + 0.25), TUBE_FLOOR, [0, 1, 0], pw)
+      for (const sg of [1, -1]) both(in_(i, sg, z[i]), in_(j, sg, z[j]), in_(j, sg, z[j] + H), in_(i, sg, z[i] + H), TUBE_IN, [(sg * nx) / l, 0, (-sg * nn) / l])
+      both(in_(i, -1, z[i] + H), in_(j, -1, z[j] + H), in_(j, 1, z[j] + H), in_(i, 1, z[i] + H), TUBE_IN, [0, -1, 0])
+      quad(W, in_(i, -1, z[i] + 0.25), in_(j, -1, z[j] + 0.25), in_(j, 1, z[j] + 0.25), in_(i, 1, z[i] + 0.25), TUBE_FLOOR, [0, 1, 0], pw)
       if (!L.tube[i] && !L.tube[j]) continue
-      for (const sg of [1, -1]) quad(W, at(i, sg * ho, z[i] - 0.5), at(j, sg * ho, z[j] - 0.5), at(j, sg * ho, z[j] + H + SLAB), at(i, sg * ho, z[i] + H + SLAB), CONCRETE, [(sg * nx) / l, 0, (-sg * nn) / l], pw)
-      quad(W, at(i, -ho, z[i] + H + SLAB), at(j, -ho, z[j] + H + SLAB), at(j, ho, z[j] + H + SLAB), at(i, ho, z[i] + H + SLAB), CONCRETE, [0, 1, 0], pw)
+      for (const sg of [1, -1]) if (wl(i, sg) >= hw && wl(j, sg) >= hw) quad(W, out(i, sg, z[i] - 0.5), out(j, sg, z[j] - 0.5), out(j, sg, z[j] + H + SLAB), out(i, sg, z[i] + H + SLAB), CONCRETE, [(sg * nx) / l, 0, (-sg * nn) / l], pw) // (not the wall twin tubes share)
+      quad(W, out(i, -1, z[i] + H + SLAB), out(j, -1, z[j] + H + SLAB), out(j, 1, z[j] + H + SLAB), out(i, 1, z[i] + H + SLAB), CONCRETE, [0, 1, 0], pw)
     }
     for (const i of [0, n - 1]) { // the portal: pillars either side of the opening, a headwall over it
       if (L.tube[i] !== 2) continue
-      const [, , tx, ty] = side[i], out = i ? 1 : -1, a = Math.atan2(ty, tx), x = P[i * 2] + tx * out * 0.2, y = P[i * 2 + 1] + ty * out * 0.2
-      for (const sg of [1, -1]) box3(W, x + side[i][0] * sg * (hw + SLAB / 2), y + side[i][1] * sg * (hw + SLAB / 2), z[i] - 0.5, 0.8, SLAB, H + 0.5, a, CONCRETE)
-      box3(W, x, y, z[i] + H, 0.8, 2 * ho + 1, SLAB + 0.9, a, CONCRETE)
+      const [, , tx, ty] = side[i], o = i ? 1 : -1, a = Math.atan2(ty, tx), x = P[i * 2] + tx * o * 0.2, y = P[i * 2 + 1] + ty * o * 0.2
+      for (const sg of [1, -1]) box3(W, x + side[i][0] * sg * (wl(i, sg) + SLAB / 2), y + side[i][1] * sg * (wl(i, sg) + SLAB / 2), z[i] - 0.5, 0.8, SLAB, H + 0.5, a, CONCRETE)
+      const c = (wl(i, 1) - wl(i, -1)) / 2 // (the opening's middle)
+      box3(W, x + side[i][0] * c, y + side[i][1] * c, z[i] + H, 0.8, wl(i, 1) + wl(i, -1) + 2 * SLAB + 1, SLAB + 0.9, a, CONCRETE)
     }
   }
 }

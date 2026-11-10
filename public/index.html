@@ -74,22 +74,8 @@
   #tools .ic:empty { display: none; }
   .tool-panel { z-index: 21; padding: 12px 14px; width: min(300px, calc(100% - 24px)); max-height: calc(100% - 120px); overflow-y: auto; box-sizing: border-box; }
   .sheet-x, .sheet-grip { display: none; }
-  /* one column for whatever pops up (city.ui.toasts): the toast, then a plugin's own pops (progress) */
-  #toasts { position: fixed; left: 50%; top: calc(var(--st) + 52px); transform: translateX(-50%); z-index: 40; display: flex; flex-direction: column; align-items: center; gap: 6px; width: max-content; max-width: calc(100% - 24px); pointer-events: none; }
-  body.dlv-on #toasts { top: calc(var(--st) + 122px); } /* in a game: under the cards at the top (the order board, the fare, the trail) */
-  .toast { position: static; padding: 8px 14px; max-width: 100%; box-sizing: border-box; text-align: center; }
+  .toast { left: 50%; top: calc(var(--st) + 52px); transform: translateX(-50%); padding: 8px 14px; z-index: 40; max-width: calc(100% - 48px); box-sizing: border-box; text-align: center; }
   #credits { bottom: var(--sb) !important; }
-  /* the first visit's start card (city.js makeStart): bottom left, over the music; on phones over the dock */
-  #start { left: var(--sl); bottom: calc(var(--sb) + 56px); padding: 10px 12px 12px; z-index: 16; max-width: calc(100% - var(--sl) - var(--sr)); box-sizing: border-box; }
-  #start[hidden], body.dlv-picking #start, body.sl-picking #start, body.dlv-on #start { display: none; }
-  #start h2 { margin: 0 36px 8px 2px; font-size: 14px; font-weight: 650; }
-  #start .start-x { position: absolute; right: 0; top: 0; width: 40px; height: 40px; padding: 0; border: 0; background: none; color: var(--muted); font: 20px/1 system-ui, sans-serif; cursor: pointer; }
-  #start .start-row { display: flex; gap: 6px; }
-  #start .start-row button { flex: 1 1 0; min-width: 84px; min-height: 64px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 6px 4px; font: inherit; color: var(--text); background: rgba(255, 255, 255, .06); border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
-  #start .start-row button:hover { background: rgba(255, 255, 255, .12); }
-  @media (max-height: 420px) { #start .sub { display: none; } #start .start-row button { min-height: 52px; } } /* the 360 px embed */
-  #start .ic { font-size: 22px; line-height: 26px; } #start .lb { font-weight: 600; } #start .sub { font-size: 11px; color: var(--muted); text-align: center; }
-  .compact #start { right: var(--sr); bottom: calc(var(--sb) + 66px); } .compact #start .start-row button { min-width: 0; }
 
   /* ---------- phones (html.compact: narrow, or a touch screen in landscape): the toolbar becomes a dock at the
      bottom, panels become bottom sheets with a handle, everything clears the notch and the home indicator ---------- */
@@ -134,10 +120,10 @@
   /* the short credit that stays on screen (the full one is in the sheet): top left on the map, bottom centre in a game */
   .compact #osm { display: flex; align-items: center; position: fixed; left: var(--sl); top: var(--st); min-height: 44px; padding: 0 2px; z-index: 15; font-size: 10.5px; color: rgba(227, 234, 240, .85); text-decoration: none; text-shadow: 0 1px 2px rgba(0, 0, 0, .8); white-space: nowrap; }
   .compact body.dlv-on #osm { top: auto; bottom: 0; left: 50%; transform: translateX(-50%); min-height: 0; padding: 0 4px 1px; font-size: 9.5px; }
-  .compact #toasts { top: calc(var(--st) + 56px); }
-  .compact body.dlv-picking #toasts { top: calc(var(--st) + 116px); }
-  .compact body.dlv-on #toasts { top: auto; bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 170px); flex-direction: column-reverse; } /* over the controls, growing up */
-  .compact body.dlv-on:not(.dlv-touchy):not(.sl-touchy) #toasts { bottom: calc(var(--sb) + 108px); } /* (an embed with a keyboard: only the keys strip and the action button are down there) */
+  .toast { pointer-events: none; }
+  .compact .toast { top: calc(var(--st) + 56px); }
+  .compact body.dlv-picking .toast { top: calc(var(--st) + 116px); }
+  .compact body.dlv-on .toast { top: auto; bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 170px); }
   .compact .tool-panel, .compact #about, .compact #menu { left: 0; right: 0; top: auto !important; bottom: 0; width: auto; max-height: calc(var(--vv-h) - var(--st) - 52px); border-radius: 16px 16px 0 0; border-width: 1px 0 0; padding: 42px max(16px, env(safe-area-inset-right)) calc(14px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); z-index: 27; background: rgba(13, 19, 26, .92); overscroll-behavior: contain; font-size: 14px; animation: sheet-in .22s ease-out; }
   .compact .sheet-grip { display: block; position: absolute; left: 0; right: 0; top: 0; height: 34px; touch-action: none; cursor: grab; z-index: 1; }
   .compact .sheet-grip::before { content: ''; position: absolute; left: 50%; top: 8px; width: 38px; height: 5px; margin-left: -19px; border-radius: 3px; background: rgba(255, 255, 255, .28); }

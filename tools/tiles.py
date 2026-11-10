@@ -197,6 +197,8 @@ def build(ij):
     t0 = time.time()
     rnd = random.Random(i * 7919 + j)
     feat = load_feat(i, j)
+    deck_profiles()
+    if feat.get('lines'): feat['lines'] = retunnel(feat['lines'])  # (the tunnels as far as their mouths)
     X0, Y0 = i * L1, j * L1
     # rasters on the tile's 2 m grid (row 0 = north)
     N = int(L1 / HR)
@@ -406,6 +408,9 @@ def build(ij):
     # ---- trees from the canopy
     trees = canopy_trees(dsm, dtm, fp, water_r, X0, Y0, rnd, polys, nogo)
     trees, moved, dropped = off_streets(trees, polys, lambda x, y: fp[min(N - 1, max(0, int((Y0 + L1 - y) / HR))), min(N - 1, max(0, int((x - X0) / HR)))])
+    if holes is not None and trees:  # none in a tunnel's open box (the banks of the cut it runs in, as the LiDAR has them)
+        hb = holes.buffer(1.0); shapely.prepare(hb)
+        trees = [t for t, o in zip(trees, shapely.contains_xy(hb, [t[0] for t in trees], [t[1] for t in trees])) if not o]
 
     # ---- points the simulation uses: signals, crossings, stops, street lamps, benches, transit stops; painted
     # crossings are their own kinds (7 bars, 8 two lines: the client draws their crosswalks)
@@ -1646,7 +1651,95 @@ DECKS = None
 APPROACH = {}  # at-grade way id -> [(deck end node, touchdown node, new node or None, points, distance along, height, {sample: node})]
 TUNNEL = ('yes', 'culvert')  # underground (a building_passage runs at grade, under the building)
 TUNNELS, PORTALS = {}, set()  # tunnel way id -> (points, along, height, open); nodes where a tunnel comes out
+RETUN = {}  # at-grade way id -> {its end (0, -1): (metres of it from there in the tunnel it goes on from, the ground at that mouth)} (tunnel_mouths)
+MOUTH = 250  # metres from a mapped portal its real mouth is looked for
+MOUTH_OUT = 4  # metres the tube goes on past the foot of the portal's face (its mouth stands out of the bank)
+
+
+def mouth_ids(wid, end):
+    """the ids of the tunnel way cut off a way's end and of its node at the mouth: over every real one, under 2^53 for the page"""
+    new = (1 << 33) + wid * 2 - end
+    return new, (1 << 52) + new * 64
 ROOFS = set()  # roads on roofs (decks the building carries)
+
+
+def cut_way(coords, refs, s, nid):
+    """a way's first s metres and the rest (s short of its length), a node (nid) where they part"""
+    acc = 0.0
+    for n, (p, q) in enumerate(zip(coords, coords[1:])):
+        d = math.dist(p, q)
+        if acc + d > s:
+            f = (s - acc) / d; m = (p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f)
+            return (list(coords[:n + 1]) + [m], list(refs[:n + 1]) + [nid]), ([m] + list(coords[n + 1:]), [nid] + list(refs[n + 1:]))
+        acc += d
+
+
+def retunnel(lines):
+    """OpenStreetMap's lines with RETUN's stretches made tunnels: each cut off its way as a way of its own, the rest of
+    the way at grade from the mouth"""
+    if not any(L[0] in RETUN for L in lines): return lines
+    out = []
+    for wid, coords, refs, t in lines:
+        for end, (s, _) in sorted(RETUN.get(wid, {}).items()):  # (its far end first)
+            if end: coords, refs = coords[::-1], refs[::-1]
+            new, nid = mouth_ids(wid, end)
+            (c, r), (coords, refs) = cut_way(coords, refs, s, nid)
+            if end: c, r, coords, refs = c[::-1], r[::-1], coords[::-1], refs[::-1]
+            out.append((new, c, r, {**t, 'tunnel': 'yes', 'layer': t.get('layer') or '-1'}))
+        out.append((wid, coords, refs, t))
+    return out
+
+
+def tunnel_mouths(files):
+    """RETUN: where a road tunnel's mapped portal is short of its mouth. The one road going on from the portal at grade
+    runs on the LiDAR's ground there, the tunnel's cover, and then drops off it (3.5 m in 12 m: the portal's face, no
+    road is that steep) and stays down, a road in its cut: it is in the tunnel as far as the foot of that drop and
+    MOUTH_OUT on, the tunnel's road at the LiDAR's ground there (level across, as road_ground takes the road outside). (The road looked at is the one way at the portal: a mouth further off than that way is long stays as mapped)"""
+    ends, touch, cand = {}, {}, {}  # a road tunnel's end node -> the tunnels ending there, the other roads at it; road -> its line
+    for f in files:
+        for wid, coords, refs, t in pickle.load(open(f, 'rb')).get('lines', []):
+            if t.get('tunnel') in TUNNEL and line_kind(t) in DRIVE and len(coords) > 1:
+                for r in (refs[0], refs[-1]): ends.setdefault(r, set()).add(wid)
+    for f in files:
+        for wid, coords, refs, t in pickle.load(open(f, 'rb')).get('lines', []):
+            k = line_kind(t)
+            if k not in DRIVE or t.get('tunnel') in TUNNEL or len(coords) < 2 or not any(r in ends for r in refs): continue
+            for r in refs:
+                if r in ends: touch.setdefault(r, set()).add(wid)
+            if t.get('bridge') in (None, 'no') and not t.get('tunnel') and t.get('covered') != 'yes' and t.get('area') != 'yes' and not on_level(t):
+                cand[wid] = (coords, refs, road_shape(k, t)[1])
+    out = {}
+    for r in sorted(ends):
+        if len(ends[r]) != 1 or len(touch.get(r, ())) != 1: continue  # (a joint of tunnels, a junction at the portal)
+        wid = next(iter(touch[r]))
+        if wid not in cand or r not in (cand[wid][1][0], cand[wid][1][-1]): continue
+        coords, refs, w = cand[wid]
+        end = 0 if refs[0] == r else -1
+        P = np.array(densify(coords[::-1] if end else coords, 2)); s = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
+        g = level_across(P, w)
+        near = np.nonzero(s <= MOUTH)[0]
+        face = next((m for m in near if s[m] >= 24 and g[m] < np.interp(s[m] - 12, s, g) - 3.5), None)
+        if face is None: continue
+        foot = face + int(np.argmin(g[face:face + 7]))
+        on = (s >= s[foot] + 16) & (s <= s[foot] + 40)  # the road on from the foot: still that far under the cover (not a dip it crosses)
+        if s[-1] < s[foot] + 40 or np.median(g[on]) > np.interp(s[face] - 12, s, g) - 3.5: continue
+        m = foot
+        for j in np.nonzero((s > s[foot]) & (s <= s[foot] + 30))[0]:  # past what stands over the road just outside (a portal building): to where the road is down again
+            if j > m and g[j] > g[foot] + 2:
+                m = next((k for k in range(j, len(s)) if s[k] <= s[foot] + 30 and g[k] <= g[foot] + 1.5), m)
+        cut = float(s[m]) + MOUTH_OUT
+        out.setdefault(wid, {})[end] = (cut, float(np.interp(cut, s, g)))
+    for wid in [w for w, d in out.items() if len(d) > 1]:  # (a tunnel at both ends: only if they leave road between them)
+        if sum(c for c, _ in out[wid].values()) > sum(math.dist(p, q) for p, q in zip(cand[wid][0], cand[wid][0][1:])) - 6: del out[wid]
+    return out
+
+
+def level_across(P, w):
+    """the LiDAR's ground along a road (points P, width w), level across: the middle of its centre line's and its
+    kerbs', as road_ground takes a street's"""
+    t = np.gradient(P, axis=0); t /= np.maximum(np.hypot(t[:, 0], t[:, 1]), 1e-6)[:, None]
+    n = np.stack([-t[:, 1], t[:, 0]], 1) * max(0.0, w / 2 - 0.5)
+    return np.median(ground_at(*np.concatenate([P, P + n, P - n]).T).reshape(3, -1), axis=0)
 
 
 def ground_at(x, y):
@@ -1774,17 +1867,19 @@ def deck_profiles():
     if os.path.exists(DECK_CACHE):
         d = pickle.load(open(DECK_CACHE, 'rb'))
         if d.get('key') == key:
-            DECKS = d['decks']; APPROACH.update(d['approach']); TUNNELS.update(d['tunnels']); PORTALS.update(d['portals']); ROOFS.update(d['roofs'])
+            DECKS = d['decks']; APPROACH.update(d['approach']); TUNNELS.update(d['tunnels']); PORTALS.update(d['portals']); ROOFS.update(d['roofs']); RETUN.update(d['retun'])
             return DECKS
     t0 = time.time()
     import common
     common.HR_KEEP = 10 ** 6  # every LiDAR tile stays loaded for the pass (reloading them was 3/4 of its time)
     ways, tun, roofs, water = {}, {}, ROOFS, []
     from shapely.strtree import STRtree
+    RETUN.clear(); RETUN.update(tunnel_mouths(files))
     for f in files:
         d = pickle.load(open(f, 'rb'))
         tops, blds, here = {}, None, False
-        for wid, coords, refs, t in d.get('lines', []):
+        lines = retunnel(d.get('lines', []))
+        for wid, coords, refs, t in lines:
             k = line_kind(t)
             if not k or len(coords) < 2 or t.get('area') == 'yes': continue
             if t.get('tunnel') in TUNNEL:
@@ -1801,7 +1896,7 @@ def deck_profiles():
         for wid, (coords, refs, k, w) in tun.items():  # where a tunnel meets a line that isn't one: its portal
             for r in (refs[0], refs[-1]): tops[r] = wid
         if here: water += [Polygon(o, [h for h in ins if len(h) >= 4]).buffer(0) for _, prs, t in d.get('areas', []) if ground_class(t) == 'water' for o, ins in prs if len(o) >= 4]
-        for wid, coords, refs, t in d.get('lines', []):
+        for wid, coords, refs, t in lines:
             if wid not in tun and line_kind(t): PORTALS.update(r for r in refs if r in tops)
     raw = {}
     for wid, (coords, refs, t, k) in sorted(ways.items(), key=lambda kv: (int(kv[1][0][0][0] // L1), int(kv[1][0][0][1] // L1))):
@@ -1906,10 +2001,11 @@ def deck_profiles():
         for r in (ways[w][1][0], ways[w][1][-1]): endn[r] = endn.get(r, 0) + 1
     ap, grade = approaches(files, {r: np.mean(v, axis=0) for r, v in tops.items()}, {r for r, v in tops.items() if len(v) > 1 or r not in endn})
     APPROACH.clear(); APPROACH.update(ap)
-    TUNNELS.update(tunnel_profiles(tun, STRtree(water) if water else None))
+    TUNNELS.update(tunnel_profiles(tun, STRtree(water) if water else None, {mouth_ids(w, e)[1]: h for w, d in RETUN.items() for e, (_, h) in d.items()}))
     deck_solve(ways, raw, grade, tun)
+    for w, (P, s, z, op) in TUNNELS.items(): TUNNELS[w] = (P, s, z, tunnel_ground(P, tun[w][3]) < z + tube_h(tun[w][2]) + SLAB + 0.3)  # (open: as solved)
     HR_CACHE.clear(); common.HR_KEEP = 12
-    try: pickle.dump({'key': key, 'decks': DECKS, 'approach': APPROACH, 'tunnels': TUNNELS, 'portals': PORTALS, 'roofs': ROOFS}, open(DECK_CACHE, 'wb'), protocol=5)
+    try: pickle.dump({'key': key, 'decks': DECKS, 'approach': APPROACH, 'tunnels': TUNNELS, 'portals': PORTALS, 'roofs': ROOFS, 'retun': RETUN}, open(DECK_CACHE, 'wb'), protocol=5)
     except OSError: pass
     print('bridge decks', len(DECKS), 'of', len(ways), 'ways,', len(roofs), 'on roofs,', len(missing), 'not in the LiDAR,', len(APPROACH), 'approaches,',
           len(TUNNELS), 'tunnels', round(time.time() - t0), 's', flush=True)
@@ -2140,13 +2236,16 @@ def deck_solve(ways, raw, grade, tun={}, ground=None, drawn=None):
     # on the ground: where a street goes on from a structure at grade (no approach raised it there), at an approach's
     # foot, and at a road's or rail's dead end (cars and trains take no stairs; a dead end on another deck is on it)
     raised = {(w, r) for w, lst in APPROACH.items() for e in lst for r in e[6].values()}
+    decked = {int(el[a]) for t in ties + seps for a, b in ((t[0], t[1]), (t[1], t[0])) if tube(E[el[a]]) and not tube(E[el[b]])}  # tunnels drawn over a deck or an approach
     starts = {e[0] for lst in APPROACH.values() for e in lst} | {r for e in E if not isinstance(e[0], tuple) for r in e[7].values()}  # (not a foot)
     ends = {}  # sample -> the height it is held to
     for i, e in enumerate(E):
         n = len(e[1])
         for k_, r in e[7].items():
             q = off[i] + k_
-            if tube(e): continue  # (a tunnel's portal: at the ground already, tunnel_profiles; joined to what meets it there)
+            if tube(e):  # a tunnel's portal: on the ground, where tunnel_profiles put it; joined to what meets it there, or with the deck it is drawn with (a covered lane on a deck)
+                if r in PORTALS and len(bynode[r]) == 1 and i not in decked: ends[q] = tgt[q]
+                continue
             if any((w, r) not in raised and w not in DECKS for w, _ in gat.get(r, ())) or k_ in (0, n - 1) and len(bynode.get(r, ())) == 1 and (
                     isinstance(e[0], tuple) and k_ == n - 1 or e[5] not in FOOT and q not in merged) or isinstance(e[0], tuple) and k_ == n - 1 and r not in starts:
                 ends[q] = float(ground(e[1][k_:k_ + 1, 0], e[1][k_:k_ + 1, 1])[0]) + 0.02 - DECK_TOP
@@ -2225,13 +2324,21 @@ def deck_solve(ways, raw, grade, tun={}, ground=None, drawn=None):
     print('deck solve:', len(E), 'ways,', N, 'samples,', nc, 'structures,', len(ties), 'ties,', len(seps), 'stacked,', bad, 'failed', round(time.time() - t0), 's', flush=True)
 
 
-def tunnel_profiles(ways, water=None):
+def tunnel_ground(P, w):
+    """the lowest drawn ground across a tunnel's box (its way's width w) at each of its points"""
+    t = np.gradient(P, axis=0) if len(P) > 1 else np.array([[1.0, 0.0]]); t /= np.maximum(np.hypot(t[:, 0], t[:, 1]), 1e-6)[:, None]
+    n = np.stack([-t[:, 1], t[:, 0]], 1) * (w / 2 + 0.6 + SLAB)
+    return drawn_ground(*np.concatenate([P, P + n, P - n]).T).reshape(3, -1).min(0)
+
+
+def tunnel_profiles(ways, water=None, mouths={}):
     """ways {id: (coords, refs, kind, width)}, water: STRtree of OpenStreetMap's water areas near them -> {id: (points every
-    4 m, distance along, height, open)}. A tunnel runs from portal to portal (PORTALS: at the drawn ground there),
+    4 m, distance along, height, open)}. A tunnel runs from portal to portal (PORTALS: its drawn road on the street's
+    there, the LiDAR's ground level across; mouths: {node: that ground} where tunnel_mouths found it),
     straight where the ground is high over it, else under the ground with its roof 0.5 m down, no steeper than its
     kind's grade. Ways are joined at shared nodes, the joints' and dead ends' heights in between (Laplace: straight along
-    a chain). Open: where the ground isn't 0.3 m over its roof, near the portals (the bake cuts the ground there, the
-    page draws its box and portal face)"""
+    a chain). Open: where the ground isn't 0.3 m over its roof, near the portals and where it can't get under a river
+    by its bank (the bake cuts the ground and the water there, the page draws its box and portal face)"""
     use = {}
     for wid, (c, refs, k, w) in ways.items():
         for r in refs: use[r] = use.get(r, 0) + 1
@@ -2240,14 +2347,12 @@ def tunnel_profiles(ways, water=None):
         cut = [0] + [n for n in range(1, len(refs) - 1) if use[refs[n]] > 1] + [len(refs) - 1]
         for a, b in zip(cut, cut[1:]):
             P = np.array(densify(c[a:b + 1], 4)); s = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
-            t = np.gradient(P, axis=0) if len(P) > 1 else np.array([[1.0, 0.0]]); t /= np.maximum(np.hypot(t[:, 0], t[:, 1]), 1e-6)[:, None]
-            n = np.stack([-t[:, 1], t[:, 0]], 1) * (w / 2 + 0.6 + SLAB)
-            g = drawn_ground(*np.concatenate([P, P + n, P - n]).T).reshape(3, -1).min(0)
+            g = tunnel_ground(P, w)
             segs.append((wid, refs[a], refs[b], P, s, g, g - tube_h(k) - SLAB - 0.5))
     h, free = {}, {}
     for wid, ra, rb, P, s, g, u in segs:
         for r, e in ((ra, 0), (rb, -1)):
-            if r in PORTALS: h[r] = float(drawn_ground(*P[e])[0])
+            if r in PORTALS: h[r] = (mouths[r] if r in mouths else float(level_across(P[:2] if e == 0 else P[-2:], ways[wid][3])[e]) if len(P) > 1 else float(ground_at(*P[e])[0])) + 0.02 - DECK_TOP  # (its road's top on the street's, as a deck's end)
             else: free.setdefault(r, []).append(float(u[e]))  # a joint, or a dead end (an underground station)
     for r, us in free.items(): h[r] = min(us)
     grade = lambda k: 0.035 if k == 'rail' else 0.05 if k == 'lightrail' else 0.10 if k in FOOT else 0.06
@@ -2275,7 +2380,7 @@ def tunnel_profiles(ways, water=None):
         Gc = 2.5 * G if wet.any() else G
         z = np.maximum(np.minimum(h[ra] + (h[rb] - h[ra]) * s / L, lim), np.maximum(h[ra] - Gc * s, h[rb] - Gc * (L - s)))
         z[0], z[-1] = h[ra], h[rb]
-        op = (g < z + tube_h(k) + SLAB + 0.3) & ~wet
+        op = g < z + tube_h(k) + SLAB + 0.3  # (as solved: deck_profiles)
         if wid in out:  # the way's next stretch (split at a joint): on along it
             P0, s0, z0, o0 = out[wid]
             out[wid] = (np.concatenate([P0, P[1:]]), np.concatenate([s0, s0[-1] + s[1:]]), np.concatenate([z0, z[1:]]), np.concatenate([o0, op[1:]]))
@@ -2310,7 +2415,7 @@ def approaches(files, tops, held=()):
     at = {}  # node -> [(way id, ref index)] for at-grade ways near a deck end
     ways, blds, up = {}, [], set()
     for f in files:
-        for wid, coords, refs, t in pickle.load(open(f, 'rb')).get('lines', []):
+        for wid, coords, refs, t in retunnel(pickle.load(open(f, 'rb')).get('lines', [])):
             if wid in ways or len(coords) < 2 or t.get('bridge') not in (None, 'no') or t.get('area') == 'yes': continue
             k = line_kind(t)
             if not k or t.get('tunnel') in TUNNEL or t.get('tunnel') == 'building_passage' and on_level(t) or t.get('covered') == 'yes' and k in ('rail', 'lightrail'): continue  # (what road_pieces draws at grade)
@@ -2835,8 +2940,9 @@ def cell_key(ij):
     X0, Y0 = i * L1, j * L1
     feat = load_feat(i, j)
     deck_profiles()
-    wids = sorted({L[0] for L in feat.get('lines', [])})
-    refs = {r for L in feat.get('lines', []) for r in L[2]}
+    lines = retunnel(feat.get('lines', []))
+    wids = sorted({L[0] for L in lines})
+    refs = {r for L in lines for r in L[2]}
     dbs, walls = lookup_dbs(); wt, seg, desc = walls or (None, None, None)
     ring_pts = np.array([p for _, prs, _ in feat.get('buildings', []) for o, _ in prs for p in o] or [(X0, Y0)])
     bounds = (*(ring_pts.min(0) - 20), *(ring_pts.max(0) + 20))  # a porch, a part: near its footprint
@@ -2844,7 +2950,7 @@ def cell_key(ij):
                   window(MR, MR_X0, MR_Y1, 32, X0, Y0, 3), window(SEA_M, SEA_X0, SEA_Y1, SEA_C, X0, Y0, 8), (SEA_X0, SEA_Y1, SEA_C),
                   [t for t in TREES if X0 - 5 <= t[0] < X0 + L1 + 5 and Y0 - 5 <= t[1] < Y0 + L1 + 5], sections_at(X0, Y0),
                   [db_rows(db, bounds) for db in dbs], canon([(seg[k], desc[k]) for k in np.sort(wt.query(box(*bounds)))] if walls else ()),
-                  canon([(w, DECKS.get(w), APPROACH.get(w), TUNNELS.get(w), w in ROOFS) for w in wids]), sorted(refs & PORTALS),
+                  canon([(w, DECKS.get(w), APPROACH.get(w), TUNNELS.get(w), w in ROOFS, sorted(RETUN.get(w, {}).items())) for w in wids]), sorted(refs & PORTALS),
                   canon(seawalls_near(X0, Y0, L1)), KIT[(KIT[:, 0] >= X0) & (KIT[:, 0] < X0 + L1) & (KIT[:, 1] >= Y0) & (KIT[:, 1] < Y0 + L1)].tobytes())
 
 
@@ -2978,6 +3084,11 @@ def selftest():
             finally: os.close(fd)
         with cpu_slot(2): assert busy()
         assert not busy() and common.spare_cores(0) <= common.cpus() + 1e-9
+    # a tunnel's mouth further out than its mapped portal: that much of the road on from it is a tunnel way of its own
+    RETUN[7] = {-1: (30.0, 0.0)}
+    (a, c, r, t), (b, c2, r2, t2) = retunnel([(7, [(0.0, 0.0), (100.0, 0.0)], [1, 2], {'highway': 'primary'})])
+    RETUN.clear()
+    assert t['tunnel'] == 'yes' and c == [(70.0, 0.0), (100.0, 0.0)] and r[1] == 2 and r2 == [1, r[0]] and c2 == [(0.0, 0.0), (70.0, 0.0)] and b == 7 and a > 1 << 33 and r[0] < 1 << 53 and 'tunnel' not in t2
     rules_selftest()
     print('selftest ok')
 

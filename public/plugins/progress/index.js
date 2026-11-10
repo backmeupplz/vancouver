@@ -55,9 +55,6 @@ const CSS = `
 .compact .pg-tabs button { min-height: 44px; }
 .pg-tabs button[aria-selected=true], .pg-chips button[aria-pressed=true] { background: rgba(127,196,232,.22); border-color: var(--accent); }
 .pg-body { max-height: min(46vh, 380px); overflow-y: auto; overscroll-behavior: contain; }
-.pg-name { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px; font-size: 12px; color: var(--muted); } .pg-name b { color: var(--text); margin-right: auto; }
-.pg-name button, .pg-ask button { font: inherit; font-size: 12px; color: var(--text); background: rgba(255, 255, 255, .08); border: 1px solid var(--line); border-radius: 7px; padding: 3px 9px; cursor: pointer; }
-.pg-ask { margin-top: 10px; font-size: 12.5px; color: #d9cbbb; text-align: center; } .pg-ask button { margin-left: 6px; pointer-events: auto; }
 .pg-row { padding: 6px 0; border-top: 1px solid var(--line); }
 .pg-row:first-child { border-top: 0; }
 .pg-row b { font-weight: 600; }
@@ -78,7 +75,9 @@ const CSS = `
 .pg ol li.me { color: var(--accent); font-weight: 600; }
 .pg ol li span:first-child { width: 1.6em; color: var(--muted); }
 .pg label { display: flex; align-items: center; gap: 6px; min-height: 28px; cursor: pointer; }
-.pg-pops { display: contents; } /* its pops stack in the host's column, with the toast (city.ui.toasts) */
+.pg-pops { position: fixed; left: 50%; top: calc(var(--st) + 96px); transform: translateX(-50%); z-index: 41; display: flex; flex-direction: column; align-items: center; gap: 6px; pointer-events: none; max-width: calc(100% - 24px); }
+.compact .pg-pops { top: calc(var(--st) + 104px); }
+.compact body.dlv-on .pg-pops { top: auto; bottom: calc(max(16px, calc(env(safe-area-inset-bottom) + 4px)) + 214px); }
 .pg-pop { position: static; padding: 6px 14px; border-radius: 999px; font-weight: 600; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; animation: pg-in .35s cubic-bezier(.2,1.6,.4,1); transition: opacity .35s, transform .35s; }
 .pg-pop.big { font-size: 15px; padding: 9px 18px; border-color: #ffd23a; }
 .pg-pop.out { opacity: 0; transform: translateY(-8px); }
@@ -113,7 +112,7 @@ export default function progress(city) {
 
   // ================================================================ juice: pops, confetti, sounds
   const css = document.createElement('style'); css.textContent = CSS; document.head.append(css)
-  const pops = document.createElement('div'); pops.className = 'pg-pops'; (city.ui.toasts || document.body).append(pops)
+  const pops = document.createElement('div'); pops.className = 'pg-pops'; document.body.append(pops)
   function pop(text, big, ms = 2600) {
     const p = document.createElement('div'); p.className = 'panel pg-pop' + (big ? ' big' : ''); p.setAttribute('role', 'status'); p.textContent = text
     pops.append(p); while (pops.children.length > 4) pops.firstChild.remove()
@@ -188,21 +187,7 @@ export default function progress(city) {
     board = String(board); value = Math.round(clamp(+value || 0, 0, 1e7))
     if (!/^[a-z][a-z0-9-]{0,15}$/.test(board) || board === 'daily' || value <= (S.best[board] || 0)) return false
     S.best[board] = value; save(); sync()
-    pop(`New best: ${BOARD_NAMES[board] || board}`); askName(); return true
-  }
-  // the first score someone posts under a generated name ("Heron 44"): a line on the game's results card (an element
-  // with data-results) offers to choose one. Once; the panel and the chat offer it at any time.
-  function askName() {
-    const mp = city.multiplayer
-    if (S.named || !mp?.connected || mp.chosen || !mp.profile) return
-    setTimeout(() => {
-      const card = document.querySelector('[data-results]:not([hidden])'); if (!card) return
-      S.named = 1; save()
-      const p = document.createElement('div'); p.className = 'pg-ask'
-      p.innerHTML = `On the leaderboards as <b>${esc(mp.name)}</b> <button type="button">Choose a name</button>`
-      p.querySelector('button').onclick = () => mp.profile()
-      card.append(p)
-    })
+    pop(`New best: ${BOARD_NAMES[board] || board}`); return true
   }
   let dailySent = 0
   function sync() { // bests the server hasn't had yet (it lets 6 through at once, then one every 5 s)
@@ -388,17 +373,14 @@ export default function progress(city) {
   }
   function draw() {
     const lv = levelOf(S.xp), a = XP_AT(lv), b = XP_AT(lv + 1)
-    const mp = city.multiplayer
     root.innerHTML = `<h3>Level ${lv} <span>${money(S.cash)}</span><small>${S.streak ? `🔥 ${S.streak} · ` : ''}🍁 ${leafCount()} / ${LEAVES.length}</small></h3>
       ${bar(S.xp - a, b - a)}<small>${(S.xp - a).toLocaleString('en-CA')} / ${(b - a).toLocaleString('en-CA')} XP to level ${lv + 1}</small>
-      ${mp?.connected && mp.profile ? `<div class="pg-name">Playing as <b>${esc(mp.name)}</b><button data-name>${mp.chosen ? 'Profile' : 'Choose a name'}</button></div>` : ''}
       <div class="pg-tabs" role="tablist">${[['today', 'Today'], ['leaves', 'Leaves'], ['garage', 'Garage'], ['top', 'Top']].map(([k, n]) => `<button role="tab" data-tab="${k}" aria-selected="${k === tab}">${n}</button>`).join('')}</div>
       <div class="pg-body">${TABS[tab]()}</div>
       <label class="dim"><input type="checkbox" data-mute ${S.mute ? '' : 'checked'}> Sounds</label>`
   }
   root.addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return
-    if (b.dataset.name !== undefined) return city.multiplayer?.profile()
     if (b.dataset.tab) tab = b.dataset.tab
     else if (b.dataset.board) board = b.dataset.board
     else if (b.dataset.item) {
@@ -427,7 +409,6 @@ export default function progress(city) {
     get leaves() { return LEAVES }, // (for tools and the console)
   }
   dailies(); label(); show()
-  city.ui.addStart?.({ icon: '🍁', label: 'Today', sub: `🔥 ${S.streak} · 🍁 ${leafCount()}/${LEAVES.length}`, order: 4, onClick: () => { tab = 'today'; tool.button.click() } })
 
   return {
     dispose() {

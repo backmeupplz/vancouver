@@ -48,7 +48,10 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    decks on its roof, joined to their ramps. Tunnels run under the ground from portal to portal (straight where the ground
    is high over them, else with the roof under it, no steeper than a ramp); near a portal, where the roof isn't under the
    ground, the ground is cut and the page draws the tunnel's concrete box and portal face, and the whole way a dark tube
-   round the road, so traffic, walkers and the van go through. Raised decks have railings along their edges. The terrain
+   round the road, so traffic, walkers and the van go through (no trees in a box; twin tubes mapped closer than they are
+   wide share the wall between them). Where OpenStreetMap's portal is short of the mouth the LiDAR shows (the road on
+   from it runs on the tunnel's cover, then drops off it into its cut: the George Massey tunnel's north end), the tunnel
+   goes on to that mouth (`tunnel_mouths`). Raised decks have railings along their edges. The terrain
    is an 8 m grid in detail tiles (plus, under the streets where it can't follow them, 2 m offsets: section TFIN), so
    streets sit on their embankments and in their cuts, fitted to the streets and
    rail lines (where an 8 m point lands in the cut, ravine or yard beside a street, the grid round it moves so the
