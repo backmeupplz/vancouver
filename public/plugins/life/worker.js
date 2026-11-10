@@ -61,9 +61,9 @@ onmessage = ({ data: m }) => {
   } else if (m.type === 'area') {
     area = m.area; dirty = walkDirty = true
   } else if (m.type === 'opts') {
-    const people = opts.people
+    const people = opts.people, weekend = !!opts.weekend
     Object.assign(opts, m.opts)
-    if (opts.people !== people) walkDirty = true
+    if (opts.people !== people || !!opts.weekend !== weekend) walkDirty = true
     if (!opts.people) { for (const p of peds) release(p); peds = []; bikes = []; statics = [] }
     targets()
   } else if (m.type === 'obstacles') {
@@ -581,17 +581,29 @@ function walkSign(ctl, g) {
 const axisGroup = (ctl, ang) => Math.abs(Math.cos(ang - ctl.ref)) > 0.7 ? 0 : 1
 
 // ---------------------------------------------------------------- cars
+// How busy the city is by the hour, in percent of its busiest hour: [weekdays, weekends], from midnight. Cars: the
+// two rush hours, a light early morning (6:30 is under a third of the evening rush), nights nearly empty; weekends
+// start late and peak in the afternoon. People: lunch and after work on weekdays, the afternoon at weekends, and
+// later at night then.
+const TOD = {
+  car: [[6, 4, 3, 3, 4, 7, 12, 45, 88, 75, 60, 62, 68, 66, 70, 85, 97, 100, 80, 58, 42, 33, 24, 13], [10, 8, 5, 4, 3, 4, 6, 11, 20, 34, 50, 62, 70, 72, 72, 70, 66, 60, 52, 42, 34, 28, 22, 16]],
+  walk: [[4, 3, 2, 2, 2, 3, 5, 22, 58, 55, 55, 68, 100, 88, 72, 78, 88, 100, 85, 65, 45, 30, 20, 10], [12, 9, 6, 3, 2, 2, 3, 8, 18, 36, 58, 75, 90, 100, 100, 95, 85, 75, 65, 55, 46, 40, 32, 20]],
+}
+const tod = (k) => { const a = TOD[k][opts.weekend ? 1 : 0], h = ((opts.hour % 24) + 24) % 24, i = Math.floor(h); return (a[i] + (a[(i + 1) % 24] - a[i]) * (h - i)) / 100 }
+// fewer people out in the wet (opts.wet: 0 dry to 1 a downpour; the ones who are carry umbrellas), far fewer cyclists
+const dry = (k) => 1 - k * Math.min(1, opts.wet || 0)
 function targets() {
-  const h = opts.hour, day = smooth(5.5, 8, h) * (1 - smooth(20, 23.5, h))
-  const carTod = 0.16 + 0.5 * day + 0.3 * Math.exp(-(((h - 8.2) / 1.3) ** 2)) + 0.38 * Math.exp(-(((h - 17) / 1.6) ** 2))
+  const ct = tod('car'), pt = tod('walk')
+  // and by place: the arterials carry the rush and what there is at night, the side streets empty as the city does
+  const key = `${Math.round(ct * 50)}`
+  if (net && net.todKey !== key) { net.todKey = key; net.cum = cumWeights(net.lanes, (L) => L.len * DENS[L.cls] * (L.cls <= 4 ? 1 : 0.3 + 0.7 * ct)) }
   const lanesKm = net ? net.cum[net.cum.length - 1] / 1000 : 0
-  carTarget = opts.cars ? Math.min(opts.maxCars, Math.round(lanesKm * carTod * opts.density)) : 0
+  carTarget = opts.cars ? Math.min(opts.maxCars, Math.round(lanesKm * ct * opts.density)) : 0
   if (walk) {
-    pedTarget = opts.people ? Math.min(opts.maxPeople - statics.length, Math.round(walk.weight * (0.1 + 0.9 * day) * opts.density)) : 0
-    bikeTarget = opts.people && opts.bikes ? Math.min(300, Math.round(walk.bikeWeight * (0.05 + 0.95 * day) * opts.density)) : 0
+    pedTarget = opts.people ? Math.min(opts.maxPeople - statics.length, Math.round(walk.weight * pt * dry(0.8) * opts.density)) : 0
+    bikeTarget = opts.people && opts.bikes ? Math.min(300, Math.round(walk.bikeWeight * pt * dry(0.9) * opts.density)) : 0
   }
 }
-const smooth = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t) }
 
 function newCar(cls) {
   const r = Math.random(), taxi = 0.012 + (Math.hypot(area.x - DOWNTOWN[0], area.y - DOWNTOWN[1]) < 3000 ? 0.07 : 0.02)
@@ -1088,7 +1100,7 @@ function* buildWalk() {
   const nodes = new Map(), wps = []
   const node = (id, x, y) => { let n = nodes.get(id); if (!n) nodes.set(id, (n = { id, x, y, legs: [], bikes: [] })); return n }
   const dt = (x, y) => { const d = Math.hypot(x - DOWNTOWN[0], y - DOWNTOWN[1]); return 1 + 2.5 * Math.exp(-d / 1500) }
-  const h = opts.hour, day = smooth(6, 9, h) * (1 - smooth(19, 22.5, h))
+  const day = tod('walk'), we = opts.weekend ? 1 : 0 // (at weekends: the parks and paths more than the sidewalks)
   // the carriageways, every 3 m: footways that run into them (OSM draws many sidewalks inside the paved width) move
   // out to the kerb, and where a path crosses one that stretch is walked only while crossing
   const rg = grid(32)
@@ -1105,7 +1117,7 @@ function* buildWalk() {
     const off = sidewalk(p), bike = p.kind === 10, c = off || bike ? centre(p) : kerbed(p, rg)
     const lift = off ? 0.12 + (c.deck ? 0.3 : 0) : 0.18 + (18 - p.kind) * 0.004 - 0.03 + (c.deck ? 0.35 : 0)
     const m = c.x.length >> 1, mx = c.x[m], my = c.y[m]
-    const per = off ? (p.kind <= 3 ? 0.03 : 0.012) * 2 : p.kind === 8 ? 0.07 : p.kind === 9 ? 0.03 : p.kind === 12 ? 0.008 : 0.016 * (0.3 + day)
+    const per = (off ? (p.kind <= 3 ? 0.03 : 0.012) * 2 : p.kind === 8 ? 0.07 : p.kind === 9 ? 0.03 : p.kind === 12 ? 0.008 : 0.016 * (0.3 + day)) * (we ? (off ? 0.8 : 1.4) : 1)
     const wp = { p, c, off, bike, lift, w: p.w, okL: !off || p._sides[0], okR: !off || p._sides[1], na: node(p.a, c.x[0], c.y[0]), nb: node(p.b, c.x[c.x.length - 1], c.y[c.y.length - 1]), legs: [null, null],
       weight: bike ? 0 : c.len * per * dt(mx, my), bikeWeight: bike ? c.len * 0.004 * dt(mx, my) : 0 }
     if (!off && !bike) wp.xs = crossings(c, rg, p)
@@ -1265,10 +1277,10 @@ function makeStatics() {
   }
   const seeded = (id) => { let a = id % 2147483647; return () => { a = (a * 48271) % 2147483647; return a / 2147483647 } }
   if (!walk || !opts.people) return
-  const h = opts.hour, day = smooth(6, 9, h) * (1 - smooth(19, 23, h))
+  const day = tod('walk')
   const rnd = (id, k) => { const x = Math.sin(id * 0.0001 + k * 12.9898) * 43758.5453; return x - Math.floor(x) }
   for (const b of walk.benches) {
-    if (rnd(b.id, 1) > 0.15 + 0.55 * day) continue
+    if (rnd(b.id, 1) > (0.04 + 0.66 * day) * dry(0.95)) continue // (nobody sits in the rain)
     const two = rnd(b.id, 2) < 0.35
     for (const side of two ? [-0.45, 0.45] : [(rnd(b.id, 3) - 0.5) * 0.8]) {
       const ax = Math.cos(b.ang), ay = Math.sin(b.ang)
@@ -1276,7 +1288,7 @@ function makeStatics() {
     }
   }
   for (const s of walk.stops) {
-    const n = Math.floor(rnd(s.id, 4) * (1 + 3.5 * (0.15 + day)))
+    const n = Math.floor(rnd(s.id, 4) * (0.6 + 4 * day)) // (nobody at most stops at night, one here and there at dawn)
     for (let i = 0; i < n; i++) {
       const a = rnd(s.id, 5 + i) * 6.28, d = 0.6 + rnd(s.id, 9 + i) * 1.4
       const p = person(s.x + Math.cos(a) * d, s.y + Math.sin(a) * d, s.h, s.ang + (rnd(s.id, 13 + i) - 0.5) * 1.2, 1, seeded(s.id + i))

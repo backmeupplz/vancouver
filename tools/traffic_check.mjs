@@ -164,6 +164,12 @@ for (const [name, dtOf, lateOf] of [['60 fps', even(60), prompt], ['30 fps', eve
   const o = drawn(name, dtOf, lateOf)
   if (!name.includes('stalls')) for (const k in o) if (k !== 'cyclist') worst = Math.max(worst, o[k].glitch) // (a cyclist turns round on the spot at a path's dead end, and the test has two)
 }
+// how busy by the hour, the day and the weather (#606): what the worker aims for (cars, people)
+const aim = (o) => { send({ type: 'opts', opts: { density: 6, maxCars: 4000, maxPeople: 3000, weekend: false, wet: 0, ...o } }); got.length = 0; send({ type: 'debug', x: 0, y: 0, r: 0 }); const d = got.find((x) => x.type === 'debug'); return [d.carTarget, d.pedTarget] }
+const rush = aim({ hour: 17 }), dawn = aim({ hour: 6.5 }), night = aim({ hour: 3 }), noon = aim({ hour: 12 }), wet = aim({ hour: 12, wet: 1 }), sat8 = aim({ hour: 8, weekend: true }), wed8 = aim({ hour: 8 })
+console.log(`cars, people aimed for: 17:00 ${rush}, 6:30 ${dawn}, 3:00 ${night}, noon ${noon}, noon in a downpour ${wet}, 8:00 Wed ${wed8}, Sat ${sat8}`)
+assert(dawn[0] < 0.35 * rush[0] && night[0] < 0.08 * rush[0] && sat8[0] < 0.4 * wed8[0], 'cars by the hour')
+assert(dawn[1] < 0.25 * noon[1] && night[1] < 0.08 * noon[1] && wet[1] < 0.5 * noon[1], 'people by the hour and the weather')
 if (!OLD) assert(worst < 0.1, `things stutter as drawn: ${worst} glitches per 1000 frames`)
 console.log('traffic ok')
 

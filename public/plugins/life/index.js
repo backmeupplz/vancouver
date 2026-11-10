@@ -604,11 +604,13 @@ export default function life(city) {
   }
 
   // ---------------------------------------------------------------- on / off, settings, time of day
+  // how wet it is out, 0 to 1: rain, drizzle and storms by how hard, snow a little less (fewer people walk and ride)
+  const wetness = () => { const w = city.weather; return !w ? 0 : /rain|storm|drizzle/.test(w.kind) ? +w.intensity.toFixed(1) : w.kind === 'snow' ? +(0.7 * w.intensity).toFixed(1) : 0 }
   const vanHour = () => vancouver(Date.now()).sec / 3600
   let active = false, peopleOn = false, stopAnim = null, lastOpts = ''
   function sendOpts() {
     const k = city.quality?.tier.life ?? 1 // graphics quality: fewer cars and people on a weaker GPU
-    const o = { cars: set.cars, people: peopleOn, bikes: set.bikes, density: set.density * k, hour: +(city.weather?.hour ?? vanHour()).toFixed(1), maxCars: Math.round(MAX_CARS * k), maxPeople: Math.round(MAX_PEOPLE * k) }
+    const o = { cars: set.cars, people: peopleOn, bikes: set.bikes, density: set.density * k, hour: +(city.weather?.hour ?? vanHour()).toFixed(1), weekend: /^S/.test(vancouver(Date.now()).wd), wet: wetness(), maxCars: Math.round(MAX_CARS * k), maxPeople: Math.round(MAX_PEOPLE * k) }
     const s = JSON.stringify(o)
     if (s !== lastOpts) { lastOpts = s; worker.postMessage({ type: 'opts', opts: o }) }
   }
@@ -666,7 +668,7 @@ export default function life(city) {
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" data-k="people"> People</label>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" data-k="bikes"> Cyclists</label>
       <label style="display:flex;gap:8px;align-items:center">Busy <input type="range" min="0.2" max="2" step="0.1" data-d style="flex:1"></label>
-      <div style="font-size:11px;color:var(--muted);line-height:1.35">Simulated, busier at rush hour (Vancouver time). Cars from neighbourhood zoom, people up close. Streets, signals, crossings, benches and stops © OpenStreetMap contributors.</div>
+      <div style="font-size:11px;color:var(--muted);line-height:1.35">Simulated: as busy as the hour and the day of the week (Vancouver time), quiet at night, fewer people out in the rain. Cars from neighbourhood zoom, people up close. Streets, signals, crossings, benches and stops © OpenStreetMap contributors.</div>
     </div>`
   for (const cb of el.querySelectorAll('[data-k]')) {
     cb.checked = set[cb.dataset.k]
