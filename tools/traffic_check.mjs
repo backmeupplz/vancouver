@@ -42,7 +42,7 @@ const pieces = [
 ]
 // for the people (switched on at the end): a footpath and a cycleway off the streets, a bench and a bus stop
 pieces.push({ ...road(20, 21, [100, 800, 400, 900], 9, 1, 3), drive: false }, { ...road(22, 23, [100, 850, 450, 950], 10, 1, 3), drive: false })
-const pois = [{ kind: 4, id: 30, x: 250, y: 852 }, { kind: 5, id: 31, x: 300, y: 870 }]
+const pois = [{ kind: 4, id: 30, x: 250, y: 852 }, { kind: 5, id: 31, x: 300, y: 870 }, { kind: 4, id: 32, x: 160, y: 820 }] // (the second bench: mapped on the path's own line)
 const tile = { key: '0/0_0', level: 0, ox: 0, oy: 0, size: 1024, terrain: { n: 2, h: new Float32Array([10, 10, 10, 10]) }, pieces, pois }
 send({ type: 'opts', opts: { cars: true, people: false, bikes: false, density: 6, hour: 17, maxCars: 300, maxPeople: 0 } })
 send({ type: 'tiles', add: [tile], drop: [] })
@@ -89,7 +89,14 @@ send({ type: 'opts', opts: { people: true, bikes: true, maxPeople: 300 } })
 let walkers = 0, riders = 0
 for (let i = 0; i < 1800; i++) { const m = tick(false); walkers = Math.max(walkers, m.nPeople); riders = Math.max(riders, m.nBikes) }
 got.length = 0; send({ type: 'debug', x: 0, y: 0, r: 0 })
-const sitters = got.find((x) => x.type === 'debug').statics
+const dbg = got.find((x) => x.type === 'debug'), sitters = dbg.statics
+// the benches stand beside the footpath (3 m wide, from 100,800 to 400,900), clear of its paving and facing it (#606)
+for (const [x, y, ang] of dbg.benches) {
+  const l = Math.hypot(300, 100), off = ((x - 100) * -100 + (y - 800) * 300) / l // metres left of the path's line
+  assert(Math.abs(off) >= 1.95, `a bench ${Math.abs(off).toFixed(2)} m from the middle of a 3 m path`)
+  assert((Math.cos(ang) * -100 + Math.sin(ang) * 300) / l * -Math.sign(off) > 0.99, 'a bench not facing its path')
+}
+assert.equal(dbg.benches.length, 2)
 console.log(`${walkers - sitters} walking, ${sitters} sitting or waiting, ${riders} cyclists: ${nans} numbers not finite (${nan || '-'})`)
 assert(walkers > sitters && sitters > 0 && riders > 0, 'people of every kind')
 assert.equal(nans, 0, nan)

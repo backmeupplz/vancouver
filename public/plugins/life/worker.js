@@ -1178,8 +1178,36 @@ function* buildWalk() {
     near.near(x, y, (w) => { for (let i = 0; i < w.c.x.length; i++) { const d = (w.c.x[i] - x) ** 2 + (w.c.y[i] - y) ** 2; if (d < bd) { bd = d; bx = w.c.x[i]; by = w.c.y[i] } } })
     return bd < 1e9 ? Math.atan2(by - y, bx - x) : Math.random() * 6.28
   }
+  // a bench stands beside the nearest path or sidewalk, square to it and facing it, clear of its paving (OSM maps
+  // many on the path's own line or at its edge: facing the nearest point of the line they stood on it at any angle)
+  let scans = 0
+  const beside = (q) => {
+    let x = q.x, y = q.y, ang = null
+    for (let k = 0; k < 4; k++) { // (where paths meet: clear of each of them)
+      let b = null // the path whose paving it stands deepest in, else the one whose edge is nearest
+      const scan = ++scans
+      near.near(x, y, (w) => {
+        if (w._scan === scan) return // (it is in the grid once per point of its line)
+        w._scan = scan
+        const X = w.c.x, Y = w.c.y, need = w.off ? w.off + 1.3 : w.w / 2 + 0.5
+        for (let i = 0; i < X.length - 1; i++) {
+          const dx = X[i + 1] - X[i], dy = Y[i + 1] - Y[i], l2 = dx * dx + dy * dy || 1, t = Math.max(0, Math.min(1, ((x - X[i]) * dx + (y - Y[i]) * dy) / l2))
+          const px = X[i] + dx * t, py = Y[i] + dy * t, d = Math.hypot(x - px, y - py)
+          if (d > 12 || (b && d - need >= b.d - b.need)) continue
+          const l = Math.sqrt(l2), side = (x - px) * -dy + (y - py) * dx >= 0 ? 1 : -1
+          b = { d, need, px, py, nx: (side * -dy) / l, ny: (side * dx) / l }
+        }
+      })
+      if (!b) break
+      ang = Math.atan2(-b.ny, -b.nx)
+      if (b.d >= b.need - 0.01) break
+      x = b.px + b.nx * b.need; y = b.py + b.ny * b.need
+    }
+    if (ang == null) ang = (q.id % 628) / 100 // (no path within 12 m: any way round)
+    return wallOut(x, y, 0.3) ? { x: q.x, y: q.y, ang } : { x, y, ang } // (moved into a wall: as mapped)
+  }
   const benches = poisOf([4], area.vx, area.vy, r).filter((q) => !wallOut(q.x, q.y, 0)).map( // (not the ones mapped indoors, on a roof terrace)
-    (q) => ({ x: q.x, y: q.y, h: groundH(q.x, q.y) + 0.1, ang: face(q.x, q.y), id: q.id }))
+    (q) => { const b = beside(q); return { x: b.x, y: b.y, h: groundH(b.x, b.y) + 0.1, ang: b.ang, id: q.id } })
   const stops = poisOf([5], area.vx, area.vy, r).map((q) => ({ x: q.x, y: q.y, h: groundH(q.x, q.y) + 0.13, ang: face(q.x, q.y), id: q.id }))
   return { nodes, foot, cycl, cum: cumWeights(foot, (w) => w.weight), bcum: cumWeights(cycl, (w) => w.bikeWeight),
     weight: foot.reduce((s, w) => s + w.weight, 0), bikeWeight: cycl.reduce((s, w) => s + w.bikeWeight, 0), benches, stops, rg }
@@ -1828,6 +1856,7 @@ function debug({ x, y, r, ids }) {
     roadWalkers: walk ? peds.filter((p) => !p.fall && !p.xing && !p.xin && p.mode !== 'wait' && inRoad(p.x, p.y)).slice(0, 8).map((p) => { const q = inRoad(p.x, p.y); return [Math.round(p.x), Math.round(p.y), p.mode, p.wp.p.kind, p.wp.off ? 'sidewalk' : p.wp.p.crossing ? 'crossing' : 'path', q[4].kind, q[4].drive ? 'drive' : 'nodrive', +(q[4].w / 2 - Math.abs(-(p.x - q[2]) * q[1] + (p.y - q[3]) * q[0])).toFixed(1)] }) : [], // (the last: metres inside the paving, under 0: in the kerb strip)
     alongRoad: peds.filter((p) => p.xin && p.xin.u1 - p.xin.u0 > p.xin.p.w + 8).length,
     roadStand: walk ? statics.filter((p) => inRoad(p.x, p.y)).length : 0,
+    benches: walk ? walk.benches.map((b) => [b.x, b.y, b.ang]) : [],
     ctls: net?.ctls.length, lanes: net?.lanes.length,
     lanesNear: net?.lanes.filter((L) => { const m = L.x.length >> 1; return Math.hypot(L.x[m] - x, L.y[m] - y) < r }).slice(0, 30)
       .map((L) => ({ kind: L.cls, a: L.p.a, b: L.p.b, dir: L.dir, li: L.li, cars: L.cars.length, len: L.len | 0, level: L.p.tile.level })),
