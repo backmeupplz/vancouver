@@ -635,7 +635,7 @@ function loop(now) {
   city?.emit('frame', dt, now / 1000)
   if (own?.camera.isPerspectiveCamera) { mats.tree.uniforms.cyl.value = 1; trees3d.update(own.camera) } else if (own) { mats.tree.uniforms.cyl.value = 0; trees3d.off() }
   // trees and building parts between a street-level camera and the player dissolve (materials.js occluder)
-  const pl = own?.camera.isPerspectiveCamera && city?.player, oc = pl && OCCLUDER[pl.mode]
+  const pl = own?.camera.isPerspectiveCamera && city?.player, oc = pl && !pl.tunnel && OCCLUDER[pl.mode] // (not in a tunnel: its lining is all there is round the camera, and nothing else is in the way)
   if (oc) occluder.value.set(pl.x, pl.y + oc[0], pl.z, oc[1]); else occluder.value.w = 0
   updateShadows()
   if ((shadowStale || lampsStale) && now - lastShadow > 500) { if (shadowStale) renderer.shadowMap.needsUpdate = true; shadowStale = lampsStale = false; lastShadow = now; lightStale = true }

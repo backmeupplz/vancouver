@@ -191,7 +191,7 @@ Plugins may import from `core/` (relative paths, e.g. `'../../core/util.js'`):
   `city.traffic.people(x, z, r, out)` and `city.traffic.poles(x, z, r, out)` (the people and the traffic signal poles
   there), `city.traffic.knock(id, dx, dz, speed)` (a person was bumped into: they stumble, or fall over and get up).
 - **The player** (`plugins/drive`, `plugins/sail`): while the user drives, walks, hikes, drives a bus or sails, `city.player = { mode: 'car' |
-  'foot' | 'bus' | 'boat', x, y, z, heading, speed, colour, vehicle: 'van' | 'bus' | 'boat' | 'taxi' }` (a Rush Fare cab is mode `'car'`) (updated every frame, read it when you
+  'foot' | 'bus' | 'boat', x, y, z, heading, speed, colour, vehicle: 'van' | 'bus' | 'boat' | 'taxi', tunnel: true while in a tunnel }` (a Rush Fare cab is mode `'car'`) (updated every frame, read it when you
   need it), else `null`; `'player'` is emitted on enter, leave and car ⇄ foot. `city.models.van(colour)`,
   `city.models.person(colour)`, `city.models.bus()` (a 12 m city bus, its middle at the origin) and `city.models.boat(colour)` return the same low-poly models (forward −z, origin on the
   ground or the waterline; `update(dt, speed)` runs the walk cycle or bobs the boat), so other players look alike.

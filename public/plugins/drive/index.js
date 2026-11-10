@@ -1052,8 +1052,11 @@ export default function drive(city) {
     // in a tunnel: under its ceiling, and the buildings overhead are no walls; so while the camera is still in the tube the
     // player has just come out of (else it rose through the roof and the portal's headwall behind them)
     const still = P.roof != null ? null : nearestRoad(bx, by, 1, true, false, false, P.h - 0.58)
-    const roof = P.roof != null ? P.roof : still?.s.p.tunnel && still.d < 0.6 && Math.abs(still.z + 0.58 - P.h) < 3 ? still.z + still.s.p.tunnel : null
-    const tube = roof != null
+    const roof0 = P.roof != null ? P.roof : still?.s.p.tunnel && still.d < 0.6 && Math.abs(still.z + 0.58 - P.h) < 3 ? still.z + still.s.p.tunnel : null
+    const tube = roof0 != null
+    // (the ceiling over the camera, not just over the player: up a tube's ramp it is lower behind them, 0.9 m in the George Massey tunnel's 9%)
+    const roofAt = (x, y) => { const r = nearestRoad(x, y, 12, true, false, false, P.h - 0.58); return r?.s.p.tunnel && Math.abs(r.z + 0.58 - P.h) < 4 ? r.z + r.s.p.tunnel : Infinity }
+    const roof = tube ? Math.min(roof0, roofAt(bx, by), roofAt((bx + P.x) / 2, (by + P.y) / 2), roofAt(chase.pos.x, -chase.pos.z)) : null
     if (city.tiles?.baseMesh) city.tiles.baseMesh.position.y = tube ? -120 : 0 // (the far map's picture lies 4 m under the ground, through a tunnel deeper than that: sunk under it meanwhile)
     const lift = onFoot ? 0 : car.lift // (a cab in the air: the camera rises with it)
     const gy = tube ? Math.min(P.h + up, roof - 0.7) : Math.max(city.world.heightAt(bx, -by) + (onFoot ? 0.9 : 1.4), P.h + up + lift)
@@ -1083,7 +1086,7 @@ export default function drive(city) {
     })
     duck()
     // the near plane comes in when a wall is close, so it never cuts through one
-    const wall = !tube && collide(chase.pos.x, -chase.pos.z, 2.5, ch, 2)
+    const wall = tube ? (hitD = intoTube(P, chase.pos)) < 2.5 : collide(chase.pos.x, -chase.pos.z, 2.5, ch, 2)
     // (its corners are further out than its middle, the more the wider the view: a cab at speed looked through the
     // wall of a lane with 0.6 of the distance; and by the nearest wall, not the sum of the pushes off two)
     const tn = Math.tan((pcam.fov * Math.PI) / 360)
@@ -1269,7 +1272,7 @@ export default function drive(city) {
     const P = body()
     if (state === 'off' || state === 'pick') { if (city.player) { city.player = null; city.emit('player', null) } return }
     const p = city.player || (city.player = { vehicle: 'van', colour: vanColour })
-    p.mode = onFoot ? 'foot' : game ? 'bus' : 'car'; p.vehicle = game ? 'bus' : taxi ? 'taxi' : 'van'; p.x = P.x; p.y = P.h; p.z = -P.y; p.heading = wrap(P.yaw + Math.PI); p.speed = P.speed
+    p.mode = onFoot ? 'foot' : game ? 'bus' : 'car'; p.vehicle = game ? 'bus' : taxi ? 'taxi' : 'van'; p.x = P.x; p.y = P.h; p.z = -P.y; p.heading = wrap(P.yaw + Math.PI); p.speed = P.speed; p.tunnel = P.roof != null
     if (emit) city.emit('player', p)
   }
   function publish() { // the van and the walker as obstacles the simulated cars brake for
@@ -1323,6 +1326,27 @@ export default function drive(city) {
       best = Math.min(best, s.p.roof ? -Infinity : Math.hypot(x - s.x0 - dx * u, y - s.y0 - dy * u) - (s.p.tunnel ? s.p.tw || s.p.w / 2 + 0.6 : s.p.w / 2 + (s.p.band ? 2 : 0)))
     })
     return best
+  }
+  // In a tunnel the camera stays between the walls of the player's tube, 0.8 m off them: moved across the tube, not
+  // along it (the van's tail points at a wall when it is turned or shoved across the lane, and the camera behind it went
+  // out through the wall: under the ground, or into the twin tube). Past the tube's end it is held to its last piece's
+  // line (coming in from the street, the camera follows the player in). Returns how far the wall is from it.
+  function intoTube(P, pos) {
+    let p = null, pd = Infinity
+    segsNear(P.x, P.y, 8, (s) => { // the player's tube: the nearest line (twin tubes share the wall halfway between theirs)
+      if (s.z0 == null || !s.p.tunnel) return
+      const dx = s.x1 - s.x0, dy = s.y1 - s.y0, u = clamp(((P.x - s.x0) * dx + (P.y - s.y0) * dy) / (dx * dx + dy * dy || 1), 0, 1), d = Math.hypot(P.x - s.x0 - dx * u, P.y - s.y0 - dy * u)
+      if (d < pd && Math.abs(s.z0 + (s.z1 - s.z0) * u + 0.58 - P.h) < 2.6) { pd = d; p = s.p }
+    })
+    if (!p) return Infinity
+    const A = p.pts, x = pos.x, y = -pos.z, lim = Math.max(0, (p.tw || p.w / 2 + 0.6) - 0.8)
+    let bd = Infinity, o = 0, nx = 0, ny = 0
+    for (let i = 0; i < A.length - 2; i += 2) {
+      const dx = A[i + 2] - A[i], dy = A[i + 3] - A[i + 1], l = Math.hypot(dx, dy) || 1, u = clamp(((x - A[i]) * dx + (y - A[i + 1]) * dy) / l, 0, l), d = Math.hypot(x - A[i] - (dx / l) * u, y - A[i + 1] - (dy / l) * u)
+      if (d < bd) { bd = d; nx = -dy / l; ny = dx / l; o = (x - A[i]) * nx + (y - A[i + 1]) * ny }
+    }
+    if (Math.abs(o) > lim) { const m = o - Math.sign(o) * lim; pos.x -= nx * m; pos.z += ny * m }
+    return lim + 0.8 - Math.min(Math.abs(o), lim)
   }
   const roadAt = (x, y, h) => { const r = nearestRoad(x, y, 2); return !!r && r.d < 0.5 && (r.z == null ? h - (city.world.heightAt(x, -y) + 0.2) < 3 : Math.abs(r.z + 0.58 - h) < 3) }
   function input() {
