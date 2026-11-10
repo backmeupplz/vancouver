@@ -218,24 +218,24 @@ throws). Everything is kept in `localStorage` (`progress.v1`); no accounts. **Th
   done; each call also counts as the stats `kind` (+1) and `kind.cash` (+amount), which the daily challenges read.
   Use these kinds where they fit (anything else works too and just pays): `delivery` (one parcel dropped off),
   `fare` (one Rush Fare passenger dropped off), `bus` (one bus stop served), `sail` (a sight collected, a buoy race
-  finished), `hike` (a trail or summit finished), `stunt` (a jump, drift, near miss, combo: small amounts).
+  finished), `hike` (a trail or summit finished), `fish` (a fish landed), `crab` (a trap hauled and sorted), `stunt` (a jump, drift, near miss, combo: small amounts).
   `meta`: `{ xp, label, score, board, quiet }`. `label` is the toast text (default: none for under $20, else
   `+$amount`); `quiet: true` never toasts (use it for a stream of small awards; awards that do toast add up in one pop while it is on screen);
   `score` (with optional `board`, default `kind`) also reports a finished run, see `score()`.
   Award when the thing happens, not per frame: at most a few calls a second.
 - `city.progress.score(board, value)` → `true` when it is the player's best. A finished run's score for the
   leaderboard `board` (`[a-z][a-z0-9-]{0,15}`; in use: `delivery` cash in one shift, `taxi` fares in one Rush Fare run,
-  `bus` a bus shift's score, `sail` a race's points, `hike` metres climbed in one hike; new ones just appear in the
+  `bus` a bus shift's score, `sail` a race's points, `hike` metres climbed in one hike, `fish` the biggest fish in mm; new ones just appear in the
   panel). An integer 0–10 000 000, **higher is better** (for a time, pass points that fall with the seconds). Call it
   once, when the run ends. The best is kept locally and sent to the live server (name from the multiplayer plugin).
 - `city.progress.stat(name, delta = 1)` → the new lifetime total. A counter of your own (`'taxi.combo'`,
   `'sail.gybes'`); totals show in the panel when a daily challenge or unlock uses them. Distances are counted for you
   from `city.player` (`km.car`, `km.bus`, `km.foot`, `km.boat`, and `climb` in metres on foot): don't report those.
 - `city.progress.unlocked(id)` → boolean. Ids are `slot:name`: `van:<name>` (van colours), `horn:<name>`,
-  `boat:<name>` (hull colours), `cab:<index>` (Rush Fare cabs, the index into `CABS`; the garage's Start button asks). Unknown ids are unlocked
+  `boat:<name>` (hull colours), `rod:<name>`, `lure:<name>`, `trap:<name>` (fishing gear, `plugins/fish/rules.js`), `cab:<index>` (Rush Fare cabs, the index into `CABS`; the garage's Start button asks). Unknown ids are unlocked
   (`true`), so gating by an id the progress plugin doesn't know never locks anyone out; the basic modes are never
   gated.
-- `city.progress.choice(slot)` → what the player picked for `'van' | 'horn' | 'boat'` in the panel: `{ id, name,
+- `city.progress.choice(slot)` → what the player picked for `'van' | 'horn' | 'boat' | 'rod' | 'lure' | 'trap'` in the panel: `{ id, name,
   value }` (`value`: a CSS colour for `van` / `boat`, the horn's oscillator frequencies in Hz for `horn`), or `null` for the default. Read it
   when the game starts (and on `'progress:choice'`).
 - `city.progress.level`, `.xp`, `.cash`, `.stats` (read-only snapshot values).
@@ -245,6 +245,17 @@ throws). Everything is kept in `localStorage` (`progress.v1`); no accounts. **Th
 Collectibles (the hidden maple leaves all over the map) are picked up by `city.player` coming within a few metres,
 in any mode: games need to do nothing for them. Scores go to the live server as `{t:'score', board, v}` through
 `city.multiplayer.send` and come back from `GET /live/boards` (server/src/world.rs).
+
+## Fishing
+
+`plugins/fish` (fishing and crabbing on foot at any water's edge, trolling under sail) publishes `city.fishing =
+{ busy, active, spots }`: `busy` while the walker has a rod or a trap rope in hand (the drive plugin holds the walker
+still: its one hook), `active` while a line is out (also from the boat), `spots` the named places (`{ id, name, kind,
+water, x, z }`). It reads `city.player`, `tile.water`, `city.weather` and `city.progress`, and the tide from `city.tide`
+when a plugin publishes one: `{ height (metres above chart datum), rate (metres an hour, + rising) }` (`level` is read
+as `height`; without it a four-constituent stand-in in `rules.js`). Its rules (`rules.js`: what bites by water, season,
+tide, hour, weather, lure and cast; the reel fight; the crab trap and gauge) have no three.js or DOM:
+`node tools/fish_check.mjs` runs them, checks every spot is at the water's edge and walkable, and plays a catch and a haul.
 
 ## Traffic
 

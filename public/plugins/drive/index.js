@@ -1495,7 +1495,7 @@ export default function drive(city) {
     }
     if (errand) return walkErrand(dt)
     if (hike?.photo) { man.speed = 0; return } // posing for the view
-    if (foot.busy(I, dt)) { man.speed = 0; return } // framing a photo, sat down
+    if (foot.busy(I, dt) || city.fishing?.busy) { man.speed = 0; return } // framing a photo, sat down, a rod in hand (plugins/fish)
     man.run = I.run && !(hike && man.winded)
     const tr = hike ? nearestRoad(man.x, man.y, 4, false, true) : null, onTrail = !!tr && tr.d < 0.8
     const target = hike ? hikeSpeed(dt, I, onTrail) : I.up ? (I.run ? RUN : WALK) : I.down ? -WALK * 0.6 : 0

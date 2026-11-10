@@ -21,11 +21,11 @@ look; PLUGINS.md is the plugin contract. Read the parts you need, not the whole 
   picker, touch), `util.js` helpers, `lights.js`/`look.js` night lights + camera look, `quality.js` tiers,
   `streets.js` street names
 - `public/plugins/`: `drive/` (van, walk, hike, bus, Rush Fare `taxi.js`; `deliver.js` delivery shift, `feel.js` tyre marks / sparks / speed lines / squeal, `van.js` physics specs, `route.js` bus GPS,
-  `kerbs.js`), `life/` (traffic + pedestrians: `worker.js` sim, `index.js` render, `blades.js` street signs), `sail/`,
+  `kerbs.js`), `life/` (traffic + pedestrians: `worker.js` sim, `index.js` render, `blades.js` street signs), `sail/`, `fish/` (fishing + crabbing: `rules.js` pure rules, `models.js`),
   `progress/` (cash, XP, levels, maple leaves, dailies, leaderboards: `city.progress`), `weather/`, `transit/`, `ships/`, `planes/`, `landmarks/`, `lofi/`, `multiplayer/`
 - `tools/`: bake (`tiles.py` main, `osm_split.py`, `sea.py`, `heights.py`, `hrdem.py`, `common.py` shared helpers),
   data (`roofs.py`, `beachlogs.py`, `facades.py`, `mapillary.py`, `transit_data.py`), audits/checks (`audit_elev.py`,
-  `audit_trunks.py`, `sail_check.mjs` (race marks and starts on water, clear of moored boats), `geom_rules.py` (every geometry rule: checks + fixes, the publish gate; `drawn_check.mjs` its checks on
+  `audit_trunks.py`, `fish_check.mjs` (fishing rules, spots at the water's edge, a scripted catch and crab haul), `sail_check.mjs` (race marks and starts on water, clear of moored boats), `geom_rules.py` (every geometry rule: checks + fixes, the publish gate; `drawn_check.mjs` its checks on
   what the page draws), `*_check.mjs`, `python3 tools/tiles.py selftest`)
 - `server/` Rust live server (`cargo test`)
 

@@ -23,9 +23,13 @@ const ITEMS = [
   ['horn:ferry', 'Ferry', [98, 131], 8, 2000], ['horn:train', 'Freight train', [311, 370, 415, 494], { leaves: 70 }],
   ['boat:teal', 'Harbour teal', '#2f6f8f', 1], ['boat:sunset', 'Sunset', '#e8703a', 3, 600], ['boat:orca', 'Orca', '#22252c', 5, 1200],
   ['boat:mint', 'Seawall mint', '#9fe0c8', 7, 1800], ['boat:cherry', 'Cherry', '#c81d3a', 10, 3000], ['boat:gold', 'Gold leaf', '#d9a520', { leaves: 20 }],
+  // fishing gear (plugins/fish/rules.js has what each does)
+  ['rod:spin', 'Seawall spinner', null, 1], ['rod:surf', 'Surf caster (casts further)', null, 3, 500], ['rod:mooch', 'Mooching rod (stronger, faster)', null, 6, 1500], ['rod:sturgeon', 'Sturgeon stick (very strong)', null, { leaves: 30 }],
+  ['lure:worm', 'Worm and float', null, 1], ['lure:buzz', 'Buzz Bomb (coho, rockfish)', null, 2, 300], ['lure:hoochie', 'Pink hoochie (salmon)', null, 5, 900], ['lure:herring', 'Cut-plug herring (the big ones)', null, 8, 1800],
+  ['trap:ring', 'Crab ring', null, 1], ['trap:fold', 'Folding trap (holds its crab)', null, 4, 700], ['trap:pot', 'Crab pot (holds six)', null, 9, 2200],
 ].map(([id, name, value, need, price]) => ({ id, slot: id.split(':')[0], name, value, lv: need.leaves ? 0 : need, leaves: need.leaves || 0, price: price || 0 }))
 const CAB_LEVELS = [1, 1, 1, 1, 2, 3, 4, 5, 6, 8, 10, 12] // Rush Fare cabs by their index in CABS: the first four are everyone's
-const SLOTS = [['van', 'Van'], ['horn', 'Horn'], ['boat', 'Boat'], ['cab', 'Rush Fare cabs']]
+const SLOTS = [['van', 'Van'], ['horn', 'Horn'], ['boat', 'Boat'], ['rod', 'Rod'], ['lure', 'Lure'], ['trap', 'Crab trap'], ['cab', 'Rush Fare cabs']]
 
 // the daily challenges: one from each group a day. [group, stat, text, min, max, step, award kind it needs]:
 // a challenge on an award kind is only drawn once the player has earned that kind (so it can always be done).
@@ -34,10 +38,11 @@ const POOL = [
   [0, 'bus', (n) => `Serve ${n} bus stops`, 5, 10, 1, 'bus'], [0, 'km.car', (n) => `Drive ${n} km`, 3, 6, 1], [0, 'km.bus', (n) => `Drive a bus ${n} km`, 1, 3, 1],
   [1, 'km.boat', (n) => `Sail ${n} km`, 1, 3, 1], [1, 'km.foot', (n) => `Walk ${n} km`, 0.5, 1.5, 0.5], [1, 'climb', (n) => `Climb ${n} m on foot`, 60, 200, 20],
   [1, 'sail', (n) => `${n} sights or races under sail`, 2, 3, 1, 'sail'], [1, 'hike', () => 'Finish a hike', 1, 1, 1, 'hike'],
+  [1, 'fish.kinds', (n) => `Catch ${n} different species of fish`, 3, 4, 1, 'fish'], [0, 'fish', (n) => `Land ${n} fish`, 4, 8, 2, 'fish'], [2, 'crab.keep', (n) => `Keep ${n} legal crab`, 2, 3, 1, 'crab'],
   [2, 'leaf', (n) => `Find ${n} maple ${n > 1 ? 'leaves' : 'leaf'}`, 1, 3, 1], [2, 'cash', (n) => `Earn ${money(n)} any way you like`, 300, 800, 100],
   [2, 'stunt', (n) => `Pull off ${n} stunts`, 5, 15, 5, 'stunt'],
 ]
-const BOARD_NAMES = { daily: 'Today', taxi: 'Rush Fare', delivery: 'Deliveries', bus: 'Bus', sail: 'Sailing', hike: 'Hiking' }
+const BOARD_NAMES = { daily: 'Today', taxi: 'Rush Fare', delivery: 'Deliveries', bus: 'Bus', sail: 'Sailing', hike: 'Hiking', fish: 'Biggest fish (mm)' }
 const DAILY_PAY = 150, LEAF_PAY = 50
 
 const CSS = `
