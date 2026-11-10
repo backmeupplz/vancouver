@@ -1,7 +1,11 @@
 // Things to do on foot (the drive plugin's walk and hike modes call in here; the walking itself stays in index.js):
 // - a photo walk: P (or the camera button) lifts the camera to the eye; frame a real landmark and snap it for points,
 //   best shot kept per landmark; the job card points at the nearest one not yet shot
-// - sitting down (C): the camera drifts round for the view; on a beach it counts the beach, more at golden hour
+// - sitting down (C) on what is there: a free seat of a bench (the life plugin's city.traffic.benches), a driftwood
+//   log (core/tiles.js logsNear), steps, the edge of a wall or the seawall with the legs over it, else cross-legged
+//   on the ground; the button says which. The camera settles to one side; on a beach it counts the beach, more at
+//   golden hour
+// - petting a dog (G) that walks by with its owner (city.traffic.dogs): each dog once a day, a `pet` for city.progress
 // - hikes: quarter marks with split times against your best (and a second wind), a medal for the time at the top,
 //   and now and then a deer or a raccoon by the trail to spot
 // - footsteps that sound of what is underfoot (paving, grass, sand, a wooden deck; wetter in the rain), a hop (Space)
@@ -9,6 +13,7 @@
 import { kit, kitMaterial } from '../../core/kit.js'
 import { clamp, wrap } from '../../core/util.js'
 import { noise, tone } from '../../core/play.js'
+import { sitWalker } from './walker.js'
 
 // name, lat, lon, height (m, where to aim), from how far it counts (m); tall ones show over the roofs
 const SHOTS = [
@@ -24,16 +29,18 @@ const BEACHES = [['English Bay Beach', 49.2866, -123.1432], ['Sunset Beach', 49.
 const TRAILS = { grind: [2900, 850], quarry: [1800, 100], lynn: [600, 30], siwash: [700, 0], wreck: [500, 0], lighthouse: [700, 0], dog: [2500, 120], seawall: [3300, 0] }
 const MEDALS = [['🥇', 0.8], ['🥈', 0.92], ['🥉', 1.1]] // icon, times the par
 const WILD = { grind: 'deer', quarry: 'deer', lynn: 'deer', dog: 'deer' } // the rest: raccoons
-const KEY = 'drive.foot'
+const KEY = 'drive.foot', NONE = []
+const today = () => Math.floor((Date.now() / 1000 - 8 * 3600) / 86400) // the progress plugin's day (midnight PST)
 const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
 
 // a footstep by what is underfoot: a burst of noise through [filter, Hz, Q], seconds long, how loud
 const STEPS = { path: ['bandpass', 1500, 1.2, 0.05, 0.05], grass: ['lowpass', 700, 0.5, 0.11, 0.04], sand: ['lowpass', 1100, 0.3, 0.17, 0.045], wood: ['bandpass', 480, 2, 0.07, 0.06] }
 
-// api: { man, walker, popup(big, line), sfx, audio() (the game's sound output, or null), pathAt(x, y) (the nearest path or street: { d, drv }), wallHit(x0, y0, x1, y1), wet(x, y), fwdX, fwdY, flash(), hikeSpeed (m/s) }
+// api: { man, walker, popup(big, line), sfx, audio() (the game's sound output, or null), pathAt(x, y) (the nearest path or street: { d, drv, steps }),
+//   chase, orbit (the drive plugin's camera orbit and its input), yawOf(dx, dy) (the yaw facing that way), wallHit(x0, y0, x1, y1), wet(x, y), fwdX, fwdY, flash(), hikeSpeed (m/s) }
 export function makeFoot(THREE, city, api) {
   const { man } = api
-  let saved = { shots: {}, beaches: [], wild: 0, splits: {}, best: {} }
+  let saved = { shots: {}, beaches: [], wild: 0, splits: {}, best: {}, pets: { day: 0, ids: [] } }
   try { Object.assign(saved, JSON.parse(localStorage.getItem(KEY)) || {}) } catch {}
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(saved)) } catch {} }
   const award = (kind, n, meta) => { try { city.progress?.award(kind, n, meta) } catch (e) { console.warn('foot: progress', e) } }
@@ -52,10 +59,11 @@ export function makeFoot(THREE, city, api) {
     @media (max-height: 600px) { .ft-frame { inset: 92px 5% 56px; } }
     @media (min-width: 720px) { .ft-btns { bottom: 96px; } .ft-frame { inset: 9% 8%; } }`
   const btns = document.createElement('div'); btns.className = 'ft-btns'; btns.hidden = true
-  btns.innerHTML = '<button data-f="photo" aria-label="Camera" title="Camera: frame a landmark (P)">📷</button><button data-f="sit" aria-label="Sit down" title="Sit down a while (C)">Sit</button>'
+  btns.innerHTML = '<button data-f="photo" aria-label="Camera" title="Camera: frame a landmark (P)">📷</button><button data-f="sit" aria-label="Sit down" title="Sit down a while (C)">Sit</button><button data-f="pet" title="Pet the dog (G)" hidden>🐶 Pet</button>'
   const frameEl = document.createElement('div'); frameEl.className = 'ft-frame'; frameEl.hidden = true
   document.head.append(css); document.body.append(btns, frameEl)
   const bPhoto = btns.querySelector('[data-f=photo]'), bSit = btns.querySelector('[data-f=sit]')
+  const bPet = btns.querySelector('[data-f=pet]'); bPet.onclick = () => key('KeyG')
   bPhoto.onclick = () => (S.framing ? snap() : key('KeyP')); bSit.onclick = () => (S.framing ? key('KeyP') : key('KeyC'))
 
   // ---------------------------------------------------------------- wildlife
@@ -82,7 +90,7 @@ export function makeFoot(THREE, city, api) {
 
   function setFraming(f) {
     S.framing = f; frameEl.hidden = !f; api.walker.visible = !f
-    bPhoto.classList.toggle('on', f); bPhoto.textContent = f ? 'Snap' : '📷'; bSit.textContent = f ? '✕' : 'Sit'
+    bPhoto.classList.toggle('on', f); bPhoto.textContent = f ? 'Snap' : '📷'; bSit.textContent = f ? '✕' : sitLabel()
     if (f) { S.sit = null; frameEl.dataset.t = 'Turn to frame a landmark, then Snap' }
   }
   // what is in the frame, best first: [shot, score]
@@ -130,17 +138,99 @@ export function makeFoot(THREE, city, api) {
     if (kind === 'wood') tone(dest, 95 + 30 * r, t, 0.09, 0.05)
     if (wet && kind !== 'sand') burst(['highpass', 2600, 0.5, 0.13, 0.03]) // a little splash
   }
+  // ---------------------------------------------------------------- sitting on things
+  // where to sit from here: { kind (walker.js sitWalker), label, x, y, yaw, h (the seat over its ground), base (that
+  // ground's height) }; always something (the ground under the walker)
+  const tB = [], tP = [], tL = [], tD = []
+  function seatNear() {
+    const T = city.traffic, fx = api.fwdX(man.yaw), fy = api.fwdY(man.yaw), feet = man.h - 0.05
+    let best = null, bd = 2
+    for (const b of T?.benches?.(man.x, -man.y, 3.5, tB) || NONE) for (const s of [-1, 1]) { // its two seats; not one someone is on
+      const x = b.x + Math.cos(b.heading) * 0.45 * s, z = b.z - Math.sin(b.heading) * 0.45 * s, d = Math.hypot(x - man.x, -z - man.y)
+      if (d < bd && !T.people(x, z, 0.4, tP).length) { bd = d; best = { kind: 'seat', label: 'the bench', x, y: -z, yaw: wrap(b.heading + Math.PI), h: 0.45, base: b.y } }
+    }
+    if (best) return best
+    bd = 1.6
+    for (const L of city.tiles?.logsNear?.(man.x, -man.y, 2, tL) || NONE) { // on top of it, facing down the beach
+      if (L.dia < 0.22) continue
+      const ax = Math.cos(L.angle), ay = Math.sin(L.angle), t = clamp((man.x - L.x) * ax + (man.y + L.z) * ay, -L.length / 2 + 0.3, L.length / 2 - 0.3)
+      const x = L.x + ax * t, y = -L.z + ay * t, d = Math.hypot(x - man.x, y - man.y)
+      if (d >= bd) continue
+      const s = ground(x - ay * 3, y + ax * 3, 0) < ground(x + ay * 3, y - ax * 3, 0) ? 1 : -1
+      bd = d; best = { kind: 'seat', label: 'the log', x, y, yaw: api.yawOf(-ay * s, ax * s), h: L.dia * 0.85, base: L.y }
+    }
+    if (best) return best
+    const r = api.pathAt(man.x, man.y)
+    if (r?.steps && r.d < 1.2) { // facing down them
+      const s = ground(man.x + fx * 1.5, man.y + fy * 1.5, man.h) <= ground(man.x - fx * 1.5, man.y - fy * 1.5, man.h) ? 1 : -1
+      return { kind: 'seat', label: 'the steps', x: man.x, y: man.y, yaw: api.yawOf(fx * s, fy * s), h: 0.17, base: feet }
+    }
+    for (let d = 0.3; d < 1.5; d += 0.15) { // a drop just ahead, or the water under a wall: on the edge, the legs over it
+      const x = man.x + fx * d, y = man.y + fy * d
+      if (ground(x, y, man.h) < man.h - 0.85 || (api.wet(x, y) && man.h > 1.2)) return { kind: 'edge', label: 'the edge', x: man.x + fx * (d - 0.4), y: man.y + fy * (d - 0.4), yaw: man.yaw, h: 0, base: feet }
+    }
+    // (off the paths the walker stands a little over the grass: sat, it is on it)
+    return { kind: 'ground', label: '', x: man.x, y: man.y, yaw: man.yaw, h: 0, base: r && r.d < 1.8 || man.deck ? feet : Math.min(feet, ground(man.x, man.y, feet)) }
+  }
+  const sitLabel = () => (S.sit ? 'Get up' : S.seat?.label ? `Sit on ${S.seat.label}` : 'Sit')
+  // sat: { k: 0 standing .. 1 sat (it moves to the seat and back to where it stood), dir, from, to, t, ... }
   function sit() {
-    if (S.sit) { S.sit = null; return }
-    S.sit = { t: 0, a: 0, done: false }
+    if (S.sit) { S.sit.dir = -1; return }
+    const to = seatNear()
+    S.sit = { t: 0, k: 0, dir: 1, done: false, to, from: { x: man.x, y: man.y, yaw: man.yaw, h: man.h }, look: 1 }
+  }
+  function sitStep(dt) {
+    const T = S.sit, { from, to } = T
+    T.k = clamp(T.k + (T.dir * dt) / 0.45, 0, 1)
+    const e = T.k * T.k * (3 - 2 * T.k)
+    man.x = from.x + (to.x - from.x) * e; man.y = from.y + (to.y - from.y) * e; man.h = from.h + (to.base + 0.05 - from.h) * e
+    man.yaw = from.yaw + wrap(to.yaw - from.yaw) * e
+    if (T.dir < 0 && T.k === 0) { S.sit = null; S.low = 0 }
+  }
+
+  // ---------------------------------------------------------------- dogs
+  // a heart over a petted dog
+  const heart = (() => {
+    const cv = document.createElement('canvas'); cv.width = cv.height = 64
+    const g = cv.getContext('2d'); g.font = '48px system-ui, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('❤️', 32, 36)
+    const m = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cv), transparent: true, depthTest: false }))
+    m.scale.setScalar(0.45); m.visible = false; group.add(m)
+    return m
+  })()
+  const petsToday = () => { if (saved.pets?.day !== today()) saved.pets = { day: today(), ids: [] }; return saved.pets.ids }
+  const dogBy = (id) => { for (const d of city.traffic?.dogs?.(man.x, -man.y, 6, tD) || NONE) if (d.id === id) return d; return null }
+  function dogNear() { // one in reach, not yet petted today
+    const done = petsToday()
+    let best = null, bd = 2
+    for (const d of city.traffic?.dogs?.(man.x, -man.y, 3, tD) || NONE) { const q = Math.hypot(d.x - man.x, -d.z - man.y); if (q < bd && !done.includes(d.id)) { bd = q; best = d.id } }
+    return best
+  }
+  function pet() {
+    const id = dogNear(), d = id != null && dogBy(id); if (!d) return
+    petsToday().push(id); save()
+    city.traffic.knock?.(id, d.x - man.x, d.z + man.y, 0.5) // its walker stops a moment and turns to you
+    S.pet = { t: 0, id, x: d.x, y: d.y, z: d.z }
+    award('pet', 15, { label: `Good dog! ${saved.pets.ids.length} petted today` })
+    const dest = api.audio(); if (dest) { const t = dest.context.currentTime + 0.45; tone(dest, 587, t, 0.1, 0.05, 'triangle'); tone(dest, 880, t + 0.11, 0.16, 0.05, 'triangle') } // a happy yip
+  }
+  function petStep(dt) {
+    const P = S.pet, d = dogBy(P.id)
+    if (d) { P.x = d.x; P.y = d.y; P.z = d.z }
+    P.t += dt
+    man.yaw += wrap(api.yawOf(P.x - man.x, -P.z - man.y) - man.yaw) * Math.min(1, dt * 10)
+    const k = clamp((P.t - 0.45) / 0.9, 0, 1)
+    heart.visible = k > 0 && k < 1; heart.position.set(P.x, P.y + 0.75 + k * 0.7, P.z); heart.material.opacity = Math.min(1, 3 * (1 - k)); heart.scale.setScalar(0.3 + 0.25 * Math.min(1, k * 4))
+    if (P.t > 1.5) { S.pet = null; heart.visible = false; S.low = 0 }
   }
   function key(code) { // true: taken
     if (!S.on) return false
-    if (code === 'Space' && !S.framing && !S.sit) { if (!man.air) man.air = 1e-3; return true }
+    if (code === 'Space' && !S.framing && !S.sit && !S.pet) { if (!man.air) man.air = 1e-3; return true }
     if (S.hike) return false
     if (code === 'KeyP') { setFraming(!S.framing); return true }
     if (S.framing && (code === 'Space' || code === 'Enter')) { snap(); return true }
+    if (S.pet) return true
     if (code === 'KeyC' && !S.framing && Math.abs(man.speed) < 0.5) { sit(); return true }
+    if (code === 'KeyG' && !S.framing && !S.sit && S.dog != null) { pet(); return true }
     return false
   }
 
@@ -198,6 +288,7 @@ export function makeFoot(THREE, city, api) {
   return {
     key, summit,
     get framing() { return S.framing },
+    get low() { return (S.sit || S.pet) && S.low || 0 }, // how far the head is down (sat, crouched), for the camera
     // into walk or hike mode (hike: the drive plugin's hike object or null)
     start(hike) {
       S.on = true; S.hike = hike; S.d0 = 0; S.sit = null; W.next = 15 + Math.random() * 15
@@ -211,15 +302,17 @@ export function makeFoot(THREE, city, api) {
     },
     // the walk is held: framing a photo (the keys turn the camera) or sitting (a move key gets up)
     busy(I, dt) {
-      if (S.sit && (I.up || I.down || I.steer)) S.sit = null
+      if (S.sit && (I.up || I.down || I.steer)) S.sit.dir = -1
+      if (S.sit) sitStep(dt)
+      if (S.pet) petStep(dt)
       if (S.framing) man.yaw += I.steer * 1.1 * dt
-      return S.framing || !!S.sit
+      return S.framing || !!S.sit || !!S.pet
     },
-    pose(w) { // after poseWalker: sitting on the ground, legs out
-      if (!S.sit) return
-      const U = w.userData
-      U.body.position.y = -0.56; U.body.rotation.x = 0.1
-      U.legs[0].rotation.x = 1.42; U.legs[1].rotation.x = 1.5; U.arms[0].rotation.x = U.arms[1].rotation.x = 0.5
+    pose(w) { // after poseWalker: sat on its seat, or crouched to a dog
+      const p = S.pet ? Math.sin(Math.PI * clamp(S.pet.t / 1.5, 0, 1)) : 0
+      if (S.sit?.k > 0.5) S.low = sitWalker(w, S.sit.to.kind, S.sit.to.h)
+      else if (p > 0.4) S.low = sitWalker(w, 'crouch')
+      else if (S.sit || S.pet) S.low = 0
     },
     // each frame on foot, after the chase camera is set: cam may be taken over (the eye for a photo, a slow drift when sat)
     frame(dt, now, cam, hike, afoot) {
@@ -228,6 +321,11 @@ export function makeFoot(THREE, city, api) {
       if (n !== S.stepN) { S.stepN = n; if (afoot && Math.abs(man.speed) > 0.3 && !man.air) step() }
       btns.hidden = !!hike || !afoot
       if (S.framing && !afoot) setFraming(false)
+      if (afoot && now - (S.seatAt || 0) > 300) { // what is in reach: a seat (the Sit button names it), a dog to pet
+        S.seatAt = now; S.seat = S.sit ? S.seat : seatNear(); S.dog = S.sit || S.pet || hike ? null : dogNear()
+        const t = sitLabel(); if (!S.framing && bSit.textContent !== t) bSit.textContent = t
+        bPet.hidden = S.dog == null
+      }
       if (hike) { if (!hike.photo) { hikeStep(hike, now); wild(dt) } return }
       if (now - S.nearAt > 500) { // the nearest landmark not yet shot
         S.nearAt = now; S.near = null
@@ -246,11 +344,10 @@ export function makeFoot(THREE, city, api) {
         if (frameEl.dataset.t !== t && now - (S.capAt || 0) > 2500) frameEl.dataset.t = t
         if (!S.capAt) S.capAt = now
       } else if (S.sit) {
-        const T = S.sit; T.t += dt; T.a += dt * 0.05
-        const a = 0.4 + 0.3 * Math.sin(T.a * 2), bx = -fx * Math.cos(a) + fy * Math.sin(a), by = -fy * Math.cos(a) - fx * Math.sin(a)
-        v.set(man.x + bx * 5, man.h + 1.3, -(man.y + by * 5))
-        T.pos = (T.pos || cam.position.clone()).lerp(v, 1 - Math.exp(-1.5 * dt))
-        cam.position.copy(T.pos); cam.lookAt(man.x + fx * 3, man.h + 1, -(man.y + fy * 3))
+        // the camera settles to one side of the view, a little back, unless it has been turned since sitting down
+        const T = S.sit, C = api.chase, k = 1 - Math.exp(-1.2 * dt); T.t += dt
+        if (api.orbit.idle < T.t) T.look = 0
+        if (T.look && T.t < 5) { C.yaw += wrap(man.yaw + 0.45 - C.yaw) * k; C.pitch += (0.16 - C.pitch) * k; C.dist += (Math.max(C.dist, 4.6) - C.dist) * k }
         if (!T.done && T.t > 6) {
           T.done = true
           const b = beaches.find((q) => Math.hypot(q.x - man.x, q.y - man.y) < 260), golden = city.light.night > 0.04 && city.light.night < 0.7
@@ -265,12 +362,12 @@ export function makeFoot(THREE, city, api) {
     // the job card on a free walk: { title, line, sub, target } or null
     card() {
       const n = Object.keys(saved.shots).length
-      if (S.sit) return { title: 'Sitting a while', line: 'Move to get up', sub: `Beaches ${saved.beaches.length} of ${beaches.length}`, target: null }
+      if (S.sit) return { title: S.sit.to.label ? `On ${S.sit.to.label}` : 'Sitting a while', line: 'Move to get up', sub: `Beaches ${saved.beaches.length} of ${beaches.length}`, target: null }
       if (!S.near) return { title: `Photo walk · ${n} of ${shots.length}`, line: 'Every landmark shot!', sub: 'Reshoot for a better score', target: null }
       const d = S.near.d
       return { title: `Photo walk · ${n} of ${shots.length}`, line: S.near.name, sub: d < S.near.r ? 'In range: frame it and snap' : `${d < 1000 ? `${Math.round(d / 10) * 10} m` : `${(d / 1000).toFixed(1)} km`} · snaps from ${S.near.r} m`, target: S.near }
     },
     medal: (id) => { const p = par(id), b = saved.best[id], m = p && b ? MEDALS.findIndex((q) => b <= p * q[1]) : -1; return m >= 0 ? MEDALS[m][0] : '' },
-    dispose() { css.remove(); btns.remove(); frameEl.remove(); mat.dispose(); for (const m of Object.values(models)) m.geometry.dispose() },
+    dispose() { heart.material.map.dispose(); heart.material.dispose(); css.remove(); btns.remove(); frameEl.remove(); mat.dispose(); for (const m of Object.values(models)) m.geometry.dispose() },
   }
 }

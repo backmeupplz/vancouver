@@ -690,7 +690,7 @@ export default function drive(city) {
   function showHelp() { // the keys, for a few seconds after each change between van and feet (always while delivering)
     ui.help.textContent = taxi ? taxi.help() : game ? 'W gas · S brake (a tap is gentle, hold for more) · A D steer · E doors · H horn · R back on the route · Esc end the shift'
       : hike ? 'WASD or arrows to walk · Shift to push on (it tires you; each quarter mark is a second wind) · the trail guides you when you let go · Esc to the map'
-      : onFoot ? touchy ? 'Go walks where the camera looks · drag to look round, pinch to zoom' : 'WASD or arrows to walk · Shift to run · drag to look round, wheel to zoom · Space hop · P camera · C sit · E van · Esc to the map'
+      : onFoot ? touchy ? 'Go walks where the camera looks · drag to look round, pinch to zoom' : 'WASD or arrows to walk · Shift to run · drag to look round, wheel to zoom · Space hop · P camera · C sit · G pet a dog · E van · Esc to the map'
       : `W gas · S brake, hold to reverse · A D steer · Space handbrake · E get out · H horn · R back on the road · Esc map`
     ui.help.hidden = false; ui.help.classList.remove('fade')
     clearTimeout(helpT)
@@ -837,7 +837,7 @@ export default function drive(city) {
   const yawFromDir = (dir) => dir - Math.PI / 2 // road direction atan2(dy, dx) in (x, north) to a yaw
   const fwdX = (yaw) => -Math.sin(yaw), fwdY = (yaw) => Math.cos(yaw) // forward in (x, north)
   // photo walk, sitting, hike splits and wildlife (foot.js)
-  const foot = makeFoot(THREE, city, { man, walker, popup, sfx, audio: () => (audio() ? master : null), pathAt: (x, y) => { const r = nearestRoad(x, y, 3, true, true, false, man.h - 0.5); return r ? { d: r.d, drv: r.s.drv } : null }, wallHit, wet: isWater, fwdX, fwdY, hikeSpeed: HIKE, flash() { ui.flash.hidden = false; ui.flash.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => ui.flash.classList.remove('on'))); setTimeout(() => { ui.flash.hidden = true }, 1000) } })
+  const foot = makeFoot(THREE, city, { man, walker, popup, sfx, audio: () => (audio() ? master : null), pathAt: (x, y) => { const r = nearestRoad(x, y, 3, true, true, false, man.h - 0.5); return r ? { d: r.d, drv: r.s.drv, steps: r.s.p.kind === 12 } : null }, chase, orbit, yawOf: (dx, dy) => yawFromDir(Math.atan2(dy, dx)), wallHit, wet: isWater, fwdX, fwdY, hikeSpeed: HIKE, flash() { ui.flash.hidden = false; ui.flash.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => ui.flash.classList.remove('on'))); setTimeout(() => { ui.flash.hidden = true }, 1000) } })
 
   function start(kind, spot, at) {
     deliver = kind === 'deliver'
@@ -1013,7 +1013,7 @@ export default function drive(city) {
       if (foot.framing) man.yaw += oy; else walker.visible = !eye
     } else if (Math.abs(car.speed) > 0.5 || snap) chase.yaw += wrap(P.yaw - chase.yaw) * k
     const fx = fwdX(chase.yaw), fy = fwdY(chase.yaw), cp = Math.cos(chase.pitch), tp = Math.sin(chase.pitch)
-    const od = eye ? 0 : chase.dist * (1 + sp * 0.04), eyeH = eye ? 1.62 : 1.5 // the orbit's radius, the height of its middle over the feet
+    const od = eye ? 0 : chase.dist * (1 + sp * 0.04), eyeH = (eye ? 1.62 : 1.5) - (onFoot ? foot.low : 0) // the orbit's radius, the height of its middle over the feet
     const big = onFoot ? 0 : car.V.length - 4.3 // a bus: further back and up
     // a bus keeps to the kerb lane: the camera a little out over the road, clear of the street trees; at a stop with
     // its doors open it swings round in front, looking back at the front door and the people getting on
@@ -2015,7 +2015,7 @@ export default function drive(city) {
   document.addEventListener('visibilitychange', onVis)
 
   // ?drivedebug: the state, for tests in a browser (window.driveDebug)
-  if (location.search.includes('drivedebug')) window.driveDebug = { car, man, chase, walker, goal, get run() { return job?.run }, get job() { return job }, get drift() { return drift }, get feel() { return feel }, get hike() { return hike }, get errand() { return errand }, get shift() { return job?.S }, get state() { return state }, startHike: (id) => startHike(HIKES.find((h) => h.id === id)), propsNear, nearestRoad, wallHit, railPast,
+  if (location.search.includes('drivedebug')) window.driveDebug = { car, man, chase, walker, foot, isWater, goal, get run() { return job?.run }, get job() { return job }, get drift() { return drift }, get feel() { return feel }, get hike() { return hike }, get errand() { return errand }, get shift() { return job?.S }, get state() { return state }, startHike: (id) => startHike(HIKES.find((h) => h.id === id)), propsNear, nearestRoad, wallHit, railPast,
     get game() { return game }, get horn() { return !!horn }, get taxi() { return taxi }, showGarage, startTaxi: (x, y, c = { cab: 0, livery: 0, driver: 0 }) => { taxiChoice = c; start('taxi', carSpawn(x, y) || { x, y, yaw: 0 }, { x, y }) }, input, secs, collide, surface, frame,
     set autopilot(f) { autopilot = f }, set probe(f) { probe = f }, stop: () => { if (state === 'off') return; game?.dispose(); taxi?.dispose(); taxi = null; state = 'out'; finish() },
     start: (kind, x, y, yaw = 0) => start(kind, { x, y, yaw }, { x, y }), startBus: (name, dir = 0, from = 'first') => loadLines().then(({ man }) => { const ri = man.routes.findIndex((r) => r.name === name); return startBus({ ri, r: man.routes[ri], dir, from, man }) }) }

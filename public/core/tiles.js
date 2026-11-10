@@ -534,7 +534,7 @@ export class Tiles {
       sails.forEach((i, k) => { parts[0].getMatrixAt(i, M); parts[2].setMatrixAt(k, M); parts[2].setColorAt(k, c.setHex(0xd4d6d8)) })
       for (const im of parts) if (im.count) { im.computeBoundingSphere(); im.matrixAutoUpdate = false; g.add(im) }
     }
-    if (res.beach) { t.beach = this.beachMeshes(res.beach.d); for (const o of t.beach) { o.visible = this.fine; g.add(o) } } // from 0.3 on the map (1-2 px a metre)
+    if (res.beach) { t.logs = res.beach.d; t.beach = this.beachMeshes(res.beach.d); for (const o of t.beach) { o.visible = this.fine; g.add(o) } } // from 0.3 on the map (1-2 px a metre)
     this.scene.add(g)
     t.group = g
     t.side = [] // drawn elsewhere than the tile's group (trees and lamp heads after the ink pass, lights.js), shown with it
@@ -548,6 +548,19 @@ export class Tiles {
 
   showAll(t, on) { t.group.visible = on; for (const o of t.side) o.visible = on }
 
+  // the driftwood logs within r metres of (x, z), into out: { x, y (the sand under its middle), z, angle (from east
+  // towards north), length, dia } in world coordinates: something to sit on (the drive plugin's foot.js)
+  logsNear(x, z, r, out = []) {
+    out.length = 0
+    for (const t of this.tiles.values()) {
+      const B = t.logs; if (!B) continue
+      for (let i = 0; i < B.length; i += 8) {
+        const lx = t.ox + B[i], lz = B[i + 2] - t.oy
+        if (B[i + 6] < 16 && Math.hypot(lx - x, lz - z) < r + B[i + 4] / 2) out.push({ x: lx, y: B[i + 1], z: lz, angle: B[i + 3], length: B[i + 4], dia: B[i + 5] })
+      }
+    }
+    return out
+  }
   beachMeshes(B) { // 8 floats a thing (tile-worker.js beach): logs lie on the sand (sunk a little, tilted with it), roll at random
     const n = B.length / 8, G = this.beachGeo, M = new THREE.Matrix4(), q = new THREE.Quaternion(), r = new THREE.Quaternion(), p = new THREE.Vector3(), sc = new THREE.Vector3(), c = new THREE.Color()
     const up = new THREE.Vector3(0, 1, 0), ax = new THREE.Vector3(1, 0, 0), az = new THREE.Vector3(0, 0, 1)

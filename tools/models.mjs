@@ -15,7 +15,7 @@ const PAGE = /* js */ `
 import * as THREE from '/vendor/three.module.min.js'
 import { carModels, peopleModels, farModels, bikeModels, lifeMaterial, H } from '/plugins/life/models.js'
 import { makeVan } from '/plugins/drive/van.js'
-import { makeWalker, poseWalker } from '/plugins/drive/walker.js'
+import { makeWalker, poseWalker, sitWalker } from '/plugins/drive/walker.js'
 import { makeBus } from '/plugins/drive/bus.js'
 import { CABS, makeCab } from '/plugins/drive/cabs.js'
 import { makeBoat } from '/plugins/sail/boat.js'
@@ -43,6 +43,7 @@ const GROUPS = {
   player: () => [
     ['van', makeVan(THREE)], ['courier', (() => { const w = makeWalker(THREE); poseWalker(w, 1.2, 1, false); return w })()],
     ['courier running', (() => { const w = makeWalker(THREE); poseWalker(w, 1.2, 1, true); return w })()],
+    ...[['on a bench', 'seat', 0.45], ['on a log', 'seat', 0.25], ['on an edge', 'edge'], ['cross-legged', 'ground'], ['petting', 'crouch']].map(([n, kind, h]) => ['courier ' + n, (() => { const w = makeWalker(THREE); poseWalker(w, 0, 0, false); sitWalker(w, kind, h); return w })()]),
     ['bus', makeBus(THREE, {})], ['trolley artic', makeBus(THREE, { artic: true, trolley: true })],
     ...CABS.map((c) => ['cab ' + c.id, makeCab(THREE, c)]),
   ],

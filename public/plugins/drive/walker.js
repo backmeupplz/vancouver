@@ -115,3 +115,24 @@ export function poseWalker(w, phase, amount, run, carry = false, m = null) {
   torso.scale.y = 1 + 0.01 * br * still
   head.rotation.set((run ? 0.15 : 0.04) * amount + lean * 0.5, carry ? 0 : -s * a * 0.15, 0)
 }
+
+// Sat down or crouched, after poseWalker (standing still): 'seat' (a bench, a log, a step: its top h m over the
+// walker's origin; a low one stretches the legs out), 'edge' (on a wall's edge, the legs over it), 'ground'
+// (cross-legged), 'crouch' (down to a dog, a hand out). Returns how far the head came down (m), for the camera.
+export function sitWalker(w, kind, h = 0.45) {
+  const { body, torso, legs, shins, arms, forearms, head } = w.userData
+  const set = (y, leg, shin, arm, fore, lean) => {
+    body.position.y = y; body.rotation.x = 0; torso.rotation.set(lean, 0, 0); head.rotation.set(-lean * 0.6, 0, 0)
+    for (const i of [0, 1]) { legs[i].rotation.x = leg; shins[i].rotation.x = shin; arms[i].rotation.x = arm; forearms[i].rotation.x = fore }
+  }
+  if (kind === 'crouch') { set(-0.38, 1.3, -1.9, 0.3, 0.5, -0.3); arms[1].rotation.x = 1.0; forearms[1].rotation.x = 0.25 }
+  else if (kind === 'ground') {
+    set(-0.79, 1.5, 0, 0.42, 0.75, -0.1)
+    for (const i of [0, 1]) { const s = i ? 1 : -1; legs[i].rotation.z = s * 0.95; shins[i].rotation.z = -s * 2.15; arms[i].rotation.z = s * 0.3 }
+  } else {
+    const top = kind === 'edge' ? 0 : h
+    set(top - 0.81, 1.5, kind === 'edge' ? -1.45 : -1.5 + Math.acos(Math.min(1, (top + 0.05) / 0.47)), 0.5, 0.55, kind === 'edge' ? -0.06 : 0.07)
+    legs[0].rotation.z = -0.07; legs[1].rotation.z = 0.07
+  }
+  return -body.position.y
+}

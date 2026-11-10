@@ -65,7 +65,7 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.surface.seaHole` | a `Vector4` (x, sea level, z, radius): the map's sea is left out within radius of (x, z), up to 3 m above sea level, where a plugin draws its own water (the sail plugin's waves); radius 0 (the default) turns it off |
 | `city.post.uniforms.tint` / `.desat` | grade of the final image: multiply (`Vector3`, 1 = none) and desaturate (0–1) |
 | `city.post.lookFor(elevation)` | the camera's look for the sun this many degrees up (`core/look.js`: exposure, white balance, contrast, saturation, the ACES tone curve and, on High at night, the bloom), after the grade above; the weather plugin calls it |
-| `city.tiles` | the tile streamer (advanced) |
+| `city.tiles` | the tile streamer (advanced); `city.tiles.logsNear(x, z, r, out = [])` → the beaches' driftwood logs within `r` metres, `[{ x, y, z, angle, length, dia }]` (world coordinates; `y` the sand under its middle, `angle` from east towards north) |
 | `city.on(event, fn)` | `'frame'` `(dt, t)`, `'view'` `(view)`, `'quality'` `(tier)`, `'tile:load'` / `'tile:unload'` `(tile)`, `'weather'` `(weather)`, `'player'` `(player)`; returns an unsubscribe function |
 | `city.requestRender()`, `city.animate()` | see above |
 | `city.ui.addButton({ label, title, icon, onClick, panel, dock })` | a toolbar button at the top right; with `panel: true`, `.panel` is a popover element you fill (a bottom sheet on phones); `.set({ icon, label })` relabels it. On phones the dock at the bottom keeps only the buttons with `dock: true` (the games: Explore, Sail) and a ⋯ button; the rest are tiles in its sheet |
@@ -218,7 +218,7 @@ throws). Everything is kept in `localStorage` (`progress.v1`); no accounts. **Th
   done; each call also counts as the stats `kind` (+1) and `kind.cash` (+amount), which the daily challenges read.
   Use these kinds where they fit (anything else works too and just pays): `delivery` (one parcel dropped off),
   `fare` (one Rush Fare passenger dropped off), `bus` (one bus stop served), `sail` (a sight collected, a buoy race
-  finished), `hike` (a trail or summit finished), `fish` (a fish landed), `crab` (a trap hauled and sorted), `stunt` (a jump, drift, near miss, combo: small amounts).
+  finished), `hike` (a trail or summit finished), `fish` (a fish landed), `crab` (a trap hauled and sorted), `stunt` (a jump, drift, near miss, combo: small amounts), `pet` (a dog petted on foot).
   `meta`: `{ xp, label, score, board, quiet }`. `label` is the toast text (default: none for under $20, else
   `+$amount`); `quiet: true` never toasts (use it for a stream of small awards; awards that do toast add up in one pop while it is on screen);
   `score` (with optional `board`, default `kind`) also reports a finished run, see `score()`.

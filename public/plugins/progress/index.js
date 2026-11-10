@@ -45,7 +45,7 @@ const POOL = [
   [1, 'sail', (n) => `${n} sights or races under sail`, 2, 3, 1, 'sail'], [1, 'hike', () => 'Finish a hike', 1, 1, 1, 'hike'],
   [1, 'fish.kinds', (n) => `Catch ${n} different species of fish`, 3, 4, 1, 'fish'], [0, 'fish', (n) => `Land ${n} fish`, 4, 8, 2, 'fish'], [2, 'crab.keep', (n) => `Keep ${n} legal crab`, 2, 3, 1, 'crab'],
   [2, 'leaf', (n) => `Find ${n} maple ${n > 1 ? 'leaves' : 'leaf'}`, 1, 3, 1], [2, 'cash', (n) => `Earn ${money(n)} any way you like`, 300, 800, 100],
-  [2, 'stunt', (n) => `Pull off ${n} stunts`, 5, 15, 5, 'stunt'],
+  [2, 'stunt', (n) => `Pull off ${n} stunts`, 5, 15, 5, 'stunt'], [2, 'pet', (n) => `Pet ${n} dogs`, 2, 4, 1, 'pet'],
 ]
 const BOARD_NAMES = { daily: 'Today', taxi: 'Rush Fare', delivery: 'Deliveries', bus: 'Bus', sail: 'Sailing', hike: 'Hiking', fish: 'Biggest fish (mm)' }
 const DAILY_PAY = 150, LEAF_PAY = 50
