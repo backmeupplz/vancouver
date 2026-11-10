@@ -40,8 +40,9 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    the structures in parallel and the same every run)
    gives each its one height profile: as near the LiDAR as it can, one height where ways meet, one surface where decks are
    drawn over each other (else stacked 3.2 m apart; where the LiDAR's call can't hold, a MILP over the structure decides
-   which: first each such stretch as the solved heights make it, solved again, then on a smaller structure a MILP bounded
-   in nodes, not seconds), tunnels joined where they meet a deck, no steeper than its grade, on the ground where a street goes on at
+   which: first each such stretch as the solved heights make it, solved again, then a MILP bounded in nodes, not
+   seconds: over a smaller structure whole, over a huge one (the airport, a ferry terminal, the downtown viaducts) round
+   each stretch that still gives, the heights further out held, then the whole structure once more as they chose), tunnels joined where they meet a deck, no steeper than its grade, on the ground where a street goes on at
    grade (and at a road's or rail's dead end), never under the ground, 3 m clear over the streets under it. The deck,
    its paint, the traffic and the van all read that profile. Roads up on a building (a mall's rooftop
    parking, a parkade's top deck: layer or level 1 and up, mostly over a footprint, the LiDAR well above the ground) are

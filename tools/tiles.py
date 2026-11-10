@@ -2027,10 +2027,13 @@ def deck_design(k):  # the grade a structure is built to, where its LiDAR doesn'
 
 
 MILP_NODES = 300  # branch-and-bound nodes a structure's MILP may take (a bound in nodes, not seconds: the same answer every run)
+WINDOW = 32  # samples (4 m apart) out from a stretch drawn over another its MILP's window reaches in a structure over MILP_ROWS
+WIN_ROWS = 2000  # rows of a window's MILP (a window's cost grows faster than its rows)
+WIN_NODES = 100  # branch-and-bound nodes of a window's MILP
 MILP_ROWS = 8000  # rows of the biggest structure the MILP is tried on (its root alone takes seconds over that)
 
 
-def deck_program(rs, runs, W, M_=40.0):
+def deck_program(rs, runs, W, M_=40.0, nodes=MILP_NODES):
     """deck_solve's LP over one structure's rows (runs: its stretches drawn over each other, {n: (one way?, [(var, other's
     var j, j + 1, fraction, sample)])}, each one surface or stacked either way up as the solve finds best, binaries: then
     a MILP, those stretches' own rows left out): ({var: height}, [(tag, sample, slack)], cost), or Nones.
@@ -2074,7 +2077,7 @@ def deck_program(rs, runs, W, M_=40.0):
     r = None
     for pre in (True, False):  # (HiGHS's presolve trips over some: without it)
         r = milp(cost, integrality=integ, bounds=Bounds(lb, ub_), constraints=LinearConstraint(Am, lo_, hi_),
-                 options=dict(presolve=pre, node_limit=MILP_NODES, random_seed=1, threads=1, mip_rel_gap=1e-3))
+                 options=dict(presolve=pre, node_limit=nodes, random_seed=1, threads=1, mip_rel_gap=1e-3))
         if r.x is not None: break
     if r.x is None: return None, None, None
     return {v: r.x[n] + h0 for v, n in col.items()}, [(tag, at, float(r.x[t_])) for t_, tag, at in tags], float(r.fun)
@@ -2102,6 +2105,7 @@ def deck_structure(job):
     rs, runs, W = job
     t0 = time.time()
     hard = lambda sl: sum(v for t, at, v in sl if (t[0] if isinstance(t, tuple) else t) in ('tie', 'sep', 'ov', 'end', 'limit', 'low') and v > 0.05)
+    low = lambda sl: sum(v for t, at, v in sl if t == 'low' and v > 0.05)
     zc, sl, fun = deck_program(rs, {}, W)
     if zc is None: return None, None, False, time.time() - t0
     best, decided, choice = hard(sl), False, {}
@@ -2120,7 +2124,52 @@ def deck_structure(job):
     if bad and best > 0.05 and len(rs) <= MILP_ROWS:
         z2, sl2, _ = deck_program(rs, {n: runs[n] for n in bad}, W)
         if z2 is not None and hard(sl2) < best - 1e-6: zc, sl, decided = z2, sl2, True
+    elif bad and best > 0.05:  # too big for one MILP: one round each stretch that gives, then the whole structure once more as they chose
+        give = sorted({t[1] for t, at, v in sl if isinstance(t, tuple) and v > 0.05})
+        new = {**choice, **deck_windows(deck_chosen(rs, runs, W, choice), runs, W, zc, give, sorted(set(bad) | set(give)))}
+        if new != choice:
+            z2, sl2, _ = deck_program(deck_chosen(rs, runs, W, new), {}, W)
+            if z2 is not None and hard(sl2) < best - 1e-6 and low(sl2) <= low(sl) + 2: zc, sl, decided = z2, sl2, True  # (a deck sunk onto the street under it, over 2 m in all, buys no tie)
     return zc, sl, decided, time.time() - t0
+
+
+def deck_windows(rs, runs, W, zc, give, bad):
+    """a structure too big for one MILP (rs: its rows as chosen so far, zc: its heights, give: the stretches that give,
+    bad: those and the ones that gave at first): a MILP round each one that gives in turn, over the samples within
+    WINDOW of it (nearer, while that is over WIN_ROWS), deciding it and the other bad stretches wholly among them, the
+    heights further out held as they are, so a window's answer fits the structure round it and nothing parts at its
+    edge; the next window starts from it. -> {stretch: its choice (deck_chosen's)}"""
+    nb, at = {}, {}
+    for n_, r in enumerate(rs):
+        vs = [v for v, _ in r[1]]
+        for v in vs: at.setdefault(v, []).append(n_)
+        for v in vs[1:]: nb.setdefault(vs[0], set()).add(v); nb.setdefault(v, set()).add(vs[0])
+    zc, own, out = dict(zc), {n: {k for t in runs[n][1] for k in t[:3]} for n in bad}, {}
+    for n in give:
+        if n in out: continue
+        depth = WINDOW
+        while True:  # the samples within `depth` rows of the stretch's own
+            F = set(own[n]); edge = F
+            for _ in range(depth):
+                edge = {u for v in edge for u in nb.get(v, ())} - F
+                F |= edge
+            sub = sorted({k for v in F for k in at.get(v, ())})
+            if len(sub) <= WIN_ROWS or depth <= 2: break
+            depth //= 2
+        if len(sub) > WIN_ROWS: continue
+        ns = [m for m in bad if own[m] <= F]
+        rows = []
+        for k in sub:
+            c, terms, rhs, cst, both, tag, q = rs[k]
+            held = sum(a * zc[v] for v, a in terms if v not in F)
+            rows.append((c, [(v, a) for v, a in terms if v in F], rhs - held, cst if cst is not None or not held else W['end'], both or cst is None, tag, q))
+        z2, _, _ = deck_program(rows, {m: runs[m] for m in ns}, W, nodes=WIN_NODES)
+        if z2 is None: continue
+        zc.update(z2)
+        for m in ns:
+            d = [z2[v] - (z2[j0] * (1 - f) + z2[j1] * f) for v, j0, j1, f, q in runs[m][1] if not v == j0 == j1]
+            if d: out[m] = 0 if abs(np.median(d)) < SEP / 2 else 1 if np.median(d) > 0 else -1
+    return out
 
 
 def deck_solve(ways, raw, grade, tun={}, ground=None, drawn=None):
@@ -3039,6 +3088,12 @@ def selftest():
     assert abs(z1[-1] - (3 + 0.02 - DECK_TOP)) < 0.05 and 11.7 < z1[0] < 13.1 and np.max(np.abs(np.diff(z1))) <= 0.10 * 4 + 1e-3, z1
     assert np.max(np.abs(z1 - z2)) < 0.05 and np.interp(60, DECKS[3][1], z3) - np.interp(100, DECKS[1][1], z1) >= SEP - 0.05, (z2 - z1, z3)
     DECKS = old[0]; APPROACH.update(old[1])
+    # a structure too big for one MILP: a stretch that gives is decided in a window of its own (two decks held 3 m apart
+    # by what they meet, drawn as one surface: stacked, which gives 0.2 m, not 3)
+    Wt = dict(tie=300.0, sep=300.0, end=1000.0)
+    rs = [(0, [(0, 1.0)], 10.0, Wt['end'], True, 'end', 0), (0, [(1, 1.0)], 13.0, Wt['end'], True, 'end', 1)]
+    runs = {0: (False, [(1, 0, 0, 0.0, 1)])}
+    assert deck_windows(deck_chosen(rs, runs, Wt, {0: 0}), runs, Wt, {0: 10.0, 1: 13.0}, [0], [0]) == {0: 1}
     # crowns: two 12 m trees in a 20 x 40 m patch of canopy share it, up to their reach; a lone tree in a small patch keeps a small crown
     can = np.zeros((40, 40), bool); can[10:20, 5:25] = True; can[30:33, 30:33] = True
     w = crown_widths(np.full((40, 40), 12.0), can, [(15, 10), (15, 20), (31, 31)], [12.0, 12.0, 6.0])
