@@ -277,7 +277,7 @@ const ink = new THREE.ShaderMaterial({
   defines: { LOOK: 1 },
   uniforms: { tBloom: look.tBloom, bloomK: look.bloom, tColor: { value: rt.texture }, tDepth: { value: rt.depthTexture }, sat: { value: 1.2 }, gain: { value: new THREE.Vector3(1, 1, 1) }, tint: { value: new THREE.Vector3(1, 1, 1) },
     desat: { value: 0 }, px: { value: new THREE.Vector2() }, uvs: { value: new THREE.Vector2(1, 1) }, off: { value: new THREE.Vector2() }, lim: { value: new THREE.Vector2(1, 1) }, range: { value: 1 }, thr: { value: 1 }, ink: { value: 0 },
-    cnear: { value: 1 }, cfar: { value: 2 }, fade: { value: new THREE.Vector2(1e9, 2e9) }, inkFade: { value: new THREE.Vector2(1e9, 2e9) }, tSky: { value: null }, fogCol: { value: new THREE.Color() },
+    cnear: { value: 1 }, cfar: { value: 2 }, fade: { value: new THREE.Vector2(1e9, 2e9) }, inkFade: { value: new THREE.Vector2(1e9, 2e9) }, tSky: { value: null }, tFar: { value: null }, fogCol: { value: new THREE.Color() },
     zenCol: { value: new THREE.Color() }, domeK: { value: 0 }, projInv: { value: new THREE.Matrix4() }, camWorld: { value: new THREE.Matrix4() } },
   vertexShader: `varying vec2 vUv;
     #ifdef SKYFOG
@@ -320,7 +320,7 @@ const ink = new THREE.ShaderMaterial({
     #ifdef PERSP
     uniform float cnear, cfar; uniform vec2 fade, inkFade;
     #ifdef SKYFOG
-    uniform sampler2D tSky; uniform vec3 fogCol, zenCol; uniform float domeK; varying vec3 vRay;
+    uniform sampler2D tSky, tFar; uniform vec3 fogCol, zenCol; uniform float domeK; varying vec3 vRay;
     #endif
     float d(vec2 o) { return (cfar - z(o) * (cfar - cnear)) / (cnear * cfar); }
     #else
@@ -335,10 +335,20 @@ const ink = new THREE.ShaderMaterial({
       // standing in it as pale cut-outs that the far plane slices (materials fogged to fogCol; swap it for the sky)
       // The sky behind is the background texture, or the weather plugin's dome over it (domeK): its gradient from the
       // fog colour at the horizon up to the zenith, by the height of the view ray (clouds and sun left out)
+      // FARVIEW: and the far land (tFar, premultiplied) over that sky, behind everything
+      #ifdef FARVIEW
+      vec4 fv = texture2D(tFar, vUv);
+      #endif
       if (texture2D(tDepth, uv).x < 1.0) {
         vec3 sky = mix(texture2D(tSky, vec2(0.5, vUv.y)).rgb, mix(fogCol, zenCol, smoothstep(0.0, 0.55, max(normalize(vRay).y, 0.0))), domeK);
+        #ifdef FARVIEW
+        sky = sky * (1.0 - fv.a) + fv.rgb;
+        #endif
         col.rgb += smoothstep(fade.x, fade.y, 1.0 / c) * (sky - fogCol);
       }
+      #ifdef FARVIEW
+      else col.rgb = col.rgb * (1.0 - fv.a) + fv.rgb;
+      #endif
       #endif
       #ifdef NOINK
       float e = 0.0;
@@ -372,6 +382,42 @@ const ink = new THREE.ShaderMaterial({
 lookUniforms(ink.uniforms)
 const bloom = new Bloom(`uniform sampler2D tColor; uniform vec2 uvs, off; ${GRADE} ${LOOK_GLSL}
   vec3 source(vec2 u) { return exposed(graded(texture2D(tColor, u * uvs + off))); }`, ink.uniforms)
+// ---------- the far view: under a street-level camera the land beyond the fog (the North Shore mountains from a
+// downtown street), drawn small into its own target from the coarse height grid (core/tiles.js makeFar) with the map's
+// picture on it, thinned by distance (premultiplied: its alpha is how much of it the air lets through), and put behind
+// the scene by the ink pass: where the sky shows, and where the fog swaps a far building for what is behind it.
+// How much shows is the weather's: `air` (the most, right behind the fog) and `reach` (metres to 1/e of that) from its
+// fog's end, not the quality tier's nearer one: a clear day nearly all of it for tens of kilometres, rain a faint
+// outline, fog none. Only from where the scene's own fog ends (`from`): nearer, the scene has the land itself.
+const farRT = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType })
+const farScene = new THREE.Scene(), farCam = new THREE.PerspectiveCamera(), farClear = new THREE.Color()
+ink.uniforms.tFar.value = farRT.texture
+farScene.name = 'far'
+const farMat = new THREE.ShaderMaterial({
+  uniforms: { map: { value: null }, sunDir: mats.tree.uniforms.sunDir, sunCol: mats.tree.uniforms.sunCol, sky: mats.tree.uniforms.sky, gnd: mats.tree.uniforms.gnd, air: { value: 0.9 }, reach: { value: 36000 }, from: { value: 0 } },
+  vertexShader: `varying vec2 vUv; varying vec3 vN; varying float vD;
+    void main() { vUv = uv; vN = normal; vD = distance(position, cameraPosition); gl_Position = projectionMatrix * viewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `uniform sampler2D map; uniform vec3 sunDir, sunCol, sky, gnd; uniform float air, reach, from; varying vec2 vUv; varying vec3 vN; varying float vD;
+    void main() {
+      vec3 n = normalize(vN);
+      vec3 lit = texture2D(map, vUv).rgb * (mix(gnd, sky, n.y * 0.5 + 0.5) + sunCol * max(dot(n, sunDir), 0.0)) * 0.3183;
+      float a = air * exp(-vD / reach) * smoothstep(from * 0.8, from, vD); // (only what the scene's own fog has taken)
+      gl_FragColor = vec4(lit * a, a);
+    }`,
+})
+function drawFar(C, w, h) {
+  const F = city?.weather?.atmosphere?.fogFar ?? 24000
+  if (!tiles.far || F < 380) return false
+  if (!tiles.far.parent) { farScene.add(tiles.far); farMat.uniforms.map.value = tiles.far.userData.map; for (const m of tiles.far.children) m.material = farMat }
+  farMat.uniforms.air.value = Math.min(0.92, 0.45 + F / 12000); farMat.uniforms.reach.value = 14000 + F; farMat.uniforms.from.value = scene.fog.far
+  const fw = Math.ceil(w / 2), fh = Math.ceil(h / 2)
+  if (farRT.width !== fw || farRT.height !== fh) farRT.setSize(fw, fh)
+  Object.assign(farCam, { fov: C.fov, aspect: C.aspect, near: 150, far: 120000 }); farCam.updateProjectionMatrix()
+  farCam.position.copy(C.position); farCam.quaternion.copy(C.quaternion); farCam.updateMatrixWorld()
+  const cc = renderer.getClearColor(farClear), ca = renderer.getClearAlpha()
+  renderer.setRenderTarget(farRT); renderer.setClearColor(0, 0); renderer.clear(); renderer.render(farScene, farCam); renderer.setClearColor(cc, ca)
+  return true
+}
 const define = (k, on) => { if (!!ink.defines[k] === on) return; if (on) ink.defines[k] = 1; else delete ink.defines[k]; ink.needsUpdate = true }
 define('NOINK', quality.tier.ink === 'off')
 setHDR(quality.tier.hdr)
@@ -462,6 +508,7 @@ function draw(scale = res) {
     if (zen != null) u.zenCol.value.setHex(zen)
     C.updateMatrixWorld(); u.projInv.value.copy(C.projectionMatrixInverse); u.camWorld.value.copy(C.matrixWorld)
   }
+  define('FARVIEW', skyFog && drawFar(C, w, h))
   if (C.isPerspectiveCamera) {
     const d = v1.copy(own.opts.focus).sub(C.position).dot(C.getWorldDirection(v2)) // metres to the focus
     u.cnear.value = C.near; u.cfar.value = C.far; u.thr.value = Math.min(0.004, Math.max(0.35 / (K * zoom), 0.9) / Math.max(1, d))

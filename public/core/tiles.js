@@ -240,6 +240,37 @@ export class Tiles {
     }
     this.scene.add(base)
     this.baseMesh = base
+    this.makeFar(tex)
+  }
+
+  // The land far off, for a street-level view (main.js draws it behind the fog: the North Shore mountains from
+  // downtown): the same picture on the coarse grid, a vertex every 256 m, in 4 x 4 chunks the camera
+  // culls. this.far: the group, on its own (main.js gives it a material and a scene).
+  makeFar(tex) {
+    const g = this.coarse, step = 4, nx = Math.floor((g.w - 1) / step) + 1, ny = Math.floor((g.h - 1) / step) + 1, C = 4
+    const pos = new Float32Array(nx * ny * 3), uv = new Float32Array(nx * ny * 2)
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const k = j * nx + i
+      pos.set([g.x0 + i * step * g.c, g.z[Math.min(g.h - 1, j * step) * g.w + Math.min(g.w - 1, i * step)] / 10, -(g.y1 - j * step * g.c)], k * 3)
+      uv.set([(i * step + 0.5) / g.w, 1 - (j * step + 0.5) / g.h], k * 2)
+    }
+    const P = new THREE.BufferAttribute(pos, 3), U = new THREE.BufferAttribute(uv, 2), all = new THREE.BufferGeometry()
+    all.setAttribute('position', P)
+    const idx = []
+    for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) { const a = j * nx + i; idx.push(a, a + nx, a + 1, a + 1, a + nx, a + nx + 1) }
+    all.setIndex(idx); all.computeVertexNormals()
+    this.far = new THREE.Group(); this.far.userData.map = tex
+    const cw = Math.ceil((nx - 1) / C), ch = Math.ceil((ny - 1) / C)
+    for (let cj = 0; cj < ny - 1; cj += ch) for (let ci = 0; ci < nx - 1; ci += cw) {
+      const sub = [], cg = new THREE.BufferGeometry()
+      for (let j = cj; j < Math.min(ny - 1, cj + ch); j++) for (let i = ci; i < Math.min(nx - 1, ci + cw); i++) { const a = j * nx + i; sub.push(a, a + nx, a + 1, a + 1, a + nx, a + nx + 1) }
+      cg.setAttribute('position', P); cg.setAttribute('uv', U); cg.setAttribute('normal', all.attributes.normal); cg.setIndex(sub)
+      cg.boundingBox = new THREE.Box3()
+      for (const a of sub) cg.boundingBox.expandByPoint(v0.fromArray(pos, a * 3))
+      cg.boundingSphere = cg.boundingBox.getBoundingSphere(new THREE.Sphere())
+      const m = new THREE.Mesh(cg); m.matrixAutoUpdate = false
+      this.far.add(m)
+    }
   }
 
   // highest coarse ground in a rectangle (world metres, y north): tall ground stands up into the view from outside it
