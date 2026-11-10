@@ -257,6 +257,7 @@ export default function sail(city) {
     touch: el('sl sl-touch', '<button class="l" data-k="left" aria-label="Steer left"><b>◀</b><small>left</small></button><button class="r" data-k="right" aria-label="Steer right"><b>▶</b><small>right</small></button><button class="ease" data-k="ease" aria-label="Ease the sail out"><b>Ease</b><small>sail out</small></button><button class="trim" data-k="trim" aria-label="Trim the sail in"><b>Trim</b><small>sail in</small></button>'),
   }
   const q = (e, s) => e.querySelector(s)
+  city.ui.hud?.append(ui.btns) // the host's top right row: the chat button lines up beside it
   Object.assign(ui, { all: [ui.read, ui.btns, ui.help, ui.pop, ui.pick, ui.touch, ui.tgt, ui.goals, ui.learn], rose: q(ui.read, '[data-rose]'), v: q(ui.read, '[data-v]'), pos: q(ui.read, '[data-pos]'), sub: q(ui.read, '.sp .sub'),
     w: q(ui.read, '[data-w]'), gust: q(ui.read, '[data-gust]'), sh: q(ui.read, '[data-sh]'), id: q(ui.read, '[data-id]'), mute: q(ui.btns, '[data-mute]'), exit: q(ui.btns, '[data-exit]'),
     pt: q(ui.pick, '[data-pt]'), cancel: q(ui.pick, '[data-cancel]'), ar: q(ui.tgt, '[data-ar]'), tn: q(ui.tgt, '[data-tn]'), td: q(ui.tgt, '[data-td]'), tt: q(ui.tgt, '[data-tt]'),

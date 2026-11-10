@@ -224,3 +224,22 @@ export function stepVan(c, dt, I, grip) {
 }
 // a kerb or a pothole under the wheels: k 0..1, front first (1) or rear first (-1), side -1 left .. 1 right
 export function jolt(c, k, front = 1, side = 0) { c.hv += 1.1 * k; c.bpv += 2.6 * k * front; c.brv += 1.8 * k * side }
+
+// How a bus ride feels to the people standing in it (#609). Sideways and braking g, smoothed over about half a
+// second so a tap of the wheel or a lane change at speed is nothing; what a bus driver knows: up to 0.2 g is an
+// ordinary bend or stop, past 0.3 g people grab the poles, past 0.4 g the coffee goes. Returns the change in
+// happiness (%) for this step: a slow gain while the ride is smooth, a loss that grows with the excess and is
+// drawn from a budget (at most LOSS at once, refilled at REFILL %/s), so one bad corner costs a few points, not
+// the shift. st: { lat, dec } smoothed m/s² (compare with COMFORT.latWarn / decWarn for a word to the driver).
+export const COMFORT = { lat: 3, latWarn: 4, dec: 3.4, decWarn: 4.2, smooth: 1.5, gain: 0.3, LOSS: 8, REFILL: 0.4 }
+export function busComfort(st, dt, ax, latA) {
+  const C = COMFORT
+  st.lat = (st.lat || 0) + (Math.abs(latA) - (st.lat || 0)) * Math.min(1, dt / 0.6)
+  st.dec = (st.dec || 0) + (Math.max(0, -ax) - (st.dec || 0)) * Math.min(1, dt / 0.35)
+  st.budget = Math.min(C.LOSS, (st.budget ?? C.LOSS) + dt * C.REFILL)
+  const over = Math.max(0, st.lat - C.lat) * 3 + Math.max(0, st.dec - C.dec) * 4 // % per second
+  if (!over) return st.lat < C.smooth && st.dec < C.smooth ? dt * C.gain : 0
+  const loss = Math.min(st.budget, over * dt)
+  st.budget -= loss
+  return -loss
+}

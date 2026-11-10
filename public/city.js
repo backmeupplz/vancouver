@@ -178,6 +178,7 @@ function makeUI() {
   const showFps = () => { document.documentElement.classList.toggle('fps-on', fps.checked); try { localStorage.setItem('vancouver.fps', fps.checked ? '1' : '0') } catch {} }
   fps.onchange = showFps; showFps()
   // what moves: a comment marks each element's place for the way back
+  const hud = document.createElement('div'); hud.id = 'hud'; document.body.append(hud)
   const buttons = [], moved = []
   let phone = compact()
   const placeButton = (b) => (phone && !b.dock ? grid.append(b) : bar.insertBefore(b, more))
@@ -254,6 +255,9 @@ function makeUI() {
     },
     // on phones, `el` lives in the ⋯ sheet instead of where it is (its own CSS and `hidden` still apply there); it
     // is listed only while `home` (default: its parent) is on screen, so a game's toggles show only in that game
+    // the row at the top right while a game is on (index.html #hud): the game's buttons, and to their left what
+    // other plugins add (the chat button), side by side so nothing lands on the game's panels
+    hud,
     inMenu(el, home = el.parentElement) { move(el, items, home === document.body ? null : home) },
     // a line in the credits strip at the bottom of the page (a link with href): { set(text, href), remove() }
     credit(text, href) {

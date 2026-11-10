@@ -58,7 +58,7 @@ export default function multiplayer(city) {
     .live-stats b { color: var(--text); font-weight: 600 }
     .live-badge { display: inline-block; min-width: 16px; height: 16px; padding: 0 4px; margin-left: 5px; border-radius: 8px; background: #e8735a; color: #fff; font-size: 10.5px; font-weight: 700; line-height: 16px; text-align: center; box-sizing: border-box; vertical-align: 1px; }
     .live-badge[hidden] { display: none }
-    .live-fab { right: 12px; top: 60px; z-index: 26; padding: 6px 12px; font: inherit; color: var(--text); cursor: pointer; display: none; }
+    .live-fab { z-index: 26; padding: 6px 12px; font: inherit; color: var(--text); cursor: pointer; display: none; }
     body.dlv-on .live-fab.on { display: block }
     .live-chat { right: 12px; top: 58px; z-index: 26; width: min(340px, calc(100% - 24px)); height: min(500px, calc(100% - 150px)); display: flex; flex-direction: column; box-sizing: border-box; padding: 10px 12px 12px; }
     body.dlv-on .live-chat { top: 104px; height: min(440px, calc(100% - 300px)); }
@@ -146,7 +146,6 @@ export default function multiplayer(city) {
     .compact .live-menu { left: 8px !important; right: 8px; top: auto !important; bottom: calc(var(--sb)); padding: 8px; border-radius: 14px; z-index: 41; }
     .compact .live-menu button { min-height: 48px; font-size: 15px; padding: 0 12px; }
     .compact .live-menu .t { font-size: 13px; padding: 4px 12px 6px; }
-    .compact .live-fab { top: var(--st); right: calc(var(--sr) + 84px); width: 44px; height: 44px; padding: 0; font-size: 19px; border-radius: 12px; }
     .compact .live-fab .lb { display: none; }
     .compact .live-fab .live-badge { position: absolute; top: -4px; right: -4px; margin: 0; }
     #menu .live-fab { font-size: 14px } #menu .live-fab .lb { display: inline } #menu .live-fab .live-badge { position: static; margin-left: 6px; }`
@@ -181,8 +180,8 @@ export default function multiplayer(city) {
   fab.append(h('span', null, '💬'), h('span', 'lb', ' Chat'))
   const fabBadge = h('span', 'live-badge'); fabBadge.hidden = true; fab.append(fabBadge)
   fab.onclick = () => toggleChat()
-  document.body.append(fab)
-  city.ui.inMenu?.(fab) // phones: in the ⋯ sheet
+  ;(city.ui.hud || document.body).prepend(fab) // in the game's row of buttons, left of them: never over its panels (#609)
+  city.ui.inMenu?.(fab, document.body) // phones: in the ⋯ sheet
 
   const panel = h('div', 'panel live-chat'); panel.hidden = true
   panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', 'Chat')
@@ -286,7 +285,7 @@ export default function multiplayer(city) {
     e.preventDefault()
     const text = input.value.trim()
     if (!text) return
-    if (tab === 'n' && !city.player) return setStatus('Start exploring (Drive) to talk to people near you.')
+    if (tab === 'n' && !city.player) return setStatus('Open Explore to talk to people near you.')
     out({ t: 'chat', ch: tab, text }); input.value = ''
   }
 
@@ -373,7 +372,7 @@ export default function multiplayer(city) {
     if (panel.hidden || chatView.hidden) return
     const shown = lines[tab].filter((l) => !blocked.has(l.id))
     linesEl.replaceChildren(...shown.map(lineEl))
-    if (!shown.length) linesEl.append(h('div', 'live-empty', tab === 'n' ? (city.player ? 'Nobody nearby has said anything yet.' : 'Drive or walk around to talk to people near you.') : 'No messages yet. Say hi!'))
+    if (!shown.length) linesEl.append(h('div', 'live-empty', tab === 'n' ? (city.player ? 'Nobody nearby has said anything yet.' : 'Explore the streets to talk to people near you.') : 'No messages yet. Say hi!'))
     linesEl.scrollTop = linesEl.scrollHeight
   }
   function renderBlocked() {

@@ -65,3 +65,30 @@ for (const cab of CABS) {
   assert(a.speed > 29, `${cab.id} in the air: no brakes (${a.speed.toFixed(1)})`)
   console.log(`ok: ${cab.name} 0-80 km/h ${t1.toFixed(1)} s, top ${(V.vmax * 3.6).toFixed(0)} km/h, nitro ${(c.speed * 3.6).toFixed(0)} km/h, drift ${(ang * 57).toFixed(0)}°`)
 }
+// the bus riders' comfort (#609): a gentle bend at 50 km/h and a tap of the wheel cost nothing, a hard corner or
+// an emergency stop does, the loss is capped, and smooth driving wins it back
+import { busComfort, COMFORT } from '../public/plugins/drive/van.js'
+{
+  const ride = (secs, ax, lat, st = {}) => { let m = 0, warn = false; for (let t = 0; t < secs; t += DT) { m += busComfort(st, DT, ax(t), lat(t)); warn ||= st.lat > COMFORT.latWarn || st.dec > COMFORT.decWarn } return { m, warn, st } }
+  const v = 13.9
+  const bend = ride(10, () => 0, (t) => v * v / 120 + (t > 4 && t < 4.25 ? v * 0.25 : 0)) // a 120 m bend, and a 0.25 rad/s twitch
+  assert(bend.m >= 0 && !bend.warn, `gentle bend at 50 km/h: ${bend.m.toFixed(2)}%${bend.warn ? ', warned' : ''}`)
+  const firm = ride(6, () => -2.2, () => 0) // a firm, ordinary stop
+  assert(firm.m >= 0 && !firm.warn, `firm stop: ${firm.m.toFixed(2)}%`)
+  const hard = ride(3, () => 0, () => 8 * 8 / 12) // 29 km/h round a 12 m street corner: 0.54 g
+  assert(hard.m < -3 && hard.warn, `hard corner: ${hard.m.toFixed(2)}%`)
+  const long = ride(60, () => 0, () => 6, hard.st)
+  assert(hard.m + long.m > -(COMFORT.LOSS + 64 * COMFORT.REFILL), `rate limit: ${(hard.m + long.m).toFixed(1)}% in a minute of it`)
+  const back = ride(30, () => 0, () => 0.5, long.st)
+  assert(back.m > 5, `recovery: ${back.m.toFixed(1)}% in 30 smooth seconds`)
+  // on the bus's own physics: flat out round full lock is an offence, the brake pedal to the floor from 50 too
+  const lock = newVan(ARTIC); lock.speed = 9; lock.gear = 2
+  const st = {}; let m = 0
+  for (let t = 0; t < 3; t += DT) { stepVan(lock, DT, { up: true, down: false, steer: 1, hand: false }, 1); m += busComfort(st, DT, lock.ax, lock.speed * lock.yawRate) }
+  const pk = st.lat
+  const sb = newVan(ARTIC); sb.speed = 13.9; sb.gear = 3
+  const s2 = {}; let m2 = 0, pd = 0
+  for (let t = 0; t < 2.5; t += DT) { stepVan(sb, DT, brake, 1); m2 += busComfort(s2, DT, sb.ax, 0); pd = Math.max(pd, s2.dec) }
+  console.log(`ok: comfort: bend ${bend.m.toFixed(1)}%, hard corner ${hard.m.toFixed(1)}%, a minute of it ${(hard.m + long.m).toFixed(1)}%, 30 s smooth +${back.m.toFixed(1)}%; bus full lock from 32 km/h ${pk.toFixed(1)} m/s² ${m.toFixed(1)}%, full brake ${pd.toFixed(1)} m/s² ${m2.toFixed(1)}%`)
+  assert(m < 0 && m2 < 0, 'the bus at full lock and on full brake upsets its riders')
+}

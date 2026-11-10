@@ -1,5 +1,5 @@
 // Drive: explore the real streets by van or on foot, work a shift for the Salmonberry Parcel Co., or hike a trail.
-// The toolbar's "Drive" menu (or D for deliveries) asks for a spot on the map, then dives from the map into a
+// The toolbar's "Explore" menu (or D for deliveries) asks for a spot on the map, then dives from the map into a
 // third-person view there; Esc flies back. On foot you walk the sidewalks (E gets in and out of the van).
 // Deliveries are made up on the fly around you from what is loaded: a real shop with one to three parcels ready, then
 // for each a building, the street in front of it, a Vancouver-style house number and a recipient. The courier carries
@@ -624,6 +624,7 @@ export default function drive(city) {
     const co = el('dlv dlv-co card', `<div class="name">Salmonberry Parcel Co.</div>
       <div class="stats"><span><b data-n>0</b> delivered</span><span><b data-m>$0.00</b></span><span data-c></span></div><div class="credit">Streets © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors</div>`)
     const btns = el('dlv dlv-btns', '<button data-assist title="Lane assist (G): while you aren’t steering, the van gently straightens up along the road it’s on. It never steers against you."></button><button class="opt" data-mute title="Sound (M)">Sound on</button><button data-exit title="Back to the map (Esc)" aria-label="Back to the map"><span class="long">Back to map</span><span class="short">‹ Map</span></button>')
+    city.ui.hud?.append(btns) // the host's top right row: the chat button lines up beside it
     const read = el('dlv dlv-read card', '')
     const job = el('dlv dlv-job card', `<div class="dlv-arrow"><div class="n">N</div><svg viewBox="0 0 30 30"><path d="M15 3 L25 25 L15 20 L5 25 Z" fill="#ffc9b5" stroke="#3a2a26" stroke-width="1.5" stroke-linejoin="round"/></svg></div>
       <div><div class="what" data-w></div><div class="where" data-p></div><div class="sub" data-s></div><div class="meta"><span data-d></span><span data-t></span></div></div>`)
@@ -735,7 +736,7 @@ export default function drive(city) {
   let howT = 0, drift = { m: 0, t: 0, show: 0, text: '' } // a free-roam drift under way: metres so far
   let autopilot = null, probe = null // ?drivedebug (tools/drive_check.mjs): the input instead of the keys; told of every hit
 
-  const button = city.ui.addButton({ label: 'Drive', icon: '🚐', title: 'Explore the streets by van or on foot, or deliver parcels (D)', panel: true, dock: true })
+  const button = city.ui.addButton({ label: 'Explore', icon: '🧭', title: 'Explore the streets by van, bus, cab or on foot, deliver parcels (D), hike a trail', panel: true, dock: true })
   button.panel.innerHTML = `<div class="dlv-menu">
     <button data-m="car"><span>🚐</span><div>Explore by van<small>Drive anywhere, no jobs</small></div></button>
     <button data-m="foot"><span>🚶</span><div>Explore on foot<small>Walk the sidewalks; ${touchy ? 'hop' : 'E gets'} in the van</small></div></button>

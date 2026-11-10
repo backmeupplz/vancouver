@@ -11,6 +11,7 @@
 import { localFrame, patternOf } from '../transit/index.js'
 import { vancouver, clamp, wrap, esc, getJSON } from '../../core/util.js'
 import { makeWalker } from './walker.js'
+import { busComfort, COMFORT } from './van.js'
 import { noise } from '../../core/play.js'
 
 const DATA = new URL('../transit/data/', import.meta.url)
@@ -373,7 +374,8 @@ export function busGame(ctx, pick, d0) {
 
   // ---------------------------------------------------------------- the shift's state
   const S = { i0: 0, aboard: 0, mood: 90, served: 0, missed: 0, onTime: 0, timed: 0, carried: 0, harsh: 0, sway: 0, bumps: 0, dewire: 0, km: 0, t0: performance.now(), end: false, summary: false }
-  let d = 0, dLast = 0, next = 0, doors = false, doorK = 0, serving = null, boardQ = 0, alightQ = 0, tick = 0, leftAt = 0, ringAt = 0, jerkAt = 0, swayAt = 0, decel = 0, offRoute = 0
+  const ride = {} // busComfort's state
+  let d = 0, dLast = 0, next = 0, doors = false, doorK = 0, serving = null, boardQ = 0, alightQ = 0, tick = 0, leftAt = 0, ringAt = 0, jerkAt = -1e5, swayAt = -1e5, decel = 0, offRoute = 0
   let headway = 10, pole = { on: trolley, k: trolley ? 1 : 0, fix: 0, pitch: 0.38, yaw: 0, lat: 0 }
   const kneel = { k: 0 }
   car.V = { ...car.V }; const push0 = car.V.push; let paid = 0 // (its own copy of the numbers: the load changes them)
@@ -661,16 +663,15 @@ export function busGame(ctx, pick, d0) {
     }
     bus.userData.aboard(S.aboard)
   }
-  // smooth driving: harsh braking or cornering with people aboard costs happiness (a word now and then)
+  // smooth driving (van.js busComfort): hard braking or a corner taken fast with people aboard costs happiness,
+  // a smooth ride wins it back; a word to the driver for a real offence, each at most every 20 s
   function comfort(dt, now) {
-    const dec = -car.ax
-    decel = Math.max(dec, decel - dt * 0.6)
-    if (!S.aboard || Math.abs(car.speed) < 0.5) return
-    const crowd = Math.min(1, 0.3 + S.aboard / 25)
-    if (dec > 3.4) { S.mood -= dt * 10 * crowd; if (now - jerkAt > 6000) { jerkAt = now; S.harsh++; ctx.popup('Whoa!', 'Easy on the brakes: people are standing.'); ctx.buzz(30) } }
-    const latA = Math.abs(car.speed * car.yawRate)
-    if (latA > 2.7) { S.mood -= dt * 8 * crowd; if (now - swayAt > 6000) { swayAt = now; S.sway++; ctx.popup('Hold on tight!', 'Slower round the corners: coffee everywhere.') } }
-    S.mood = clamp(S.mood, 0, 100)
+    decel = Math.max(-car.ax, decel - dt * 0.6)
+    if (!S.aboard || Math.abs(car.speed) < 0.5) { ride.lat = ride.dec = 0; return }
+    const dm = busComfort(ride, dt, car.ax, car.speed * car.yawRate)
+    S.mood = clamp(S.mood + (dm < 0 ? dm * Math.min(1, 0.3 + S.aboard / 25) : dm), 0, 100)
+    if (ride.dec > COMFORT.decWarn && now - jerkAt > 20000) { jerkAt = now; S.harsh++; ctx.popup('Whoa!', 'Easy on the brakes: people are standing.'); ctx.buzz(30) }
+    if (ride.lat > COMFORT.latWarn && now - swayAt > 20000) { swayAt = now; S.sway++; ctx.popup('Hold on tight!', 'Slower round the corners: coffee everywhere.') }
   }
   // a knock or a kerb (from drive/index.js): impact in m/s
   function bump(k) { S.bumps++; if (S.aboard) S.mood = clamp(S.mood - Math.min(8, 1 + k), 0, 100) }

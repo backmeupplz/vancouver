@@ -90,6 +90,10 @@
   .compact #tools .live-badge { position: absolute; top: 3px; left: calc(50% + 6px); margin: 0; }
   .compact #credits { left: var(--sl) !important; right: auto !important; top: calc(var(--st) + 50px) !important; bottom: auto !important; transform: none !important; max-width: calc(100% - var(--sl) - var(--sr)) !important; flex-wrap: wrap; row-gap: 0; background: none !important; border: 0 !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; padding: 0 2px !important; font-size: 10.5px !important; color: rgba(227, 234, 240, .78) !important; text-shadow: 0 1px 2px rgba(0, 0, 0, .8); pointer-events: auto; }
   /* the ⋯ sheet (city.js): only the games stay on the dock; everything else lives in here on phones */
+  /* a game's top right row (city.ui.hud): its buttons and the chat button side by side; phones place each themselves */
+  #hud { position: fixed; right: var(--sr); top: var(--st); z-index: 26; display: flex; align-items: flex-start; gap: 6px; }
+  #hud > * { position: static; }
+  .compact #hud { display: contents; } .compact #hud > * { position: fixed; }
   #tools .more, .more-fab, #osm { display: none; }
   .compact #tools .more { display: inline-flex; }
   .compact body.dlv-on .more-fab { display: grid; place-items: center; right: calc(var(--sr) + 84px); top: var(--st); width: 44px; height: 44px; padding: 0; z-index: 26; font: 22px/1 system-ui, sans-serif; color: var(--text); border-radius: 12px; cursor: pointer; }
