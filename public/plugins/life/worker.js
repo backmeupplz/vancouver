@@ -1045,7 +1045,9 @@ function* buildWalk() {
       for (let k = 0; k < n; k++) fg.add(c.x[i] + (dx * k) / n, c.y[i] + (dy * k) / n, [dx / l, dy / l, c.x[i] + (dx * k) / n, c.y[i] + (dy * k) / n, kind, p])
     }
   }
-  const streets = yield* gather(area.vx, area.vy, r, (p) => p.drive && p.kind <= 7 && p.pts.length >= 4)
+  // every carriageway, the ones the simulated cars keep off too (a bus loop, a busway, a private road: the player's
+  // bus drives there, and people walked along them as if they were paths)
+  const streets = yield* gather(area.vx, area.vy, r, (p) => p.kind <= 7 && p.pts.length >= 4)
   for (const p of pieces) { if (due()) yield; if (p.kind === 9 || p.kind === 8) lineOf(p, 1) }
   for (const p of streets) { if (due()) yield; if (p.oneway) lineOf(p, 0) }
   for (const p of pieces) {
@@ -1228,6 +1230,20 @@ function kerbside(p) {
   const bx = -Math.cos(p.ang) * 0.5, by = -Math.sin(p.ang) * 0.5
   for (let k = 0; k < 6 && inRoad(p.x, p.y); k++) { p.x += bx; p.y += by }
 }
+// someone standing within m metres of a carriageway's edge (or on it): out to that far from it
+function standBack(p, m) {
+  for (let k = 0; k < 3; k++) {
+    let hit = null, hs = 0
+    walk.rg.near(p.x, p.y, (q) => {
+      if (hit || q[4].z) return
+      const ox = p.x - q[2], oy = p.y - q[3], s = -ox * q[1] + oy * q[0]
+      if (Math.abs(ox * q[0] + oy * q[1]) <= 1.6 && Math.abs(s) < q[4].w / 2 + m) { hit = q; hs = s }
+    })
+    if (!hit) return
+    const d = (hs >= 0 ? 1 : -1) * (hit[4].w / 2 + m) - hs
+    p.x -= hit[1] * d; p.y += hit[0] * d
+  }
+}
 // the carriageway (a road sample of walk.rg) at a point, if any
 function inRoad(x, y) {
   let hit = null
@@ -1264,6 +1280,7 @@ function makeStatics() {
     for (let i = 0; i < n; i++) {
       const a = rnd(s.id, 5 + i) * 6.28, d = 0.6 + rnd(s.id, 9 + i) * 1.4
       const p = person(s.x + Math.cos(a) * d, s.y + Math.sin(a) * d, s.h, s.ang + (rnd(s.id, 13 + i) - 0.5) * 1.2, 1, seeded(s.id + i))
+      standBack(p, 1.4) // the stop's pole is at the kerb: they wait well back from it
       outdoors(p) // (a stop by a wall)
       sit(`s${s.id}:${i}`, p)
     }
@@ -1307,6 +1324,18 @@ function mayCross(n, leg) {
   }
   for (const c of cn.conns) if ((c.cars.length || c.reserved) && (!leg || c.from.p === leg.wp.p || c.to.p === leg.wp.p)) return false
   return true
+}
+// is something the player drives on the stretch of street from (x0, y0) to (x1, y1), or about to pass over it (within
+// four seconds at its speed)? People wait at the kerb for it as they do for the cars
+function playerComing(x0, y0, x1, y1, h) {
+  for (const o of obstacles.values()) {
+    if (o.len < 2 || (o.h != null && Math.abs(h - o.h) > 3)) continue // (a vehicle, at this level)
+    for (let k = 0; k <= 2; k++) {
+      const px = x0 + ((x1 - x0) * k) / 2 - o.x, py = y0 + ((y1 - y0) * k) / 2 - o.y, along = px * o.c + py * o.s
+      if (Math.abs(-px * o.s + py * o.c) < o.w / 2 + 1.5 && along > -o.len / 2 - 1 && along < o.len / 2 + 2 + o.speed * 4) return true
+    }
+  }
+  return false
 }
 function crosswalk(n, leg) { return n.car ? net.cws.get(n.car.id + ':' + leg.wp.p.key) : null }
 function arrive(p, leg, side) {
@@ -1488,8 +1517,9 @@ function stepPeople(dt) {
       p.waitT += dt
       if (p.cross) {
         const n = p.cross.n
-        if (mayCross(n, p.cross) || p.waitT > 60) {
-          const X = p.cross, sX = p.crossSide
+        const X = p.cross, sX = p.crossSide
+        portPos(X, -sX, 0, tmp2)
+        if ((mayCross(n, X) && !playerComing(p.x, p.y, tmp2.x, tmp2.y, p.h)) || p.waitT > 60) {
           p.cw = crosswalk(n, X); if (p.cw) p.cw.n++
           portPos(X, -sX, 0, tmp2)
           p.cross = null; p.xing = true // (on the street, on the crosswalk)
@@ -1497,7 +1527,7 @@ function stepPeople(dt) {
         }
       } else if (p.xhop) {
         const X = p.xhop
-        if (!X.cn || mayCross({ car: X.cn }, X.leg) || p.waitT > 60) {
+        if (((!X.cn || mayCross({ car: X.cn }, X.leg)) && !playerComing(p.x, p.y, X.o.x, X.o.y, p.h)) || p.waitT > 60) {
           p.xhop = null; p.xing = true
           hold(p, X.cn && net?.cws.get(X.cn.id + ':' + X.leg.wp.p.key))
           hop(p, X.o, () => {
@@ -1508,7 +1538,8 @@ function stepPeople(dt) {
         }
       } else if (p.xiv) {
         const I = p.xiv
-        if (!I.node || mayCross({ car: I.node }, I.leg) || p.waitT > 60) { p.xok = I; p.xiv = null; p.mode = 'walk' }
+        at(p.wp.c, p.dir > 0 ? I.u1 : I.u0, tmp2) // (the far kerb)
+        if (((!I.node || mayCross({ car: I.node }, I.leg)) && !playerComing(p.x, p.y, tmp2.x, tmp2.y, p.h)) || p.waitT > 60) { p.xok = I; p.xiv = null; p.mode = 'walk' }
       } else p.mode = 'walk'
     }
     if ((p.x - area.vx) ** 2 + (p.y - area.vy) ** 2 > (area.vr + 300) ** 2) p.dead = true
@@ -1779,6 +1810,12 @@ function debug({ x, y, r, ids }) {
     type: 'debug', why, total: cars.length, meanV: cars.reduce((a, c) => a + c.v, 0) / (cars.length || 1), carTarget, stuck, peds: peds.length, statics: statics.length, bikes: bikes.length, pedTarget, simT,
     lcTotal, changing: cars.filter((c) => c.lc).map((c) => { posOn(c, c.s, tmp); return [Math.round(tmp.x), Math.round(tmp.y), c.id, +c.lc.t.toFixed(2)] }), // [x, north, id, progress]
     obstacles: obstacles.size, blocked: blocked.length,
+    // people on a carriageway who are not crossing it (roadWalk), people crossing one along a path that runs down it
+    // for longer than across (alongRoad), people waiting or sitting on one (roadStand), and the benches
+    roadWalk: walk ? peds.filter((p) => !p.fall && !p.xing && !p.xin && p.mode !== 'wait' && inRoad(p.x, p.y)).length : 0,
+    roadWalkers: walk ? peds.filter((p) => !p.fall && !p.xing && !p.xin && p.mode !== 'wait' && inRoad(p.x, p.y)).slice(0, 8).map((p) => { const q = inRoad(p.x, p.y); return [Math.round(p.x), Math.round(p.y), p.mode, p.wp.p.kind, p.wp.off ? 'sidewalk' : p.wp.p.crossing ? 'crossing' : 'path', q[4].kind, q[4].drive ? 'drive' : 'nodrive', +(q[4].w / 2 - Math.abs(-(p.x - q[2]) * q[1] + (p.y - q[3]) * q[0])).toFixed(1)] }) : [], // (the last: metres inside the paving, under 0: in the kerb strip)
+    alongRoad: peds.filter((p) => p.xin && p.xin.u1 - p.xin.u0 > p.xin.p.w + 8).length,
+    roadStand: walk ? statics.filter((p) => inRoad(p.x, p.y)).length : 0,
     ctls: net?.ctls.length, lanes: net?.lanes.length,
     lanesNear: net?.lanes.filter((L) => { const m = L.x.length >> 1; return Math.hypot(L.x[m] - x, L.y[m] - y) < r }).slice(0, 30)
       .map((L) => ({ kind: L.cls, a: L.p.a, b: L.p.b, dir: L.dir, li: L.li, cars: L.cars.length, len: L.len | 0, level: L.p.tile.level })),

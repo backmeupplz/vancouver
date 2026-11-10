@@ -16,6 +16,8 @@
 //   jerk / pjerk (cars / people): how unevenly each one in view moves, per agent: the change of its drawn velocity
 //   from one frame to the next (m/s), [mean, 95th percentile, worst] over all its frames; a thing moving smoothly
 //   changes by its acceleration × the frame (a car braking hard at 30 fps: 0.15), a stutter by its whole speed.
+//   roadWalk: the most people at once on a carriageway and not crossing it; alongRoad: crossing one along a path
+//   that runs down it; roadStand: waiting or sitting on one; target: how many cars and people the hour asks for
 //   --fps 30: the page draws at 30 frames a second (every other display frame); --cpu 4: the main thread 4× slower;
 //   --go: in a drive spec the van drives off (the accelerator held), so tiles, networks and detail levels change
 import assert from 'node:assert/strict'
@@ -274,6 +276,7 @@ async function live() {
           if (lastP) for (const [id, p] of lastP) if (!curP.has(id) && Math.hypot(p[0] - c.x, p[2] - c.z) < R - 30 && inView(p[0], p[1], p[2])) st.pvanish++
           last = cur; lastP = curP; st.frames++
           if (st.frames % 120 === 1) buses()
+          if (st.frames % 90 === 45 && window.lifeDebug) lifeDebug(0, 0, 0).then((d) => { for (const k of ['roadWalk', 'alongRoad', 'roadStand']) st[k] = Math.max(st[k] || 0, d[k]); st.target = [d.carTarget, d.pedTarget] })
           if (now - t0 < secs * 1000) requestAnimationFrame(frame)
           else { st.pairs = st.pairs.size; st.tickMax = Math.round(Math.max(0, ...(window.lifeMs || []))) // the worker's longest tick (ms) in the last 600
  st.judder = +(100 * st.judder / (st.moving || 1)).toFixed(2); st.pjudder = +(100 * st.pjudder / (st.pmoving || 1)).toFixed(2); delete st.moving; delete st.pmoving
