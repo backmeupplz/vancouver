@@ -18,21 +18,24 @@ export const TIERS = {
   low: { name: 'low', pixelRatio: 1.25, minRes: 0.6, shadows: 'low', aa: 'fxaa', ink: 'full', trees3d: 0.6, near: 0.6, detail: false, life: 0.5, weather: 0.5, cached: [32, 20], view: 2400, overview: 1800, lights: 1024, hdr: false, bloom: false },
 }
 
-// a first guess from the GPU's name (WEBGL_debug_renderer_info; Firefox and Safari may only say "Apple GPU" etc.)
+// a first guess from the GPU's name (WEBGL_debug_renderer_info; Firefox and Safari may only say "Apple GPU" etc.). An integrated
+// or mobile GPU (probe) may well run High: Auto starts it there and a 1 s frame-time probe (main.js adaptResolution) decides
 function guessTier(gl) {
   let name = ''
   try { name = gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info')?.UNMASKED_RENDERER_WEBGL ?? gl.RENDERER) || '' } catch {}
-  const weak = /swiftshader|llvmpipe|software|microsoft basic|intel|mali-[gt][0-9]{1,2}\b|mali-4|adreno \(tm\) [1-5]\d\d|adreno [1-5]\d\d|powervr|videocore/i
-  return weak.test(name) || (navigator.deviceMemory && navigator.deviceMemory <= 4) ? 'low' : 'high'
+  const weak = /swiftshader|llvmpipe|software|microsoft basic|mali-4|adreno \(tm\) [1-5]\d\d|adreno [1-5]\d\d|powervr|videocore/i
+  if (weak.test(name) || (navigator.deviceMemory && navigator.deviceMemory <= 4)) return { guess: 'low' }
+  const probe = /intel|mali|adreno|radeon\(tm\) graphics|radeon vega|radeon(\(tm\))? [67]\d\dm|apple gpu/i.test(name) && (!/apple gpu/i.test(name) || /android|iphone|ipad|mobile/i.test(navigator.userAgent))
+  return { guess: 'high', probe }
 }
 
 export function createQuality(gl, apply) {
   let setting = 'auto'
   try { setting = localStorage.getItem(KEY) || 'auto' } catch {}
   if (!['auto', 'high', 'low'].includes(setting)) setting = 'auto'
-  const guess = document.documentElement.classList.contains('embed') ? 'low' : guessTier(gl) // embeds (index.html): small, often on phones
+  const { guess, probe } = document.documentElement.classList.contains('embed') ? { guess: 'low' } : guessTier(gl) // embeds (index.html): small, often on phones
   const q = {
-    guess,
+    guess, probe: !!probe && setting === 'auto', // Auto on an integrated GPU: main.js probes High once, then demote()s
     get setting() { return setting },
     tier: TIERS[setting === 'auto' ? guess : setting],
     set(s) { // 'auto' | 'high' | 'low', from the menu

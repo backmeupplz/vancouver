@@ -9,6 +9,8 @@ const COMMON = `
   vec3 srgb(vec3 c) { return pow(c, vec3(2.2)); }
   ${NOISE_GLSL}
   float fbm(vec2 p) { return noise(p) * 0.5 + noise(p * 2.03) * 0.25 + noise(p * 4.1) * 0.125 + noise(p * 8.3) * 0.0625; }
+  // the rain's puddle map: fbm's two coarse octaves (the two fine ones, 8 hashes, only roughened the puddle edge) and their mean
+  float puddles(vec2 p) { return noise(p) * 0.5 + noise(p * 2.03) * 0.25 + 0.094; }
   // 1 inside [lo, hi], antialiased by the screen-space footprint fw
   float band(float x, float lo, float hi, float fw) { return smoothstep(lo - fw, lo + fw, x) * (1.0 - smoothstep(hi - fw, hi + fw, x)); }
   // how much of a pixel fw wide at x lies in [lo, hi] (a box filter): a line thinner than a pixel fades with its width
@@ -142,7 +144,7 @@ export function groundMaterial(far = false) {
         float sheen = 0.0;
         if (wet > 0.0 && c != 19) { // rain: darker, and paved ground mirrors the sky, most in the puddles
           col *= 1.0 - wet * (paved ? 0.42 : 0.22);
-          if (paved) sheen = wet * sheenAt(vW) * (0.35 + 0.65 * smoothstep(0.5, 0.7, fbm(p * 0.21 + 3.0)));
+          if (paved) sheen = wet * sheenAt(vW) * (0.35 + 0.65 * smoothstep(0.5, 0.7, puddles(p * 0.21 + 3.0)));
         }
         if (snow > 0.0 && c != 19) { // snow: lying on the flat, thinner on steep ground and where traffic runs
           float cover = smoothstep(0.25, 0.7, snow - 0.9 * sl + 0.35 * (n - 0.5)) * (c == 29 || c == 30 ? 0.45 : 1.0);
@@ -254,7 +256,7 @@ export function roadMaterial(decal = false) {
         float sheen = 0.0;
         if (wet > 0.0) {
           col *= 1.0 - 0.4 * wet; dCol *= 1.0 - 0.25 * wet;
-          sheen = wet * sheenAt(vW) * (0.4 + 0.6 * smoothstep(0.5, 0.7, fbm(vW.xz * 0.21 + 3.0)));
+          sheen = wet * sheenAt(vW) * (0.4 + 0.6 * smoothstep(0.5, 0.7, puddles(vW.xz * 0.21 + 3.0)));
         }
         if (snow > 0.0) { // white walks; slush on the carriageway, thickest away from the wheel tracks
           float road = kind == 100 || (kind >= 9 && kind <= 13) || kind == 102 ? 1.0 : 0.55 + 0.35 * smoothstep(0.3, 0.6, abs(fract(t / 1.8) - 0.5) * 2.0);

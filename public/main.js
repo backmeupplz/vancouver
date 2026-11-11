@@ -62,7 +62,8 @@ const sun = new THREE.DirectionalLight(0xfff1dc, 2.3)
 const SUN = new THREE.Vector3(-0.55, 0.62, 0.56).normalize() // afternoon, from the south-west (plugins may move it)
 // shadows by quality tier: 'high' a 4096 px map with soft edges, 'low' (and phones) 2048 px with plain PCF, or 'off'
 function shadowQuality(t) {
-  const hi = t.shadows === 'high' && !mobile, size = hi ? 4096 : 2048, type = hi ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap
+  const hi = t.shadows === 'high' && !mobile, size = hi && Math.min(devicePixelRatio, t.pixelRatio) >= 1.5 ? 4096 : 2048, // (a 1x screen shows no more of a 4096 map than 2048)
+    type = hi ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap
   if (sun.castShadow === (t.shadows !== 'off') && renderer.shadowMap.type === type && sun.shadow.mapSize.x === size) return
   sun.castShadow = t.shadows !== 'off'; renderer.shadowMap.type = type
   if (sun.shadow.mapSize.x !== size) { sun.shadow.mapSize.setScalar(size); sun.shadow.map?.dispose(); sun.shadow.map = null }
@@ -309,11 +310,35 @@ const ink = new THREE.ShaderMaterial({
     // below full resolution (adaptive): a texel is more than half a CSS px, and whole-texel lines were that many CSS px
     // wide and blocky. Here the depth is read bilinearly (exact on any plane, so no ladders either) at the output's own
     // pixels, the taps half a CSS px (px) apart: a line a CSS px wide, smooth at its ends, at any scale
-    float z(vec2 o) {
+    float zb(vec2 o) {
       vec2 n = vec2(textureSize(tDepth, 0)), q = uv * n + o * px * n - 0.5, f = fract(q), m = lim * n;
       ivec2 a = ivec2(clamp(floor(q), vec2(0.0), m)), b = ivec2(clamp(floor(q) + 1.0, vec2(0.0), m));
       return mix(mix(texelFetch(tDepth, a, 0).x, texelFetch(tDepth, ivec2(b.x, a.y), 0).x, f.x), mix(texelFetch(tDepth, ivec2(a.x, b.y), 0).x, texelFetch(tDepth, b, 0).x, f.x), f.y);
     }
+    // The five bilinear reads (centre, the four taps) share their texels, as the taps are under a texel apart (pixel ratio <= 2):
+    // 12 fetches instead of 20, picked by which side of the centre's texel each tap falls on. Identical to zb.
+    float zc, zxm, zxp, zym, zyp;
+    float P(float a, float b, float c, float d, int i) { return i < 1 ? a : i == 1 ? b : i == 2 ? c : d; }
+    #define T(dx, dy) texelFetch(tDepth, ivec2(clamp(b + vec2(dx, dy), vec2(0.0), m)), 0).x
+    void lowZ() {
+      #ifdef NOINK
+      zc = zb(vec2(0.0));
+      #else
+      vec2 n = vec2(textureSize(tDepth, 0)), q = uv * n - 0.5, m = lim * n, s = px * n, b = floor(q), f = q - b;
+      float t00 = T(0., 0.), t10 = T(1., 0.), t01 = T(0., 1.), t11 = T(1., 1.), xm0 = T(-1., 0.), xm1 = T(-1., 1.), x20 = T(2., 0.), x21 = T(2., 1.),
+        ym0 = T(0., -1.), ym1 = T(1., -1.), y20 = T(0., 2.), y21 = T(1., 2.);
+      zc = mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
+      for (int k = 0; k < 4; k++) {
+        float sg = k % 2 == 0 ? -1.0 : 1.0, q2 = (k < 2 ? q.x : q.y) + sg * (k < 2 ? s.x : s.y), fl = floor(q2), g = q2 - fl;
+        int i = int(fl - (k < 2 ? b.x : b.y)) + 1;
+        float v;
+        if (k < 2) v = mix(mix(P(xm0, t00, t10, x20, i), P(xm0, t00, t10, x20, i + 1), g), mix(P(xm1, t01, t11, x21, i), P(xm1, t01, t11, x21, i + 1), g), f.y);
+        else v = mix(mix(P(ym0, t00, t01, y20, i), P(ym0, t00, t01, y20, i + 1), g), mix(P(ym1, t10, t11, y21, i), P(ym1, t10, t11, y21, i + 1), g), f.x);
+        if (k == 0) zxm = v; else if (k == 1) zxp = v; else if (k == 2) zym = v; else zyp = v;
+      }
+      #endif
+    }
+    float z(vec2 o) { return o.x > 0.5 ? zxp : o.x < -0.5 ? zxm : o.y > 0.5 ? zyp : o.y < -0.5 ? zym : zc; }
     #else
     float z(vec2 o) { vec2 n = vec2(textureSize(tDepth, 0)); return texelFetch(tDepth, ivec2(clamp(floor(uv * n) + o * floor(px * n + 0.5), vec2(0.0), lim * n)), 0).x; }
     #endif
@@ -328,6 +353,9 @@ const ink = new THREE.ShaderMaterial({
     #endif
     void main() {
       uv = vUv * uvs + off;
+      #ifdef LOWRES
+      lowZ();
+      #endif
       vec4 col = texture2D(tColor, uv);
       float c = d(vec2(0.0));
       #ifdef SKYFOG
@@ -482,7 +510,10 @@ function setAA(mode) { aaMode = mode; dirty = true } // the quality tier's aa
 // MSAA samples for camera C: 'auto' skips them for the map on a screen of 1.75+ device px per CSS px, where its
 // pixels are finer than the ink lines that draw the edges anyway (4x MSAA was ~40% of the map's frame at 2x).
 // A change reallocates rt: only when a plugin's camera comes or goes or the tier changes.
-const msaa = (C, pr) => aaMode === 'off' || aaMode === 'fxaa' || (aaMode === 'auto' && !C.isPerspectiveCamera && pr >= 1.75) ? 0 : 4
+// Where FXAA runs too (smooth, in draw) the MSAA is paid twice for the same edges: samples 0 then. The change reallocates rt:
+// at most once a second (res steps near the 1.5 line must not thrash it), so a plugin's camera or the tier may wait a second.
+const msaa = (C, pr, smooth) => aaMode === 'off' || aaMode === 'fxaa' || smooth || (aaMode === 'auto' && !C.isPerspectiveCamera && pr >= 1.75) ? 0 : 4
+let msaaAt = -1e9
 // the scene is drawn into the corner `scale` of rt (adaptive resolution, below), the ink pass stretches it over the
 // canvas; the trees and the overlay are drawn at full resolution
 function draw(scale = res) {
@@ -491,7 +522,9 @@ function draw(scale = res) {
   const rw = Math.max(1, Math.round(w * scale)), rh = Math.max(1, Math.round(h * scale))
   rt.viewport.set(0, 0, rw, rh); rt.scissor.set(0, 0, rw, rh); rt.scissorTest = rw < w
   const C = own ? own.camera : cam, zoom = own ? ownCamera.zoom : cam.zoom, u = ink.uniforms
-  if (rt.samples !== msaa(C, pr)) { rt.samples = msaa(C, pr); rt.dispose() }
+  const smooth = (aaMode === 'fxaa' || aaMode === 'auto') && pr * scale < 1.5 // (scene texels bigger than 2/3 CSS px: their steps show)
+  const want = msaa(C, pr, smooth), nowMs = performance.now()
+  if (rt.samples !== want && nowMs - msaaAt > 1000) { rt.samples = want; rt.dispose(); msaaAt = nowMs }
   // the outline's width: a CSS px, in whole texels (else slopes read as edges); below full resolution half a CSS px
   // between bilinear taps (LOWRES)
   define('LOWRES', scale < 1)
@@ -523,7 +556,6 @@ function draw(scale = res) {
   u.gain.value.set(1 + 0.05 * near, 1 + 0.06 * near, 1 + 0.09 * near)
   treeScene.fog = scene.fog
   renderer.info.autoReset = false; renderer.info.reset()
-  const smooth = (aaMode === 'fxaa' || aaMode === 'auto') && pr * scale < 1.5 // (scene texels bigger than 2/3 CSS px: their steps show)
   if (smooth && (aa.width !== w || aa.height !== h)) aa.setSize(w, h)
   // below full resolution the map camera renders from a spot snapped to the target's texel grid and the ink pass
   // shifts the picture back by the remainder: the coarse pixels move with the map instead of resampling a crawl
@@ -566,7 +598,7 @@ function draw(scale = res) {
 // one last frame is drawn at full resolution, so a still map is sharp; a view that stops while things animate (traffic,
 // ships, weather) goes straight back to full resolution half a second later, and stays there while its frames are on time.
 let res = 1, pinned = false, loadedAt = 0, lateMs = 0, onTimeMs = 0, probeMs = 3000, upMs = 20000, promotedAt = -1e9, streamAt = -1e9, probedAt = -1e9, settleAt = Infinity, floorLate = 0, stillAt = 0, seenZoom = 0, probeFrom = 1
-const seen = new THREE.Matrix4()
+const seen = new THREE.Matrix4(), probeFrames = []
 function settle() { settleAt = performance.now() + 2500; lateMs = onTimeMs = 0; dirty = true } // a new camera or tier compiles shaders: no measure
 // ms: since the last frame; cpu: the main thread's own work in it (a frame late from building a tile is not one a
 // lower resolution would help)
@@ -578,6 +610,11 @@ function adaptResolution(ms, cpu, now, C) {
   // load the next probe back up comes soon
   if (now - streamAt < 300) { lateMs = 0; loadedAt = now; return }
   if (loadedAt) { loadedAt = 0; probeMs = 3000 }
+  if (quality.probe) { // Auto on an integrated GPU runs High for 1 s of quiet frames: late (p50 over 20 ms) = Low, and not back up for 2 min
+    probeFrames.push(ms)
+    if (probeFrames.reduce((a, b) => a + b, 0) >= 1000) { quality.probe = false; if (probeFrames.sort((a, b) => a - b)[probeFrames.length >> 1] > 20 && quality.demote()) { upMs = 120000; promotedAt = now } }
+    return
+  }
   if (res < 1 && now - stillAt > 500 && now - probedAt > probeMs) { probeFrom = res; res = 1; onTimeMs = lateMs = 0; probedAt = now; floorLate = 0; return }
   if (ms > 20) { lateMs += ms; onTimeMs = 0 } else { lateMs = Math.max(0, lateMs - ms * 0.1); onTimeMs += ms } // more than 1 in ~20 late adds up
   if (lateMs > 600) {
