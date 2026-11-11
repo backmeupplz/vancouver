@@ -1,4 +1,4 @@
-// node tools/bench.mjs [--dpr 2] [--tier high|low] [--cpu 4] [--secs 20] [--res 0.6] [--race 1] [--weather rain] [--hour 22] [--size 1700x1270] [--js 'expr'] [--vs 'name=expr;;name=expr'] [--psecs 4] [--park 1] map|drive|walk|bus|sail
+// node tools/bench.mjs [--dpr 2] [--tier high|low] [--cpu 4] [--secs 20] [--res 0.6] [--race 1] [--weather rain] [--hour 22] [--size 1700x1270] [--js 'expr'] [--vs 'name=expr;;name=expr'] [--psecs 4] [--park 1] [--at lat,lon] map|drive|walk|bus|sail
 // (--park: the van, walker or bus stays where it starts: the same view every run, so triangles and calls compare; --res pins the adaptive resolution; --race: sail in a regatta; --js: run in the page before measuring, e.g. hide something to see its cost)
 // A weak GPU is mostly short of fill rate: `--size 1700x1270 --dpr 2 --res 1` (8.6 Mpx) loads this one like an integrated GPU at 1x; compare passes, not fps.
 // One JSON line: {p50,p95,p99,over33,frames,tris,calls,gpu:{pass: ms, sum},vs?}. gpu: after the timed run, --psecs more with every pass drawn alone
@@ -6,7 +6,7 @@
 // look, trees = billboards, overlay = weather and effects, fxaa, lights, warm = tile uploads. vs: the same after each --vs expression, run in turn (what a thing costs: hide it).. map = continuous pan at #13645,11243,0.1295;
 // drive = autopilot in a van downtown (walk: on foot there, bus: the 99 from its first stop); sail = sailing in English Bay. Frame times are unlocked (no vsync).
 import { args, server, open, settle } from './pw.mjs'
-const [o, [mode = 'map']] = args(process.argv.slice(2), { dpr: 2, tier: 'high', cpu: 1, secs: 20, res: 0, race: '', weather: 'clear', hour: 13, size: '1400x900', js: '', psecs: 4, vs: '', park: '' })
+const [o, [mode = 'map']] = args(process.argv.slice(2), { dpr: 2, tier: 'high', cpu: 1, secs: 20, res: 0, race: '', weather: 'clear', hour: 13, size: '1400x900', js: '', psecs: 4, vs: '', park: '', at: '49.2838,-123.1185' })
 const game = ['drive', 'walk', 'bus'].includes(mode)
 const srv = await server(o.port)
 const init = () => { // per-frame dt via rAF; and, while P.sync, each pass alone: the GPU waited for before and after every renderer.render (and the shadow pass inside the scene's)
@@ -41,7 +41,7 @@ const { browser, ctx, page } = await open({ ...o, port: srv.port, query: game ? 
 await settle(page, 1000)
 if (game) { // downtown W Georgia, then pure-pursuit autopilot on drivable roads (keyboard events)
   await page.waitForFunction(() => window.driveDebug, null, { timeout: 30000 })
-  await page.evaluate((mode) => { const p = city.world.fromLatLon(49.2838, -123.1185); mode === 'bus' ? driveDebug.startBus('99', 0) : driveDebug.start(mode === 'walk' ? 'foot' : 'car', p.x, -p.z); if (city.traffic) city.traffic.nearby = () => [] }, mode)
+  await page.evaluate(([mode, at]) => { const p = city.world.fromLatLon(...at.split(',').map(Number)); mode === 'bus' ? driveDebug.startBus('99', 0) : driveDebug.start(mode === 'walk' ? 'foot' : 'car', p.x, -p.z); if (city.traffic) city.traffic.nearby = () => [] }, [mode, o.at])
   await page.waitForFunction(() => driveDebug.state === 'play', null, { timeout: 120000 }) // (down from the map)
   if (!o.park) await page.evaluate(() => {
     const CELL = 32, key = (a, b) => a * 8192 + b, segs = new Map(), held = new Set()

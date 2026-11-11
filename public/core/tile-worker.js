@@ -120,11 +120,12 @@ function build(t, level) {
   if (level === 0) tubeWalls(lines)
   const ps = pois(t)
   const carriage = level === 0 ? roadMask(t) : null
+  const lot = level === 0 ? roadMask(t, new Set([PARKING])) : null // the car parks: shops face them too
   const rd = roads(t, terr, lines, level, ps, carriage)
   out.roads = rd.surf; out.paint = rd.paint
   out.graph = graph(t, lines)
   out.graph.pois = ps
-  const b = buildings(t, terr, level, lines, carriage)
+  const b = buildings(t, terr, level, lines, carriage, lot)
   out.buildings = b.walls; out.balconies = b.balconies; out.ao = b.ao
   const tr = trees(t, terr)
   if (level === 0) {
@@ -538,8 +539,8 @@ function water(t) { const m = raster(t, new Set([WATER]), WATER_N); return m && 
 // and a 1 m mask of the carriageways and cycle tracks as drawn (bits, row-major from the SW corner): street furniture
 // stands outside it (city.world.offRoad)
 const ROADS_N = 1024, CARR = new Set([25, 29, 30]) // cycle, road, arterial
-function roadMask(t) {
-  const m = raster(t, CARR, ROADS_N)
+function roadMask(t, want = CARR) {
+  const m = raster(t, want, ROADS_N)
   if (!m) return null
   const bits = new Uint8Array(m.length / 8)
   for (let i = 0; i < m.length; i++) if (m[i]) bits[i >> 3] |= 1 << (i & 7)
@@ -1179,7 +1180,7 @@ function readBuilding(t, o) {
 }
 
 // carriage: the detail tile's 1 m carriageway mask (roadMask), for the light storefronts spill onto the street
-function buildings(t, terr, level, lines, carriage) {
+function buildings(t, terr, level, lines, carriage, lot) {
   const s = t.sections.BLDG
   const W = { pos: [], nor: [], col: [], win: [], fac: [] }, Bal = { pos: [], nor: [], col: [], win: [], fac: [] }
   const fp = [], fpStart = [0] // footprints: world x, north pairs; ring i is fp[fpStart[i]..fpStart[i+1])
@@ -1249,8 +1250,27 @@ function buildings(t, terr, level, lines, carriage) {
     const front = !!(bits & 1) || (style0 === 4 && !(fl & 32) && h >= 5) // old tiles: commercial = storefront
     if (style0 === 4 && h < 5) style = -1
     if (fx >> 4) style = fx >> 4
+    // archetype from what a tile carries (BUILDINGS.md step 1): 1 siding house, 2 stucco house, 3 Vancouver Special, 7 walk-up,
+    // 8 mid-rise, 12 heritage, 13 main street, 14 strip mall; 0 as before. It picks the wall pattern (materials.js 21 home,
+    // 22 flats, 23 heritage, 24 retail), the trim colour and the roof edges
+    const style1 = style, parea = area(pts), flatTop = !roofShape || !ridge || ridge <= h
+    const shopEdges = (front || style0 === 0 && parea > 500 && flatTop) && carriage ? pts.map((a, i) => { const p = pts[(i + 1) % np]; return streetSide(a, p, carriage) || (lot && streetSide(a, p, lot, 12)) }) : null
+    let arch = 0
+    if (detail && !(fx >> 4) && style > 0) {
+      if (style0 === 11) arch = 1
+      else if (style0 === 12) arch = 3
+      else if (style0 === 0 && parea < 450 && h - mn >= 2.5 && mn < 0.5) arch = style === 5 ? 1 : 2
+      else if (style0 === 0 && parea > 500 && flatTop && shopEdges?.some((e) => e)) arch = 14
+      else if ((style0 === 1 || style0 === 7) && bits & 2 && gH >= 5) arch = gH < 14 ? 7 : gH < 24 ? 8 : 0
+      else if ((style0 === 3 || style0 === 10) && gH < 45) arch = 12
+      else if (style0 === 4 && bits & 1 && gH < 8 && shopEdges) arch = 13
+    }
+    const trim = [0, 0, 0, 1, 2, 6][Math.floor(seed * 6)]
+    if (arch === 1 || arch === 2) style = 21
+    else if (arch === 7 || arch === 8) style = 22
+    else if (arch === 12) style = 23
+    else if (arch >= 13) style = 24
     const fq = Math.max(1, Math.min(31, Math.round(((fh || 3.2) - 2.4) / 0.15)))
-    const styleW = style + (fq + (front && style !== 6 && style !== 7 ? 32 : 0)) / 64
     const storey = 2.4 + fq * 0.15
     // what the windows light up for (materials.js): 1 homes, 2 work (offices, shops, civic), 0 not known; it rides on the seed
     const use = bits & 2 || style0 === 0 || style0 === 1 || style0 === 6 || style0 >= 11 ? 1 : style0 === 2 || style0 === 4 || style0 === 5 || style0 === 7 || style0 === 9 ? 2 : 0
@@ -1270,32 +1290,48 @@ function buildings(t, terr, level, lines, carriage) {
     // and punched windows (rows of shops and houses; not glass towers) a wall a neighbour covers for 60% of its height or
     // more, or a sliver, is a windowless party wall; a storefront only where the wall looks onto a street (all of
     // them where the tile can't tell: the overview); the rest keep the building's pattern
-    const rowWalls = detail && y1 - y0 < 25 && (style === 1 || style === 5 || style === 8 || style === 10) // brick, siding, punched: not glass towers
-    const shopEdges = front && carriage ? pts.map((a, i) => streetSide(a, pts[(i + 1) % np], carriage)) : null
+    const rowWalls = detail && y1 - y0 < 25 && (style1 === 1 || style1 === 5 || style1 === 8 || style1 === 10 || arch > 0) // brick, siding, punched: not glass towers
     // the house's front door: on the wall that looks onto the street, nearest it (materials.js draws it in that wall's
     // middle window bay, on the ground floor)
-    const home = detail && carriage && mn < 0.5 && np <= 60 && h - mn >= 2.5 && (style0 === 0 || style0 >= 11 || style0 === 1 && h < 16)
+    const home = detail && carriage && mn < 0.5 && np <= 60 && h - mn >= 2.5 && (style0 === 0 || style0 >= 11 || style0 === 1 && h < 16 || arch === 7 || arch === 8) && arch < 12
     let door = -1
     if (home) { let best = 99; for (let i = 0; i < np; i++) { const d = streetSide(pts[i], pts[(i + 1) % np], carriage, 24); if (d && d < best) { best = d; door = i } } }
+    const ring = detail && (arch === 12 || arch === 13) && carriage ? offset(pts, 0.4) : null
     for (let i = 0; i < np; i++) {
       const a = pts[i], p = pts[(i + 1) % np], len = Math.hypot(p[0] - a[0], p[1] - a[1]) || 1
       const nx = (p[1] - a[1]) / len, nz = (p[0] - a[0]) / len // outward in (x, z=-y)
       const mx = (a[0] + p[0]) / 2, my = (a[1] + p[1]) / 2
-      const lk = looks && looks[i * 4] & 7, B = bayOf(lk && (style === 1 || style === 2 || style === 10) ? LOOK_STYLE[lk] : style, looks ? looks[i * 4 + 1] : 0)
+      // the pattern of this wall: retail only on the walls that face a street or a car park (a mall's back: blank panels)
+      const wk = arch >= 13 && !shopEdges[i] ? (arch === 14 ? 17 : style1) : style
+      const lk = looks && looks[i * 4] & 7, B = bayOf(lk && (wk === 1 || wk === 2 || wk === 10) ? LOOK_STYLE[lk] : wk, looks ? looks[i * 4 + 1] : 0)
       const nb = Math.round(len / B) // whole window bays on each wall: none cut by a corner, none on a sliver
       const party = nb < 1 || rowWalls && (len < 2 || covered(rec, mx + nx * 0.8, my - nz * 0.8, mx - nx * 0.8, my + nz * 0.8, y0, y1))
-      const kind = party ? fq / 64 : shopEdges && !shopEdges[i] && styleW % 1 >= 0.5 ? styleW - 0.5 : styleW
+      const fb = front && wk !== 6 && wk !== 7 && wk < 23 && !(shopEdges && !shopEdges[i]) // the storefront's tall ground floor
+      const kind = party ? fq / 64 : wk + (fq + (fb ? 32 : 0)) / 64
       // on a slope a wall whose own ground runs more than 0.45 m under the building's foot goes down to it with its
       // pattern, its floors counted from there (the shop on the low street, the hill behind): no blank plinth under it
       const own = lows ? lows[i] - 0.3 : y0, foot = own < y0 - 0.45 ? Math.max(lo, own) : y0
       const dr = i === door && !party ? 4 : 0, u0 = (dr ? 64 * (1 + (i & 7)) - (nb >> 1) : 1 + ((i * 37) & 63)) * B, us = (nb || 1) * B / len
-      const w = (s, yy) => [kind, u0 + s * us, yy - (foot < y0 ? foot : base), seed + use + dr]
-      if (looks && !party) FAC = looks.subarray(i * 4, i * 4 + 4)
+      // heritage and retail walls carry their height (a cornice, a parapet cap) over the door bit, in 4s of the last channel
+      const hq = !party && wk >= 23 ? 8 * Math.min(500, Math.round(2 * (y1 - (foot < y0 ? foot : base)))) : 0, sd = hq ? 0.005 + 0.99 * seed : seed
+      const w = (s, yy) => [kind, u0 + s * us, yy - (foot < y0 ? foot : base), sd + use + dr + hq]
+      if (arch && arch !== 3 && arch !== 12 && !party) FAC = [128 | arch, trim, 0, 0]
+      else if (looks && !party) FAC = looks.subarray(i * 4, i * 4 + 4)
       quad(W, [a[0], foot, -a[1]], [p[0], foot, -p[1]], [p[0], y1, -p[1]], [a[0], y1, -a[1]], wall, [nx, 0, nz], w(0, foot), w(len, foot), w(len, y1), w(0, y1))
       FAC = NOFAC
+      if (ring && !party && len >= 3 && y1 - foot >= 5 && (arch === 13 ? shopEdges[i] : streetSide(a, p, carriage, 18))) { // a cornice box 0.4 m out and 0.6 m tall under the top (the ring is mitred, so corners meet)
+        const A = ring[i], P = ring[(i + 1) % np], cc = shade(wall, 1.12), cw = ROOFW(seed), yb = y1 - 0.6
+        quad(W, [A[0], yb, -A[1]], [P[0], yb, -P[1]], [P[0], y1, -P[1]], [A[0], y1, -A[1]], cc, [nx, 0, nz], cw)
+        quad(W, [a[0], yb, -a[1]], [p[0], yb, -p[1]], [P[0], yb, -P[1]], [A[0], yb, -A[1]], shade(cc, 0.6), [0, -1, 0], cw)
+        quad(W, [a[0], y1, -a[1]], [p[0], y1, -p[1]], [P[0], y1, -P[1]], [A[0], y1, -A[1]], cc, [0, 1, 0], cw)
+      }
+      if (i === door && !party && (arch === 7 || arch === 8)) { // a canopy over the entrance (materials.js draws the double door in the middle bay)
+        const f = ((nb >> 1) + 0.5) / nb, ex = (p[0] - a[0]) / len, ey = (p[1] - a[1]) / len
+        box3(Bal, a[0] + (p[0] - a[0]) * f + ey * 0.6, a[1] + (p[1] - a[1]) * f - ex * 0.6, foot + 2.6, 2.6, 1.2, 0.12, Math.atan2(ey, ex), shade(wall, 0.9))
+      }
       if (shopEdges?.[i] && mn < 2.5 && h >= 4) {
         fronts.push(a[0], a[1], p[0], p[1], foot) // (the shop signs, on the fascia over the glass)
-        if (!party && len >= 3 && ((seed * 7919) % 1) < 0.6) awnings(W, a, p, len, foot, nx, nz, seed)
+        if (!party && len >= 3 && wk < 23 && ((seed * 7919) % 1) < 0.6) awnings(W, a, p, len, foot, nx, nz, seed)
       }
       if (plinth && foot === y0) quad(W, [a[0], lo, -a[1]], [p[0], lo, -p[1]], [p[0], y0, -p[1]], [a[0], y0, -a[1]], plC, [nx, 0, nz], [0, 0, 0, seed], [0, len, 0, seed], [0, len, 0, seed], [0, 0, 0, seed])
     }
@@ -1324,7 +1360,7 @@ function buildings(t, terr, level, lines, carriage) {
         if (plant) for (const [ux, uy, su, sv, uh, ang] of plant) box3(Bal, ux, uy, y1, su, sv, uh, ang, shade([0.86, 0.88, 0.9], 0.85 + gr() * 0.2)) // what the LiDAR saw up there
         rooftop(Bal, pts, y1, gr, { bits, green, plant, tower, wall, shed: style0 === 4 || style0 === 8 || style0 === 9 || style0 === 2 && h < 15 })
       }
-    } else roof(W, pts, y1, base + ridge, roofShape, roofBits, roofC, wall, seed)
+    } else roof(W, pts, y1, base + ridge, roofShape, roofBits, roofC, wall, seed, detail && arch && arch !== 3 && arch < 12 ? lin(TRIM[trim]) : null)
     // balconies: a slab and a railing (glass, or concrete on the older towers) on every floor, all the way round.
     // The slab tops are geometry; the slab fronts and railings of all the floors are one sheet per wall, 1.15 m out
     // from it, that materials.js draws them on, open between them (2 triangles a floor and wall instead of 6)
@@ -1403,6 +1439,11 @@ function bayOf(style, lb) {
   if (style === 5) return 3.4
   if (style === 8) return 4.2
   if (style === 6) return 0.9
+  if (style === 21) return 3.4
+  if (style === 22) return 3.6
+  if (style === 23) return b ? Math.min(3.2, Math.max(1, b)) : 1.7
+  if (style === 24) return 2.6
+  if (style === 17) return 4
   if (style === 1 || style === 16) return b || 3
   return 0.5 // (big box, blank walls: no bays to fit)
 }
@@ -1792,6 +1833,8 @@ function pack(B) {
   return { position: new Float32Array(B.pos), normal: new Int8Array(B.nor), color: new Uint8Array(B.col), aWin: new Float32Array(B.win), aFac: new Uint8Array(B.fac) }
 }
 // the wall look (tools/lidar_walls.py's 4 bytes) the triangles being added carry: materials.js aFac
+// the trim colours of the wall patterns (materials.js TRIM: keep in step); a building's own comes from its seed
+const TRIM = [0xf2f0ea, 0xe8e2d0, 0x3a3d40, 0x5a4634, 0x2f3e36, 0x7a2f2a, 0xc8ccd0, 0x8a8f94]
 const NOFAC = [0, 0, 0, 0]
 let FAC = NOFAC
 // one triangle with a flat normal, wound so the normal points along `want`; w = aWin per vertex (or one for all)
@@ -1810,7 +1853,7 @@ function quad(B, a, b, c, d, col, want, wa, wb, wc, wd) {
 }
 // pitched roofs over the footprint's rectangle: gable (ridge along the long side, or across it with bit 16), hipped,
 // pyramidal, shed (high side flipped with bit 32), domes
-function roof(W, pts, y1, yr, shape, bits, rc, wall, seed) {
+function roof(W, pts, y1, yr, shape, bits, rc, wall, seed, trimC) {
   const o = obb(pts), O = 0.45
   let { cx, cy, a, hl, hw } = o
   a = ((a % Math.PI) + Math.PI) % Math.PI // the same frame as tools/tiles.py fit_roof, so "+v" means the same side
@@ -1844,6 +1887,10 @@ function roof(W, pts, y1, yr, shape, bits, rc, wall, seed) {
     tri(W, at(-L, s * Wd, y1), at(L, s * Wd, y1), at(r, 0, yr), rc, side, pw)
     tri(W, at(-L, s * Wd, y1), at(r, 0, yr), at(-r, 0, yr), rc, side, pw)
     const end = [ax[0] * s, 0, -ax[1] * s]
+    if (trimC) { // the fascia along the eave (0.22 m) and, on a gable, the rake boards up the slopes: the outline the ink pass draws
+      tri(W, at(-L, s * Wd, y1), at(L, s * Wd, y1), at(L, s * Wd, y1 - 0.22), trimC, side, pw); tri(W, at(-L, s * Wd, y1), at(L, s * Wd, y1 - 0.22), at(-L, s * Wd, y1 - 0.22), trimC, side, pw)
+      if (gable) for (const e of [1, -1]) { const q = [e * L, s * Wd, y1], z = [e * L, 0, yr]; quad(W, at(q[0], q[1], q[2]), at(z[0], z[1], z[2]), at(z[0], z[1], z[2] - 0.22), at(q[0], q[1], q[2] - 0.22), trimC, [ax[0] * e, 0, -ax[1] * e], pw) }
+    }
     if (gable) { const g = 20 + Math.min(15.9, yr - y1) / 16; tri(W, at(s * hl, Wd, y1), at(s * hl, -Wd, y1), at(s * hl, 0, yr), endC, end, [g, Wd, 0, seed], [g, -Wd, 0, seed], [g, 0, yr - y1, seed]) } // (materials.js: shingles, an attic window)
     else tri(W, at(s * L, Wd, y1), at(s * L, -Wd, y1), at(s * r, 0, yr), rc, [end[0], 1, end[2]], pw)
   }

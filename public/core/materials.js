@@ -337,6 +337,10 @@ export function buildingMaterial(far = false) {
         ${LIGHT}
         ${OCCLUDE}
         ${DISSOLVE}
+        // trim colours of the wall patterns 21 and 22 (aFac.y; tile-worker.js TRIM, linear here), and the dark glass of homes
+        const vec3 TRIM[8] = vec3[8](vec3(0.8913, 0.8751, 0.8277), vec3(0.8122, 0.7667, 0.6388), vec3(0.0385, 0.0430, 0.0478), vec3(0.1011, 0.0582, 0.0303), vec3(0.0242, 0.0446, 0.0329), vec3(0.1975, 0.0242, 0.0189), vec3(0.5860, 0.6121, 0.6388), vec3(0.2590, 0.2801, 0.3021));
+        vec3 trimC(float i) { return TRIM[int(clamp(i, 0.0, 7.0))]; }
+        vec3 homeGlass(float fy) { return srgb(vec3(0.24, 0.30, 0.36)) * (0.8 + 0.35 * fy); }
         float thin(float width, float fw) { return smoothstep(0.6, 1.3, width / fw); }
         float box(vec2 f, vec2 lo, vec2 hi, vec2 fw) { vec2 a = smoothstep(lo - fw, lo + fw, f) * (1.0 - smoothstep(hi - fw, hi + fw, f)); return a.x * a.y; }
         // Lit windows over a pixel's footprint g +- fw / 2 (in window cells), box-filtered (as #53): the lit pane area
@@ -369,14 +373,17 @@ export function buildingMaterial(far = false) {
         if (style == 20.0) q = 0.0;
         float front = step(31.5, q), fq = mod(q, 32.0), storey = fq > 0.5 ? 2.4 + fq * 0.15 : 3.2;
         float seed = fract(vWin.w), use = mod(floor(vWin.w), 4.0), z = vWin.z, u = vWin.y; // use: 1 homes, 2 work (tile-worker.js)
-        float doorW = step(3.5, vWin.w); // the house's front wall: its door in the bay whose index is a multiple of 64
+        float doorW = step(3.5, mod(vWin.w, 8.0)), H = floor(vWin.w / 8.0) * 0.5; // (H: the height of a heritage or retail wall) // the house's front wall: its door in the bay whose index is a multiple of 64
         // this wall's own look where the 2022 LiDAR saw it (tile-worker.js aFac, tools/lidar_walls.py): its glazing (1 punched,
         // 2 vertical strips, 3 ribbon bands, 4 curtain wall, 5 blank) and spandrel tone (1 dark, 2 light), the window bay
         // and how much of a bay and a storey the window fills, the storey height. On the generic office and commercial
         // patterns (punched, curtain, bands) the glazing and tone too, on the rest (homes, glass condos) the grid only
-        float lk = mod(vFac.x, 8.0), tone = mod(floor(vFac.x / 8.0), 4.0);
-        float bay = vFac.y > 0.5 ? 0.5 + 0.05 * vFac.y : 0.0, wxf = mod(vFac.z, 16.0) / 15.0, wyf = floor(vFac.z / 16.0) / 15.0;
-        if (vFac.w > 0.5) storey = 2.0 + 0.025 * vFac.w;
+        // walls of an archetype (bit 7 of x: tile-worker.js archOf) carry [128 + archetype, trim colour, 0, 0] instead
+        bool ar = vFac.x >= 128.0;
+        float lk = ar ? 0.0 : mod(vFac.x, 8.0), tone = ar ? 0.0 : mod(floor(vFac.x / 8.0), 4.0);
+        float bay = !ar && vFac.y > 0.5 ? 0.5 + 0.05 * vFac.y : 0.0, wxf = ar ? 0.0 : mod(vFac.z, 16.0) / 15.0, wyf = ar ? 0.0 : floor(vFac.z / 16.0) / 15.0;
+        float arch = ar ? vFac.x - 128.0 : 0.0;
+        if (!ar && vFac.w > 0.5) storey = 2.0 + 0.025 * vFac.w;
         vec3 base = diffuseColor.rgb;
         if (lk > 0.5 && (style == 1.0 || style == 2.0 || style == 10.0)) {
           style = lk == 2.0 ? 16.0 : lk == 3.0 ? 10.0 : lk == 4.0 ? 2.0 : lk == 5.0 ? 17.0 : 1.0;
@@ -414,7 +421,7 @@ export function buildingMaterial(far = false) {
         }
         vec3 roofGlow = vec3(0.0);
         float doorM = 0.0;
-        if (style > 12.5) { // rooftops (tile-worker.js rooftop): 13 pool water, 14 solar panels, 15 a planted roof
+        if (style > 12.5 && style < 15.5) { // rooftops (tile-worker.js rooftop): 13 pool water, 14 solar panels, 15 a planted roof
           vec2 p = vWp.xz;
           if (style == 13.0) {
             diffuseColor.rgb = srgb(vec3(0.36, 0.74, 0.84)) * (0.85 + 0.3 * noise(p * 1.7));
@@ -485,9 +492,83 @@ export function buildingMaterial(far = false) {
             float lap = z / 0.24, lfw = max(fwidth(lap), 1e-4);
             col = base * (1.0 - 0.09 * clamp(1.6 - 2.5 * lfw, 0.0, 1.0) * (1.0 - smoothstep(0.0, 0.25 + lfw, fract(lap))));
             float trim = box(f, vec2(0.25, 0.26), vec2(0.75, 0.84), fw), w = box(f, vec2(0.3, 0.32), vec2(0.7, 0.78), fw);
-            vec3 glass = srgb(vec3(0.36, 0.46, 0.56)) * (0.8 + 0.35 * f.y);
+            vec3 glass = homeGlass(f.y);
             col = mix(mix(col, srgb(vec3(0.95, 0.94, 0.9)), trim * detail), glass, w * detail);
             col = mix(col, mix(base, srgb(vec3(0.95, 0.94, 0.9)), 0.12), 1.0 - detail);
+          } else if (style == 21.0) { // HOME: a window with a trim frame on a foundation band, lap siding or stucco; the door wall's picture window
+            float hs = fq > 0.5 ? storey : 2.75;
+            vec2 g = vec2(u / 3.4, zf / hs), fw = max(fwidth(g), vec2(1e-4)), f = fract(g);
+            float detail = clamp(1.6 - 2.5 * max(fw.x, fw.y), 0.0, 1.0), fz = fwidth(z);
+            vec3 tc = trimC(vFac.y);
+            col = base;
+            if (arch < 1.5) { float lap = z / 0.2, lfw = max(fwidth(lap), 1e-4); col = base * (1.0 - 0.09 * clamp(1.6 - 2.5 * lfw, 0.0, 1.0) * (1.0 - smoothstep(0.0, 0.25 + lfw, fract(lap)))); }
+            bool pic = doorW > 0.5 && g.y < 1.0 && abs(mod(floor(g.x) - 0.5, 64.0) - 0.5) < 0.1;
+            float wx = pic ? 1.0 / 3.4 : 0.575 / 3.4;
+            vec2 lo = vec2(0.5 - wx, 0.9 / hs), hi = vec2(0.5 + wx, (pic ? 2.4 : 2.2) / hs), pad = vec2(0.09 / 3.4, 0.09 / hs);
+            float tf = box(f, lo - pad, hi + pad, fw), w = box(f, lo, hi, fw);
+            col = mix(col, tc, tf * detail);
+            col = mix(col, homeGlass(f.y), w * detail);
+            col = mix(col, tc, band(fract(g.y + 0.022), 0.0, 0.044, fw.y) * step(0.5, g.y + 0.022) * step(arch, 1.5) * 0.9 * detail); // (the storey line's belt)
+            col = mix(srgb(vec3(0.62, 0.61, 0.58)), col, smoothstep(0.45 - fz, 0.45 + fz, z)); // the foundation
+            avg = mix(base, homeGlass(0.5), (hi.x - lo.x) * (hi.y - lo.y) * 0.8);
+            col = mix(avg, col, detail);
+          } else if (style == 22.0) { // FLATS: a window bay and a balcony bay by turns, a floor band, a railing (pickets in the walk-ups, panels in the mid-rises), the entrance below
+            float cs = 3.6;
+            vec2 g = vec2(u / cs, zf / storey), fw = max(fwidth(g), vec2(1e-4)), f = fract(g);
+            float detail = clamp(1.6 - 2.5 * max(fw.x, fw.y), 0.0, 1.0), fz = fwidth(z), zz = f.y * storey, bi = mod(floor(g.x), 2.0);
+            vec3 tc = trimC(vFac.y), wallc = base;
+            if (arch > 7.5 && mod(floor(g.x), 3.0) < 0.5) wallc = mix(base, tc, 0.45); // (a third of the bays: the accent piers)
+            float ga = bi > 0.5 ? box(f, vec2(0.5 - 0.95 / cs, 0.1 / storey), vec2(0.5 + 0.95 / cs, 2.1 / storey), fw) : box(f, vec2(0.5 - 0.75 / cs, 0.9 / storey), vec2(0.5 + 0.75 / cs, 2.3 / storey), fw);
+            col = mix(wallc, homeGlass(f.y), ga * detail);
+            if (bi > 0.5) {
+              float pf = fwidth(u / 0.12), rd = clamp(1.6 - 2.5 * pf, 0.0, 1.0), rail = band(zz, 0.25, 1.05, fz);
+              float pick = arch < 7.5 ? max(band(zz, 0.95, 1.05, fz), mix(0.35, band(fract(u / 0.12), 0.0, 0.3, pf), rd)) : 1.0;
+              col = mix(col, arch < 7.5 ? trimC(6.0) : mix(base, tc, 0.45) * 0.92, rail * pick * detail);
+              col *= mix(1.0, 0.78, band(zz, storey - 0.35, storey + 1.0, fz) * detail); // the shade under the balcony above
+            }
+            if (arch < 7.5) col = mix(col, tc, band(zz, -1.0, 0.25, fz) * step(0.5, g.y) * detail); // the floor band
+            col = mix(col, srgb(vec3(0.55, 0.55, 0.53)), 1.0 - smoothstep(0.6 - fz, 0.6 + fz, z)); // concrete at the foot
+            if (doorW > 0.5 && z < 2.4) { // the entrance: a double glass door in a dark frame, in the middle bay (the canopy is geometry)
+              float dc = mod(floor(u / cs) + 0.5, 64.0) - 0.5, fu = fract(u / cs) * cs - 0.5 * cs;
+              vec2 dfw = vec2(fwidth(u), fz);
+              float fr = box(vec2(fu, z), vec2(-1.0, -1.0), vec2(1.0, 2.3), dfw) * step(abs(dc), 0.1), gl = box(vec2(fu, z), vec2(-0.9, 0.1), vec2(0.9, 2.2), dfw) * (1.0 - band(fu, -0.03, 0.03, dfw.x));
+              col = mix(col, mix(srgb(vec3(0.12, 0.13, 0.14)), homeGlass(0.7), gl), fr);
+              doorM = fr;
+            }
+            avg = mix(wallc, homeGlass(0.5), 0.3);
+            col = mix(avg, col, detail);
+          } else if (style == 23.0) { // HERITAGE: narrow tall windows with a dark lintel and a pale sill, courses, a cornice under the top
+            float Bh = bay > 0.0 ? clamp(bay, 1.0, 3.2) : 1.7, wx = 0.475 / Bh;
+            vec2 g = vec2(u / Bh, zf / storey), fw = max(fwidth(g), vec2(1e-4)), f = fract(g);
+            float detail = clamp(1.6 - 2.5 * max(fw.x, fw.y), 0.0, 1.0), fz = fwidth(z);
+            float zc = gf + floor(g.y) * storey, shown = step(zc + 0.77 * storey + 0.22, H - 0.6) * step(0.0, zf); // (a window that would meet the cornice is left out whole)
+            float cr = z / 0.3, cfw = max(fwidth(cr), 1e-4);
+            col = base * (1.0 - 0.05 * detail * (1.0 - smoothstep(0.0, 0.2 + cfw, fract(cr))));
+            float w = box(f, vec2(0.5 - wx, 0.15), vec2(0.5 + wx, 0.77), fw);
+            float lint = box(f, vec2(0.5 - wx - 0.05 / Bh, 0.77), vec2(0.5 + wx + 0.05 / Bh, 0.77 + 0.22 / storey), fw);
+            float sill = box(f, vec2(0.5 - wx - 0.05 / Bh, 0.15 - 0.1 / storey), vec2(0.5 + wx + 0.05 / Bh, 0.15), fw);
+            col = mix(col, base * 0.72, lint * shown * detail);
+            col = mix(col, srgb(vec3(0.82, 0.8, 0.74)), sill * shown * detail);
+            col = mix(col, homeGlass(f.y), w * shown * detail);
+            vec3 corn = seed < 0.5 ? srgb(vec3(0.84, 0.81, 0.74)) : min(base * 1.15, vec3(1.0));
+            float ct = H - z;
+            col = mix(col, corn, band(ct, -1.0, 0.9, fz) * step(1.0, H) * detail + (front > 0.5 ? band(z, gf, gf + 0.3, fz) * detail : 0.0));
+            col = mix(col, base * 0.55, band(ct, 0.9, 1.02, fz) * step(1.0, H) * detail);
+            avg = mix(base, homeGlass(0.5), 0.2);
+            col = mix(avg, col, detail);
+          } else if (style == 24.0) { // RETAIL: glass bays to 2.7 m, a sign fascia of tenant boards to 3.9 m, the wall, a parapet cap
+            vec2 sg = vec2(u / 2.6, z / 2.7), sfw = max(fwidth(sg), vec2(1e-4)), sf = fract(sg);
+            float sdet = clamp(1.6 - 2.5 * max(sfw.x, sfw.y), 0.0, 1.0), fz = fwidth(z);
+            vec3 shop = mix(srgb(vec3(0.3, 0.38, 0.44)), glassC * 0.9, box(sf, vec2(0.07, 0.11), vec2(0.93, 0.93), sfw));
+            col = mix(mix(base * 0.9, srgb(vec3(0.3, 0.38, 0.44)), 0.4), shop, sdet * band(z, -1.0, 2.7, fz));
+            float bw = 6.0 + 3.0 * hash(vec2(seed, 5.0)), bi = floor(u / bw), hb = hash(vec2(bi, seed * 41.0));
+            vec3 bc = srgb(hb < 0.17 ? vec3(0.18, 0.35, 0.24) : hb < 0.34 ? vec3(0.48, 0.17, 0.17) : hb < 0.5 ? vec3(0.12, 0.18, 0.29) : hb < 0.67 ? vec3(0.17, 0.17, 0.17) : hb < 0.84 ? vec3(0.69, 0.25, 0.18) : vec3(0.23, 0.42, 0.48));
+            vec2 bfw = vec2(fwidth(u), fz), bd = clamp(vec2(1.6) - 2.5 * bfw, 0.0, 1.0);
+            float fa = band(z, 2.7, 3.9, fz), inner = box(vec2(fract(u / bw) * bw, z), vec2(0.08, 2.78), vec2(bw - 0.08, 3.82), bfw);
+            col = mix(col, mix(srgb(vec3(0.9, 0.9, 0.87)), bc, inner * min(bd.x, bd.y)), fa);
+            col = mix(col, min(base * 1.12, vec3(1.0)), band(H - z, -1.0, 0.2, fz) * step(1.0, H));
+            avg = mix(base, glassC * 0.9, 0.3 * (1.0 - smoothstep(2.7, 3.2, z)));
+            col = mix(avg, col, min(sdet, 1.0));
           } else if (style == 8.0) { // Vancouver Special: brick ground storey, stucco above with wide windows
             float up = step(2.7, z);
             vec2 g = vec2(u / 4.2, (z - 2.7 * up) / mix(2.7, 2.8, up)), fw = max(fwidth(g), vec2(1e-4)), f = fract(g);
@@ -495,7 +576,7 @@ export function buildingMaterial(far = false) {
             vec3 brick = srgb(vec3(0.62, 0.38, 0.30)) * (0.92 + 0.12 * hash(vec2(seed, 1.0)));
             vec3 wallc = mix(brick, base, up);
             float w = up > 0.5 ? box(f, vec2(0.14, 0.3), vec2(0.86, 0.8), fw) : box(f, vec2(0.32, 0.4), vec2(0.68, 0.78), fw);
-            vec3 glass = srgb(vec3(0.38, 0.48, 0.58)) * (0.8 + 0.35 * f.y);
+            vec3 glass = homeGlass(f.y);
             col = mix(mix(wallc, glass, 0.2), mix(wallc, glass, w * 0.9), detail);
             if (doorW > 0.5 && up > 0.5 && mod(floor(u / 4.2) + 1.0, 64.0) < 2.5) { // the front balcony over the door: aluminium railing
               float rz = z - 2.75, pf = fwidth(u / 0.15), rdet = clamp(1.6 - 2.5 * pf, 0.0, 1.0), fz = fwidth(rz);
@@ -508,7 +589,7 @@ export function buildingMaterial(far = false) {
             float aw = min(0.45, rise * 0.17), a0 = rise * 0.3, a1 = min(rise * 0.3 + 1.1, rise - 0.9);
             vec2 afw = vec2(fwidth(u), fwidth(z));
             float att = box(vec2(u, z), vec2(-aw, a0), vec2(aw, a1), afw), trim = box(vec2(u, z), vec2(-aw - 0.1, a0 - 0.1), vec2(aw + 0.1, a1 + 0.1), afw);
-            if (rise > 1.6) col = mix(mix(col, srgb(vec3(0.95, 0.94, 0.9)), trim), srgb(vec3(0.36, 0.46, 0.56)) * (0.85 + 0.3 * (z - a0) / max(a1 - a0, 0.1)), att);
+            if (rise > 1.6) col = mix(mix(col, srgb(vec3(0.95, 0.94, 0.9)), trim), srgb(vec3(0.24, 0.30, 0.36)) * (0.85 + 0.3 * (z - a0) / max(a1 - a0, 0.1)), att);
             z = 30.0; // (up at the eaves: no contact shadow)
           } else if (style == 16.0) { // vertical strips: glass from floor to floor between piers, darker over the slabs
             vec2 g = vec2(u / bayP, zf / storey), fw = max(fwidth(g), vec2(1e-4)), f = fract(g);
@@ -531,8 +612,8 @@ export function buildingMaterial(far = false) {
             avg = mix(base, glass, (whi.x - wlo.x) * (whi.y - wlo.y) * 0.9);
             col = mix(avg, pat, detail);
           }
-          if (doorW > 0.5 && z < 2.4) { // the front door: a painted panel in a white frame, a small window high in it
-            float db = style == 5.0 ? 3.4 : style == 8.0 ? 4.2 : bayP, dc = floor(u / db), fu = fract(u / db) * db - 0.5 * db;
+          if (doorW > 0.5 && z < 2.4 && style < 21.5) { // the front door: a painted panel in a white frame, a small window high in it
+            float db = style == 5.0 || style == 21.0 ? 3.4 : style == 8.0 ? 4.2 : bayP, dc = floor(u / db), fu = fract(u / db) * db - 0.5 * db;
             vec2 dfw = vec2(fwidth(u), fwidth(z));
             float frame = box(vec2(fu, z), vec2(-0.6, -1.0), vec2(0.6, 2.25), dfw) * step(abs(mod(dc + 0.5, 64.0) - 0.5), 0.1);
             float leaf = box(vec2(fu, z), vec2(-0.47, -1.0), vec2(0.47, 2.12), dfw), lite = box(vec2(fu, z), vec2(-0.3, 1.45), vec2(0.3, 1.95), dfw);
@@ -572,6 +653,10 @@ export function buildingMaterial(far = false) {
           else if (style == 10.0) { cellSz = vec2(bay > 0.0 ? clamp(bay, 1.0, 3.0) : 1.5, storey); lo = vec2(0.06, wyf > 0.0 ? 0.9 - wyf : 0.38); hi = vec2(1.0, 0.9); }
           else if (style == 5.0) { cellSz = vec2(3.4, storey); lo = vec2(0.3, 0.32); hi = vec2(0.7, 0.78); }
           else if (style == 8.0) { lo = vec2(0.2, 0.32); hi = vec2(0.8, 0.78); }
+          else if (style == 21.0) { float hs = fq > 0.5 ? storey : 2.75; cellSz = vec2(3.4, hs); lo = vec2(0.5 - 0.575 / 3.4, 0.9 / hs); hi = vec2(0.5 + 0.575 / 3.4, 2.2 / hs); }
+          else if (style == 22.0) { cellSz = vec2(3.6, storey); lo = vec2(0.5 - 0.75 / 3.6, 1.1 / storey); hi = vec2(0.5 + 0.75 / 3.6, 2.1 / storey); }
+          else if (style == 23.0) { float Bh = bay > 0.0 ? clamp(bay, 1.0, 3.2) : 1.7; cellSz = vec2(Bh, storey); lo = vec2(0.5 - 0.475 / Bh, 0.15); hi = vec2(0.5 + 0.475 / Bh, 0.77); }
+          else if (style == 24.0) { cellSz = vec2(2.6, 2.7); lo = vec2(0.07, 0.11); hi = vec2(0.93, 0.93); }
           vec2 g = vec2(u, shopF ? z : (style == 5.0 || style == 8.0 ? z : zf)) / cellSz, fw = max(fwidth(g), vec2(1e-4));
           float bh = hash(vec2(seed, 3.1)), m = max(fw.x, fw.y), far = smoothstep(0.75, 1.0, m); // (panes are exact up to a cell a pixel)
           #ifdef FAR
@@ -584,7 +669,7 @@ export function buildingMaterial(far = false) {
             vec3 avg = use > 1.5 && !shopF ? vec3(0.8, 0.82, 0.86) : vec3(0.97, 0.74, 0.46);
             lit = mix(lit, avg * share * 0.6 * (hi.x - lo.x) * bandCover(g.y - fw.y * 0.5, g.y + fw.y * 0.5, lo.y, hi.y), far);
           }
-          glow = lit * night * 0.62 * step(1.0, z) * (1.0 - doorM);
+          glow = lit * night * 0.62 * step(1.0, z) * (1.0 - doorM) * (style == 24.0 ? step(z, 2.7) : 1.0);
         }
         // the lamps and the shop windows light the foot of the walls by them
         vec3 poolE = night > 0.01 && z < 6.0 ? diffuseColor.rgb * poolLight(vWp - vWn * 0.5) * (1.0 - smoothstep(0.0, 6.0, z)) * (1.0 - vUp) : vec3(0.0);
@@ -594,7 +679,7 @@ export function buildingMaterial(far = false) {
       // the glow's strength rides in alpha, so the post pass can keep lit windows warm under a night grade
       .replace('#include <opaque_fragment>', '#include <opaque_fragment>\ngl_FragColor.a = 1.0 - max(min(1.0, dot(glow - poolE, vec3(0.5))), lightShare(poolE, gl_FragColor.rgb));')
   }
-  m.customProgramCacheKey = () => (far ? 'building14f' : 'building14')
+  m.customProgramCacheKey = () => (far ? 'building15f' : 'building15')
   return m
 }
 
