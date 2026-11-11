@@ -85,6 +85,19 @@ def smooth_top(z, grade, step):
     return z
 
 
+def level(T, C, g, near=25):
+    """T no steeper than g between any two of a run's points by the straight distance between their walk points C (not by
+    the length along the line: inside a bend the walk is shorter than the line, a path at the bend's centre sees every top
+    round it within a metre); the 25 points either side, 4 passes"""
+    T = T.copy(); n = len(T)
+    for _ in range(4):
+        for i in range(n):
+            j = np.arange(max(0, i - near), min(n, i + near + 1)); lim = g * np.maximum(np.hypot(*(C[j] - C[i]).T), 0.25)
+            lo, hi = (T[j] - lim).max(), (T[j] + lim).min()
+            T[i] = np.clip(T[i], lo, hi) if lo <= hi else (lo + hi) / 2
+    return T
+
+
 BAND = 0.95  # metres the walk's top may sit off the LiDAR ground on it (tools/geom_rules.py SW_LIDAR, less a margin)
 CLEAR = 0.3  # metres between the edge of a path along a wall and its line
 WALK_GRADE = 0.1  # the steepest a walk's top climbs along it where the ground lets it (tools/geom_rules.py SW_STEP: 0.2)
@@ -158,7 +171,8 @@ def fit(P, n, z, w, pw, plines, ptree):
         T = smooth_top(T, GRADE, STEP)  # (no bump a walker would feel: then moved into the band where it must)
         for _ in range(4): T = T - env(T - hi); T = T + env(lo - T)
         hi_ = np.maximum(lo, hi)
-        for _ in range(20): T = grade(np.clip(T, lo, hi_), WALK_GRADE * STEP)  # (into the band, and no steeper than a walk)
+        C = P + n * np.minimum(W, 4)[:, None]
+        for _ in range(20): T = level(grade(np.clip(T, lo, hi_), WALK_GRADE * STEP), C, WALK_GRADE)  # (into the band, and no steeper than a walk)
         T = np.clip(T, lo, hi_)
         W = ext
     W = np.maximum(uniform_filter1d(minimum_filter1d(np.minimum(w - ed, W), 5, mode='nearest'), 5, mode='nearest'), 1.0)
@@ -403,6 +417,7 @@ def bake():
                         kit=np.array(K, np.float32).reshape(-1, 4))
     km = sum(np.hypot(*np.diff(r[1], axis=0).T).sum() for r in R) / 1000
     print({k: sum(1 for q in K if q[3] == v) for k, v in KIT.items()}, 'beach things')
+    print(sum(int((np.abs(np.diff(r[2])) > 0.25).sum()) for r in R), 'top steps over 0.25 m between neighbours')  # (#579: 31 on the first walls)
     print(len(R), 'runs', f'{km:.1f} km', f'{(np.concatenate([r[4] for r in R])).mean() * 100:.0f}% railed', '->', OUT, f'{time.time() - t0:.0f}s', flush=True)
 
 
@@ -437,7 +452,10 @@ def walk_grounds(path=None):
 def ends(P):
     """per point of a run: 0 at its ends, up to 1 B_END metres along from them (the top blends into the ground there)"""
     s = np.r_[0, np.cumsum(np.hypot(*np.diff(P, axis=0).T))]
-    return np.clip(np.minimum(s, s[-1] - s) / B_END, 0, 1)
+    # (by straight distance to an end for the points within 3 B_END of it along the line: a hooked end or a bend is no
+    # jump in the weight between two points a few metres apart)
+    a = np.where(s < 3 * B_END, np.hypot(*(P - P[0]).T), np.inf); b = np.where(s[-1] - s < 3 * B_END, np.hypot(*(P - P[-1]).T), np.inf)
+    return np.clip(np.minimum(a, b) / B_END, 0, 1)
 
 
 def vnormals(P):
