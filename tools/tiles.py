@@ -326,7 +326,32 @@ def build(ij):
     fp = np.array(fp, bool)
 
     # ---- lines
+    OPEN.clear()
     lines = road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0)
+    # the next cells' pieces from this cell's ways: their decks over this cell (a deck ending in the next cell, the
+    # street under it here; a building here it passes through) and the pieces meeting this cell's at its seams
+    nbr = [L for a in (-1, 0, 1) for b in (-1, 0, 1) if a or b for L in road_pieces(feat.get('lines', []), dsm, dtm, X0 + a * L1, Y0 + b * L1)]
+    over = [L for L in nbr if L['z'] and any(X0 - 30 <= x < X0 + L1 + 30 and Y0 - 30 <= y < Y0 + L1 + 30 for x, y in L['pts'])]
+    ground8, fine = road_ground(dtm, road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0, own=False), X0, Y0, lines + over)  # 8 m, fitted to the streets; 2 m offsets over it
+    q8, qf = np.round(ground8 * 10) / 10, np.round(fine * 100) / 100  # (as drawn: decimetres, the offsets centimetres)
+    g8 = lambda x, y: bilinear(q8, x, y, X0, Y0, 8) + bilinear(qf, x, y, X0, Y0, FINE)
+    # a tunnel's open stretches reach in as far as the ground AS DRAWN HERE isn't 0.3 m over its roof: the profiles' own
+    # test (tunnel_profiles) is on the LiDAR's 8 m nodes, before the ground is fitted to the streets and gets its 2 m
+    # offsets; by a portal the street outside pulls the drawn ground down, metres under that (#599: the Cassiar tunnel's
+    # north mouths, 3 m lower 4 m in: covered as solved, the drawn ground in the tube to 8 m in)
+    for wid, c, _, t in feat.get('lines', []):
+        if wid not in TUNNELS: continue
+        P, s, z, op = TUNNELS[wid]
+        kd = line_kind(t); here = (P[:, 0] >= X0) & (P[:, 0] < X0 + L1) & (P[:, 1] >= Y0) & (P[:, 1] < Y0 + L1)
+        wet = SEA_M[((SEA_Y1 - P[:, 1]) / SEA_C).astype(int).clip(0, SEA_M.shape[0] - 1), ((P[:, 0] - SEA_X0) / SEA_C).astype(int).clip(0, SEA_M.shape[1] - 1)]
+        under = here & ~wet & (tunnel_ground_at(P, road_shape(kd, t)[1], g8) < z + tube_h(kd) + SLAB + 0.3)
+        new = grow_open(op, under)  # on from each open point into the tube as far as the drawn ground is in it (never under the water: its bed is drawn there)
+        if (new != op).any(): OPEN[wid] = new
+    if OPEN:  # (the pieces' open flags again: the ground does not read them)
+        print('tunnels open as drawn', (X0 // L1, Y0 // L1), {w: (int(TUNNELS[w][3].sum()), int(o.sum())) for w, o in OPEN.items()}, flush=True)
+        lines = road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0)
+        nbr = [L for a in (-1, 0, 1) for b in (-1, 0, 1) if a or b for L in road_pieces(feat.get('lines', []), dsm, dtm, X0 + a * L1, Y0 + b * L1)]
+        over = [L for L in nbr if L['z'] and any(X0 - 30 <= x < X0 + L1 + 30 and Y0 - 30 <= y < Y0 + L1 + 30 for x, y in L['pts'])]
     # roads on roofs: the roof is their deck (its LiDAR height has the parked cars and lamps on it), so down to the deck
     rd = [L for L in lines if L.get('roof') and L['z']]
     if rd:
@@ -363,11 +388,22 @@ def build(ij):
     cuts, lids = [], []
     for wid, c, _, t in feat.get('lines', []):
         if wid not in TUNNELS: continue
-        P, s, z, op = TUNNELS[wid]
-        lids += [(x, y, h + tube_h(line_kind(t)) + SLAB) for (x, y), h in zip(P[op], z[op])]
+        P, s, z, op = TUNNELS[wid]; op = OPEN.get(wid, op)
+        kd = line_kind(t); wd = road_shape(kd, t)[1]; top = tube_h(kd) + SLAB
+        lids += [(x, y, h + top) for (x, y), h in zip(P[op], z[op])]
         k = np.nonzero(op[:-1] & op[1:])[0]
-        if len(k): cuts.append(shapely.MultiLineString([P[r[0]:r[-1] + 2] for r in np.split(k, np.nonzero(np.diff(k) > 1)[0] + 1)])
-                                .buffer(road_shape(line_kind(t), t)[1] / 2 + 0.6 + SLAB, cap_style='flat', join_style='mitre'))
+        parts = [P[r[0]:r[-1] + 2] for r in np.split(k, np.nonzero(np.diff(k) > 1)[0] + 1)] if len(k) else []
+        # and on from an open point toward a covered one, as far as the ground is still in the tube (a portal in a
+        # steep face has one open point, its own: uncut, the ground rose through the mouth and a tree stood in it)
+        f = np.arange(1, 9) / 8
+        for a in np.nonzero(op)[0]:
+            for b in (a - 1, a + 1):
+                if not 0 <= b < len(P) or op[b]: continue
+                Q = P[a] + (P[b] - P[a]) * f[:, None]
+                under = tunnel_ground_at(np.vstack([P[a], Q]), wd, g8)[1:] < z[a] + (z[b] - z[a]) * f + top + 0.3
+                n = len(f) if under.all() else int(np.argmin(under))  # (the first clear one)
+                if n: parts.append(np.vstack([P[a], Q[n - 1]]))
+        if parts: cuts.append(shapely.MultiLineString(parts).buffer(wd / 2 + 0.6 + SLAB, cap_style='flat', join_style='mitre'))
     holes = unary_union(cuts) if cuts else None
     if holes is not None:  # a building over a portal's box (a tunnel's control building) stands on its roof
         shapely.prepare(holes); L_ = np.array(lids)
@@ -433,15 +469,8 @@ def build(ij):
 
     # ---- write the 16 detail tiles and the medium tile
     n = 0
-    # the next cells' pieces from this cell's ways: their decks over this cell (a deck ending in the next cell, the
-    # street under it here; a building here it passes through) and the pieces meeting this cell's at its seams
-    nbr = [L for a in (-1, 0, 1) for b in (-1, 0, 1) if a or b for L in road_pieces(feat.get('lines', []), dsm, dtm, X0 + a * L1, Y0 + b * L1)]
-    over = [L for L in nbr if L['z'] and any(X0 - 30 <= x < X0 + L1 + 30 and Y0 - 30 <= y < Y0 + L1 + 30 for x, y in L['pts'])]
-    ground8, fine = road_ground(dtm, road_pieces(feat.get('lines', []), dsm, dtm, X0, Y0, own=False), X0, Y0, lines + over)  # 8 m, fitted to the streets; 2 m offsets over it
     # the geometry rules (tools/geom_rules.py): their fixes on this cell's buildings and road pieces, then what is left
-    q8, qf = np.round(ground8 * 10) / 10, np.round(fine * 100) / 100  # (as drawn: decimetres, the offsets centimetres)
-    g8 = lambda x, y: bilinear(q8, x, y, X0, Y0, 8) + bilinear(qf, x, y, X0, Y0, FINE)
-    hand = wall_hand(g8, X0, Y0)
+    hand = wall_hand(g8, X0, Y0)  # (g8, the ground as drawn, is made above, before the tunnels' mouths are cut on it)
     # the pieces of the next cells that meet this cell's at its seams (a deck ending at the seam, the street going on)
     seam = {n for L in lines for n in (L['a'], L['b'])}
     nxt = [L for L in nbr if L['a'] in seam or L['b'] in seam]
@@ -1651,6 +1680,7 @@ FOOT = {'footway', 'cycleway', 'path', 'pedestrian', 'steps', 'track'}
 DECKS = None
 APPROACH = {}  # at-grade way id -> [(deck end node, touchdown node, new node or None, points, distance along, height, {sample: node})]
 TUNNEL = ('yes', 'culvert')  # underground (a building_passage runs at grade, under the building)
+OPEN = {}  # tunnel way id -> open, on the ground as drawn in the cell being built (build(): where it differs from TUNNELS')
 TUNNELS, PORTALS = {}, set()  # tunnel way id -> (points, along, height, open); nodes where a tunnel comes out
 RETUN = {}  # at-grade way id -> {its end (0, -1): (metres of it from there in the tunnel it goes on from, the ground at that mouth)} (tunnel_mouths)
 MOUTH = 250  # metres from a mapped portal its real mouth is looked for
@@ -2381,6 +2411,23 @@ def tunnel_ground(P, w):
     return drawn_ground(*np.concatenate([P, P + n, P - n]).T).reshape(3, -1).min(0)
 
 
+def grow_open(op, under):
+    new = op.copy()
+    for a in np.flatnonzero(op):
+        for d in (-1, 1):
+            b = a + d
+            while 0 <= b < len(op) and not new[b] and under[b]: new[b] = True; b += d
+    return new
+
+
+def tunnel_ground_at(P, w, ground):
+    """tunnel_ground on a cell's ground as it is drawn (build()'s g8: fitted to the streets, with the 2 m offsets). Its
+    own function: tunnel_ground is part of the deck solve, whose cache (DECK_CACHE) is keyed on its source"""
+    t = np.gradient(P, axis=0) if len(P) > 1 else np.array([[1.0, 0.0]]); t /= np.maximum(np.hypot(t[:, 0], t[:, 1]), 1e-6)[:, None]
+    n = np.stack([-t[:, 1], t[:, 0]], 1) * (w / 2 + 0.6 + SLAB)
+    return np.asarray(ground(*np.concatenate([P, P + n, P - n]).T)).reshape(3, -1).min(0)
+
+
 def tunnel_profiles(ways, water=None, mouths={}):
     """ways {id: (coords, refs, kind, width)}, water: STRtree of OpenStreetMap's water areas near them -> {id: (points every
     4 m, distance along, height, open)}. A tunnel runs from portal to portal (PORTALS: its drawn road on the street's
@@ -2440,7 +2487,7 @@ def tunnel_profiles(ways, water=None, mouths={}):
 
 def tunnel_heights(wid, pts):
     """a tunnel piece's height at each of its points and whether it is open there (or within 6 m of it)"""
-    P, s, z, op = TUNNELS[wid]
+    P, s, z, op = TUNNELS[wid]; op = OPEN.get(wid, op)
     line = LineString(P)
     sp = np.array([line.project(shapely.geometry.Point(p)) for p in pts])
     c = np.concatenate([[0], np.cumsum(op)])
@@ -3104,6 +3151,7 @@ def selftest():
     geoms = [p for ps in part.values() for p in ps]
     assert abs(sum(p.area for p in geoms) - tb.area) < 1e-3 and abs(shapely.union_all(geoms).area - tb.area) < 1e-3, 'overlap or gap'
     assert part['road'][0].contains(Point(tx + 400, ty + 459.5)) and any(p.contains(Point(tx + 400, ty + 520)) for p in part['grass'])
+    assert grow_open(np.array([1, 0, 0, 0, 0], bool), np.array([1, 1, 1, 0, 1], bool)).tolist() == [1, 1, 1, 0, 0], 'open stretch march'
     seg = {}
     for p in geoms:
         for r in [p.exterior, *p.interiors]:
