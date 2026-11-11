@@ -82,16 +82,16 @@ if (o.js) await page.evaluate(o.js)
 if (+o.res) await page.evaluate((r) => { view.res = r }, +o.res)
 if (+o.cpu > 1) await (await ctx.newCDPSession(page)).send('Emulation.setCPUThrottlingRate', { rate: +o.cpu })
 await page.evaluate(({ mode, ms }) => {
-  const P = window.__b; P.dts = []; P.by = {}; P.draws = P.shadows = P.lights = 0; P.on = true
+  const P = window.__b; P.dts = []; P.by = {}; P.draws = P.shadows = P.lights = 0; P.far0 = view.farFaces?.() || 0; P.p0 = city.player ? [city.player.x, city.player.z] : null; P.on = true
   if (mode !== 'map') return
   const v = view, c0 = v.controls.target.clone(), p0 = v.cam.position.clone(), o = c0.clone(); let i = 0
   const f = () => { const a = (i++ / 120) * 2 * Math.PI; o.set(300 * Math.cos(a) - 300, 0, 200 * Math.sin(a)); v.controls.target.copy(c0).add(o); v.cam.position.copy(p0).add(o); city.requestRender(); if (P.on) requestAnimationFrame(f) }
   requestAnimationFrame(f)
 }, { mode, ms: 0 })
 await page.waitForTimeout(+o.secs * 1000)
-const r = await page.evaluate(() => { const P = window.__b; P.on = false; const i = view.renderer.info.render, c = view.renderer.domElement; return { dts: P.dts, by: P.by, draws: P.draws, shadows: P.shadows, lights: P.lights, tris: i.triangles, calls: i.calls, mpx: c.width * c.height / 1e6, res: view.res } })
+const r = await page.evaluate(() => { const P = window.__b; P.on = false; const i = view.renderer.info.render, c = view.renderer.domElement; return { dts: P.dts, by: P.by, draws: P.draws, shadows: P.shadows, lights: P.lights, far: (view.farFaces?.() || 0) - P.far0, moved: P.p0 && city.player ? Math.round(Math.hypot(city.player.x - P.p0[0], city.player.z - P.p0[1])) : 0, tris: i.triangles, calls: i.calls, mpx: c.width * c.height / 1e6, res: view.res } })
 const pct = (a, q) => { const s = [...a].sort((x, y) => x - y); return +(s[Math.min(s.length - 1, Math.floor(q * s.length))] || 0).toFixed(1) }
-const out = { mode, dpr: +o.dpr, tier: o.tier, cpu: +o.cpu, weather: o.weather, hour: +o.hour, mpx: +r.mpx.toFixed(2), res: r.res, p50: pct(r.dts, 0.5), p95: pct(r.dts, 0.95), p99: pct(r.dts, 0.99), over33: r.dts.filter((d) => d > 33).length, frames: r.dts.length, draws: r.draws, tris: r.tris, calls: r.calls, shadowDraws: r.shadows, lightDraws: r.lights } // (shadowDraws, lightDraws: how often the shadow map and the night lights' texture were redrawn in the run: each a late frame on a weak GPU)
+const out = { mode, dpr: +o.dpr, tier: o.tier, cpu: +o.cpu, weather: o.weather, hour: +o.hour, mpx: +r.mpx.toFixed(2), res: r.res, p50: pct(r.dts, 0.5), p95: pct(r.dts, 0.95), p99: pct(r.dts, 0.99), over33: r.dts.filter((d) => d > 33).length, frames: r.dts.length, draws: r.draws, tris: r.tris, calls: r.calls, shadowDraws: r.shadows, lightDraws: r.lights, farFacesPerSec: +(r.far / +o.secs).toFixed(2), movedM: r.moved } // (shadowDraws, lightDraws: how often the shadow map and the night lights' texture were redrawn in the run: each a late frame on a weak GPU)
 // the passes, each one alone as it is and after each --vs variant in turn
 const passes = async (js) => {
   if (js) await page.evaluate(js)

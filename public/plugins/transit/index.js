@@ -307,17 +307,21 @@ export default async function transit(city) {
 
   // ---------- guideway, piers and stations: one instanced box mesh, rebuilt if the ground under it changes ----------
   const nBox = 16000
-  const structs = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial(), nBox)
-  structs.castShadow = structs.receiveShadow = true
-  structs.frustumCulled = false
+  // one instanced mesh per 1 km cell (frustum-culled, and hidden past the scene's fog end in third person): a view
+  // from downtown draws the nearby cells, not all ~117k triangles of the line
+  const CELLK = 1000, boxGeo = new THREE.BoxGeometry(1, 1, 1), boxMat = new THREE.MeshLambertMaterial()
+  const structs = new THREE.Group(), cells = new Map()
   city.scene.add(structs)
   const M = new THREE.Matrix4(), Qn = new THREE.Quaternion(), V = new THREE.Vector3(), S = new THREE.Vector3(), E = new THREE.Euler(), col = new THREE.Color()
   function buildStructures() {
     let k = 0
+    const boxes = new Map()
     const put = (x, y, z, l, h, w, yaw, pitch, hex) => { // box of l x h x w centred at x, y, z
       if (k >= nBox) return
       E.set(0, yaw, pitch, 'YXZ'); Qn.setFromEuler(E)
-      M.compose(V.set(x, y, z), Qn, S.set(l, h, w)); structs.setMatrixAt(k, M); structs.setColorAt(k, col.set(hex)); k++
+      M.compose(V.set(x, y, z), Qn, S.set(l, h, w)); k++
+      const key = Math.floor(x / CELLK) * 4096 + Math.floor(z / CELLK)
+      let a = boxes.get(key); if (!a) boxes.set(key, (a = [])); a.push(M.clone(), hex)
     }
     const sh = rail.data.shapes, A = {}, B = {}
     for (const [si, i0, i1] of man.guide) {
@@ -362,12 +366,23 @@ export default async function transit(city) {
       put(p.x + ox_, y + 5, p.z + oz_, L * 0.55, 0.45, wide + 1.5, wyaw, 0, C.canopy) // canopy roof over the middle
       if (p.y - H(p.x, p.z) > 3) { const g = H(p.x, p.z), h = y - 1.2 - g; put(p.x, g + h / 2, p.z, L * 0.5, h, 5, wyaw, 0, C.pier) } // stair/escalator core
     }
-    structs.count = k
-    structs.instanceMatrix.needsUpdate = true
-    if (structs.instanceColor) structs.instanceColor.needsUpdate = true
+    for (const m of cells.values()) { structs.remove(m); m.dispose() }
+    cells.clear()
+    for (const [key, a] of boxes) {
+      const m = new THREE.InstancedMesh(boxGeo, boxMat, a.length / 2)
+      for (let i = 0; i < a.length; i += 2) { m.setMatrixAt(i / 2, a[i]); m.setColorAt(i / 2, col.set(a[i + 1])) }
+      m.castShadow = m.receiveShadow = true
+      m.computeBoundingSphere()
+      m.userData.c = m.boundingSphere.center.clone(); m.userData.r = m.boundingSphere.radius
+      cells.set(key, m); structs.add(m)
+    }
     city.requestRender()
   }
   buildStructures()
+  const offFog = city.on('frame', () => { // third person: cells past the fog end are not drawn (the map has no fog: all)
+    const P = city.player, far = city.scene.fog?.isFog && P ? city.scene.fog.far + 100 : Infinity
+    for (const m of cells.values()) m.visible = far === Infinity || Math.hypot(m.userData.c.x - P.x, m.userData.c.z - P.z) - m.userData.r < far
+  })
   // the streamed core loads terrain tile by tile: build again once the ground under the guideway may have changed
   let rebuild = 0
   const offTile = city.on('tile:load', () => { clearTimeout(rebuild); rebuild = setTimeout(buildStructures, 400) })
@@ -551,10 +566,10 @@ export default async function transit(city) {
   return {
     dispose() {
       cancelAnimationFrame(raf); raf = 0
-      offTile(); offDecks(); offDrop(); clearTimeout(rebuild); document.removeEventListener('visibilitychange', onVis)
+      offTile(); offFog(); offDecks(); offDrop(); clearTimeout(rebuild); document.removeEventListener('visibilitychange', onVis)
       city.scene.remove(group); city.scene.remove(structs)
       for (const m of Object.values(meshes)) m.geometry.dispose()
-      structs.geometry.dispose(); structs.material.dispose(); mat.dispose()
+      for (const m of cells.values()) m.dispose(); boxGeo.dispose(); boxMat.dispose(); mat.dispose()
       ui.remove(); city.requestRender()
     },
   }

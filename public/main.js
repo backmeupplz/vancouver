@@ -345,7 +345,7 @@ const ink = new THREE.ShaderMaterial({
     #ifdef PERSP
     uniform float cnear, cfar; uniform vec2 fade, inkFade;
     #ifdef SKYFOG
-    uniform sampler2D tSky, tFar; uniform vec3 fogCol, zenCol; uniform float domeK; varying vec3 vRay;
+    uniform sampler2D tSky; uniform samplerCube tFar; uniform vec3 fogCol, zenCol; uniform float domeK; varying vec3 vRay;
     #endif
     float d(vec2 o) { return (cfar - z(o) * (cfar - cnear)) / (cnear * cfar); }
     #else
@@ -365,7 +365,7 @@ const ink = new THREE.ShaderMaterial({
       // fog colour at the horizon up to the zenith, by the height of the view ray (clouds and sun left out)
       // FARVIEW: and the far land (tFar, premultiplied) over that sky, behind everything
       #ifdef FARVIEW
-      vec4 fv = texture2D(tFar, vUv);
+      vec4 fv = textureCube(tFar, normalize(vRay));
       #endif
       if (texture2D(tDepth, uv).x < 1.0) {
         vec3 sky = mix(texture2D(tSky, vec2(0.5, vUv.y)).rgb, mix(fogCol, zenCol, smoothstep(0.0, 0.55, max(normalize(vRay).y, 0.0))), domeK);
@@ -411,15 +411,18 @@ lookUniforms(ink.uniforms)
 const bloom = new Bloom(`uniform sampler2D tColor; uniform vec2 uvs, off; ${GRADE} ${LOOK_GLSL}
   vec3 source(vec2 u) { return exposed(graded(texture2D(tColor, u * uvs + off))); }`, ink.uniforms)
 // ---------- the far view: under a street-level camera the land beyond the fog (the North Shore mountains from a
-// downtown street), drawn small into its own target from the coarse height grid (core/tiles.js makeFar) with the map's
-// picture on it, thinned by distance (premultiplied: its alpha is how much of it the air lets through), and put behind
-// the scene by the ink pass: where the sky shows, and where the fog swaps a far building for what is behind it.
+// downtown street), drawn from the coarse height grid (core/tiles.js makeFar) with the map's picture on it, thinned by
+// distance (premultiplied: its alpha is how much of it the air lets through), and put behind the scene by the ink
+// pass: where the sky shows, and where the fog swaps a far building for what is behind it.
+// It is a cached panorama: a cube map seen from where the camera was (without its rotation: the land is kilometres
+// off, so a camera step of tens of metres moves nothing), looked up in the ink pass by each pixel's world direction.
+// It is redrawn, one face a frame into the spare cube (shown once all six are in), only when the camera has moved
+// over 60 m (15 m up) or the weather's/sun's colours changed; parked, never. 8-bit is enough: the colour is
+// premultiplied and within 0..1.
 // How much shows is the weather's: `air` (the most, right behind the fog) and `reach` (metres to 1/e of that) from its
 // fog's end, not the quality tier's nearer one: a clear day nearly all of it for tens of kilometres, rain a faint
 // outline, fog none. Only from where the scene's own fog ends (`from`): nearer, the scene has the land itself.
-const farRT = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType })
-const farScene = new THREE.Scene(), farCam = new THREE.PerspectiveCamera(), farClear = new THREE.Color()
-ink.uniforms.tFar.value = farRT.texture
+const farScene = new THREE.Scene(), farClear = new THREE.Color()
 farScene.name = 'far'
 const farMat = new THREE.ShaderMaterial({
   uniforms: { map: { value: null }, sunDir: mats.tree.uniforms.sunDir, sunCol: mats.tree.uniforms.sunCol, sky: mats.tree.uniforms.sky, gnd: mats.tree.uniforms.gnd, air: { value: 0.9 }, reach: { value: 36000 }, from: { value: 0 } },
@@ -433,17 +436,37 @@ const farMat = new THREE.ShaderMaterial({
       gl_FragColor = vec4(lit * a, a);
     }`,
 })
-function drawFar(C, w, h) {
+const farCubes = [null, null], farCC = new THREE.CubeCamera(150, 120000, new THREE.WebGLCubeRenderTarget(1))
+const farShown = { i: -1, pos: new THREE.Vector3(), sig: [] }, farJob = { face: 6, pos: new THREE.Vector3(), sig: [] }
+let farSize = 0, farFaces = 0
+const farSig = () => { const u = farMat.uniforms, c3 = (v) => (v.isColor ? [v.r, v.g, v.b] : [v.x, v.y, v.z]); return [...c3(u.sunDir.value), ...c3(u.sunCol.value), ...c3(u.sky.value), ...c3(u.gnd.value), u.air.value, u.reach.value, u.from.value] }
+function farFace(i) {
+  const rt = farCubes[farJob.back], cc = renderer.getClearColor(farClear), ca = renderer.getClearAlpha()
+  farCC.position.copy(farJob.pos); farCC.updateMatrixWorld(true)
+  renderer.setRenderTarget(rt, i); renderer.setClearColor(0, 0); renderer.clear(); renderer.render(farScene, farCC.children[i]); renderer.setClearColor(cc, ca)
+  farFaces++
+}
+function drawFar(C) {
   const F = city?.weather?.atmosphere?.fogFar ?? 24000
-  if (!tiles.far || F < 380) return false
-  if (!tiles.far.parent) { farScene.add(tiles.far); farMat.uniforms.map.value = tiles.far.userData.map; for (const m of tiles.far.children) m.material = farMat }
+  if (!tiles.far || F < 380 || city?.player?.tunnel) return false // (nothing to show: fog, or the lining of a tunnel all round)
+  if (!tiles.far.parent) { farScene.add(tiles.far); farMat.uniforms.map.value = tiles.far.userData.map; for (const m of tiles.far.children) m.material = farMat; farShown.i = -1 }
   farMat.uniforms.air.value = Math.min(0.92, 0.45 + F / 12000); farMat.uniforms.reach.value = 14000 + F; farMat.uniforms.from.value = scene.fog.far
-  const fw = Math.ceil(w / 2), fh = Math.ceil(h / 2)
-  if (farRT.width !== fw || farRT.height !== fh) farRT.setSize(fw, fh)
-  Object.assign(farCam, { fov: C.fov, aspect: C.aspect, near: 150, far: 120000 }); farCam.updateProjectionMatrix()
-  farCam.position.copy(C.position); farCam.quaternion.copy(C.quaternion); farCam.updateMatrixWorld()
-  const cc = renderer.getClearColor(farClear), ca = renderer.getClearAlpha()
-  renderer.setRenderTarget(farRT); renderer.setClearColor(0, 0); renderer.clear(); renderer.render(farScene, farCam); renderer.setClearColor(cc, ca)
+  const size = quality.tier.name === 'low' ? 256 : 512
+  if (size !== farSize) { for (const t of farCubes) t?.dispose(); farCubes[0] = new THREE.WebGLCubeRenderTarget(size); farCubes[1] = new THREE.WebGLCubeRenderTarget(size); farSize = size; farShown.i = -1; farJob.face = 6 }
+  const sig = farSig(), p = C.position
+  if (farJob.face >= 6) { // idle: is the picture shown stale?
+    const jump = farShown.i < 0 || Math.hypot(p.x - farShown.pos.x, p.z - farShown.pos.z) > 1500
+    if (jump || Math.hypot(p.x - farShown.pos.x, p.z - farShown.pos.z) > 60 || Math.abs(p.y - farShown.pos.y) > 15 || sig.some((v, k) => Math.abs(v - farShown.sig[k]) > 0.03 * (1 + Math.abs(v)))) {
+      farJob.face = 0; farJob.pos.copy(p); farJob.sig = sig; farJob.back = farShown.i === 0 ? 1 : 0
+      if (jump) { for (let i = 0; i < 6; i++) farFace(i); farJob.face = 6; farShown.i = farJob.back; farShown.pos.copy(farJob.pos); farShown.sig = sig }
+    }
+  }
+  if (farJob.face < 6) {
+    farFace(farJob.face++)
+    if (farJob.face === 6) { farShown.i = farJob.back; farShown.pos.copy(farJob.pos); farShown.sig = farJob.sig }
+  }
+  if (farShown.i < 0) return false
+  ink.uniforms.tFar.value = farCubes[farShown.i].texture
   return true
 }
 const define = (k, on) => { if (!!ink.defines[k] === on) return; if (on) ink.defines[k] = 1; else delete ink.defines[k]; ink.needsUpdate = true }
@@ -541,7 +564,7 @@ function draw(scale = res) {
     if (zen != null) u.zenCol.value.setHex(zen)
     C.updateMatrixWorld(); u.projInv.value.copy(C.projectionMatrixInverse); u.camWorld.value.copy(C.matrixWorld)
   }
-  define('FARVIEW', skyFog && drawFar(C, w, h))
+  define('FARVIEW', skyFog && drawFar(C))
   if (C.isPerspectiveCamera) {
     const d = v1.copy(own.opts.focus).sub(C.position).dot(C.getWorldDirection(v2)) // metres to the focus
     u.cnear.value = C.near; u.cfar.value = C.far; u.thr.value = Math.min(0.004, Math.max(0.35 / (K * zoom), 0.9) / Math.max(1, d))
@@ -709,7 +732,7 @@ function showQuality() {
 }
 for (const b of document.querySelectorAll('#gfx [data-q]')) b.onclick = () => { quality.set(b.dataset.q); showQuality() }
 city.on('quality', showQuality); showQuality()
-window.view = { cam, controls, setView, zAt, renderer, tiles, trees3d, setAA, quality, get res() { return res }, set res(v) { res = v; pinned = true } } // (res: tools pin the adaptive resolution)
+window.view = { farFaces: () => farFaces, cam, controls, setView, zAt, renderer, tiles, trees3d, setAA, quality, get res() { return res }, set res(v) { res = v; pinned = true } } // (res: tools pin the adaptive resolution)
 
 // ---------- loading screen: until what's on screen has arrived ----------
 await new Promise((ok) => {
