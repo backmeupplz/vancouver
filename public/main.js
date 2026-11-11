@@ -690,15 +690,43 @@ requestAnimationFrame(() => loadingEl.classList.add('done'))
 setTimeout(() => loadingEl.remove(), 800)
 $('#hint').hidden = false
 // #perf: the frame rate (of frames drawn back to back: a still map draws none) and the adaptive resolution when it is
-// down; while tiles stream in, how many of those in view are in, with a bar. Twice a second, never in the way
+// down; while the map streams in (city.loading: tiles fetched, decoded and uploaded, plus what plugins track), "Loading 9/12
+// chunks · 75%" with a bar: shown once busy for 300 ms, hidden 400 ms after it clears, the bar never backwards in an episode
 {
   const el = $('#perf'), fps = el.querySelector('.fps'), n = el.querySelector('.n'), bar = el.querySelector('.bar i')
+  let on = false, since = 0, idle = 0, best = -1, placed = 0
+  // in a game the chip stacks top left under the readout: the first spot down the left edge clear of every other fixed box
+  const place = () => {
+    if (!document.body.classList.contains('dlv-on')) { el.style.top = ''; return }
+    const boxes = [...document.body.children, ...($('#toasts')?.children || [])].filter((e) => {
+      if (e === el || getComputedStyle(e).position !== 'fixed' || !e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false
+      const r = e.getBoundingClientRect(), s = getComputedStyle(e)
+      return r.width > 2 && r.height > 2 && r.width * r.height < innerWidth * innerHeight * 0.5 && (!/rgba\(.*, 0\)|transparent/.test(s.backgroundColor) || parseFloat(s.borderTopWidth) > 0)
+    }).map((e) => e.getBoundingClientRect())
+    el.style.top = ''; const w = el.getBoundingClientRect(), h = w.height
+    let y = 46 // (a game's own readout takes the first 44 px; the phone layouts' too)
+    for (let k = 0; k < 60 && y < innerHeight * 0.6; k++, y += 6) {
+      if (!boxes.some((b) => b.left < w.right && b.right > w.left && b.top < y + h + 4 && b.bottom + 4 > y)) break
+    }
+    el.style.top = `${y}px`
+  }
   el.hidden = false
+  setInterval(() => { fps.textContent = `${Math.round(1000 / frameMs)} fps${res < 1 ? ` · ${Math.round(res * 100)}%` : ''}` }, 500)
   setInterval(() => {
-    const [got, want] = tiles.counts(), busy = got < want || tiles.made.length > 0 || tiles.warming.length > 0
-    fps.textContent = `${Math.round(1000 / frameMs)} fps${res < 1 ? ` · ${Math.round(res * 100)}%` : ''}`
-    el.classList.toggle('busy', busy)
-    if (busy) { n.textContent = `${got}/${want}`; bar.style.width = `${Math.round((100 * got) / Math.max(1, want))}%` }
-  }, 500)
+    const { got, want, busy } = city.loading.state(), now = performance.now(), f = want ? got / want : 1
+    if (busy) {
+      if (idle && best >= 0) best = -1 // (busy again after a 100% shown: a new episode)
+      idle = 0; since ||= now
+      if (f > best) { best = f; n.textContent = `Loading ${got}/${want} chunks · ${Math.round(f * 100)}%`; bar.style.width = `${Math.round(f * 100)}%` }
+      if (!on && now - since > 300) on = true
+    } else {
+      since = 0; idle ||= now
+      if (on && best >= 0) { n.textContent = `Loading ${want}/${want} chunks · 100%`; bar.style.width = '100%' }
+      if (now - idle > 400) { on = false; best = -1 }
+    }
+    el.classList.toggle('busy', on); document.body.classList.toggle('ld-on', on)
+    if (on && now - placed > 400) { placed = now; place() }
+    else if (!on && placed) { placed = 0; el.style.top = '' }
+  }, 100)
 }
 loadPlugins(city)

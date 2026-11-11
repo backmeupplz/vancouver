@@ -292,11 +292,15 @@ export default async function transit(city) {
     for (const [x, y] of [[c.bbox[0], c.bbox[1]], [c.bbox[2], c.bbox[1]], [c.bbox[0], c.bbox[3]], [c.bbox[2], c.bbox[3]]]) { xs.push(o.x + ax * x + bx * y); zs.push(o.z + az * x + bz * y) }
     c.w = [Math.min(...xs), Math.min(...zs), Math.max(...xs), Math.max(...zs)]
   }
+  let nGot = 0, nWant = 0 // chunks fetched / asked for in this burst (city.loading)
   const load = (c) => {
     c.loading = true
+    city.loading?.track('transit', nGot, ++nWant)
+    const fin = () => { city.loading?.track('transit', ++nGot, nWant); if (nGot >= nWant) nGot = nWant = 0 }
     return fetch(new URL(c.file, DATA)).then((r) => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer() })
       .then((b) => { c.data = prepare(decode(b), !c.rail); kick(true) })
       .catch((e) => { console.warn('transit: could not load', c.file, e); setTimeout(() => { c.loading = false }, 30000) })
+      .finally(fin)
   }
   const rail = chunks.find((c) => c.rail)
   await load(rail)

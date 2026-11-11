@@ -82,6 +82,8 @@ Turn it on by adding its path to `public/plugins/index.json`, or try it locally 
 | `city.traffic` | the simulated cars, from the life plugin (see below); `undefined` without it |
 | `city.quality.tier` | graphics quality (`core/quality.js`): `name` `'high'` or `'low'` and its knobs, e.g. `life` and `weather` (the share of agents / particles to draw) and `detail`; `city.on('quality', tier)` fires when it changes (the viewer's About → Graphics, or Auto dropping to low on a slow GPU). Scale your counts by it |
 
+| `city.loading` | the loading chip ("Loading 9/12 chunks · 75%", every mode). `state()` → `{ got, want, busy }`: tiles (fetched, decoded, uploaded: done when drawn) plus what plugins report. `track(key, got, want)`: call as your own streamed work (fetches, builds) progresses; `want` 0 or `got >= want` clears the key (a key not renewed in 20 s lapses). |
+
 `window.city` is the same object, handy from the browser console.
 
 ## Map tiles

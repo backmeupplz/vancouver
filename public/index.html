@@ -51,12 +51,13 @@
   #hint { right: var(--sr); bottom: var(--sb); padding: 7px 11px; color: var(--muted); }
   /* frame rate, and while tiles stream in the background how many of those in view are in (main.js) */
   #perf { left: 50%; bottom: calc(var(--sb) + 40px); transform: translateX(-50%); z-index: 15; padding: 3px 9px; font-size: 11px; color: var(--muted); white-space: nowrap; pointer-events: none; font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 7px; }
-  #perf .bar { width: 46px; height: 3px; border-radius: 2px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
-  #perf .bar i { display: block; height: 100%; background: var(--accent); transition: width .25s; }
+  #perf .ld { color: var(--text); font-size: 12.5px; }
+  #perf .bar { width: 70px; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.14); overflow: hidden; }
+  #perf .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
   #perf:not(.busy) .ld { display: none; }
-  .compact #perf { left: var(--sl); top: calc(var(--st) + 44px); bottom: auto; transform: none; } /* (the bottom is the dock and the pedals) */
-  .compact:not(.fps-on) #perf .fps, .compact:not(.fps-on) #perf:not(.busy), .compact:not(.fps-on) body.dlv-on #perf { display: none } /* phones: only while loading, unless ⋯ → Frame rate */
-  .compact body.dlv-on #perf { top: calc(var(--st) + 52px); }
+  body.dlv-on #perf { left: var(--sl); top: 46px; bottom: auto; transform: none; } /* in a game: top left under the readout, lower where main.js finds the HUD in the way (the keys strip takes the bottom) */
+  .compact body.dlv-on #perf, .compact #perf { left: var(--sl); top: calc(var(--st) + 48px); bottom: auto; transform: none; padding: 2px 8px; line-height: 1.3; gap: 6px; max-width: calc(100% - var(--sl) - var(--sr)); box-sizing: border-box; } /* (the bottom is the dock and the pedals) */
+  .compact:not(.fps-on) #perf .fps, .compact:not(.fps-on) #perf:not(.busy) { display: none } /* phones: only while loading, unless ⋯ → Frame rate */
   /* loading: a centred card with a progress bar, then fades out */
   #loading { position: fixed; inset: 0; display: grid; place-items: center; z-index: 30; background: #0b1016; transition: opacity .5s; }
   #loading.done { opacity: 0; pointer-events: none; }
@@ -190,7 +191,7 @@
 </div>
 <div id="tools" class="panel" hidden></div>
 <a id="osm" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a>
-<div id="perf" class="panel" hidden aria-hidden="true"><span class="fps"></span><span class="ld">Loading <span class="n"></span> tiles</span><span class="ld bar"><i></i></span></div>
+<div id="perf" class="panel" hidden aria-hidden="true"><span class="fps"></span><span class="ld n"></span><span class="ld bar"><i></i></span></div>
 <div id="hint" class="panel" hidden>Drag to pan · scroll to zoom · right-drag to turn</div>
 <div id="loading" role="status" aria-live="polite"><div class="card"><div class="title">Vancouver in code</div><div class="step">Loading…</div><div class="track"><div class="fill"></div></div></div></div>
 <script>

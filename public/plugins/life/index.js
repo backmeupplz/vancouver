@@ -357,6 +357,7 @@ export default function life(city) {
       city.requestRender()
     } else if (m.type === 'debug') debugCb?.(m)
     else if (m.type === 'net') {
+      city.loading?.track('life', 1, 1)
       if (window.lifeDebug) console.log(`life: network ${m.ms.toFixed(0)} ms, ${m.heads.length / 8} signal heads`)
       buildSignals(m.heads, m.ctls)
       names.arm = []
@@ -599,6 +600,7 @@ export default function life(city) {
       const t = tiles.get(k)
       if (!t || !(near(t, simA.x, simA.y, simA.r) || near(t, pedA.vx, pedA.vy, pedA.vr))) { sent.delete(k); drop.push(k) }
     }
+    if (add.length) city.loading?.track('life', 0, 1) // (until the worker's network is built: 'net')
     if (add.length || drop.length) worker.postMessage({ type: 'tiles', add, drop, masks: city.tiles?.masks || [] }) // (masks: the landmarks' outlines)
     if (moved) worker.postMessage({ type: 'area', area: { ...simA, ...pedA } })
   }

@@ -72,9 +72,12 @@ export default function scans(city) {
   function add(m) { m.castShadow = m.receiveShadow = true; m.userData.landmarks = true; city.scene.add(m); return m }
 
   // ---------- near: the scan (level 2), a quarter of its triangles (1) a little further off or zoomed out ----------
+  let nGot = 0, nWant = 0 // scans fetched / asked for in this burst (city.loading)
   async function load(s, lv) {
     s.loading[lv] = true
+    city.loading?.track('landmarks', nGot, ++nWant)
     const buf = await fetch(new URL(`./data/${s.id}${lv === 1 ? '.lo' : ''}.bin`, import.meta.url)).then((r) => r.arrayBuffer()).catch(() => null)
+    city.loading?.track('landmarks', ++nGot, nWant); if (nGot >= nWant) nGot = nWant = 0
     if (!buf || dead) return
     const dv = new DataView(buf), nv = dv.getUint32(4, true), nt = dv.getUint32(8, true), q = dv.getFloat32(12, true)
     const P = new Int16Array(buf, 16, nv * 3), o = 16 + nv * 6

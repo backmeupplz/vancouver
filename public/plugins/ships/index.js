@@ -47,7 +47,8 @@ const vessel = (models) => (r, kind, L, B) => { const m = pick(r, models[kind]);
 
 export default async function ships(city) {
   const { THREE } = city
-  const data = await getJSON(DATA)
+  city.loading?.track('ships', 0, 1)
+  const data = await getJSON(DATA).finally(() => city.loading?.track('ships', 1, 1))
   const ground = (x, z) => (city.sea?.at ? city.sea.at(x, z) : city.world.heightAt(x, z)) // the water there, with the tide
   const xz = (lat, lon) => { const v = city.world.fromLatLon(lat, lon); return [v.x, v.z] }
 

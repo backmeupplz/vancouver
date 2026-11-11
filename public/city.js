@@ -4,7 +4,7 @@ import { seaSurface } from './core/util.js'
 import * as THREE from 'three'
 
 export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll, toLatLon, sun, hemi, setSun, post, requestRender, data, tiles, night, late, surface, suppressBuildings, ownCamera, quality }) {
-  const handlers = new Map()
+  const handlers = new Map(), tracked = new Map()
   const own = () => ownCamera?.active
   let animators = 0
   const startCard = makeStart()
@@ -83,6 +83,17 @@ export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll
     // the streamed map: loaded tiles (tiles.tiles), and 'tile:load' / 'tile:unload' events with each tile's
     // { level, i, j, ox, oy, size, graph: { pieces: [{ kind, lanes, oneway, drive, w, a, b, pts (world x,y pairs), z }] }, terrain, footprints, water }
     tiles,
+    // streamed work in progress, for the loading chip: tiles (fetched, decoded, uploaded) plus what plugins track.
+    // track(key, got, want): call as your work progresses; want 0 or got >= want clears the key (a key not renewed in 20 s lapses)
+    loading: {
+      track(key, got, want) { if (want > 0 && got < want) tracked.set(key, [got, want, performance.now()]); else tracked.delete(key) },
+      state() {
+        let [got, want] = tiles?.counts() || [0, 0]
+        const now = performance.now()
+        for (const [k, [g, w, at]] of tracked) if (now - at > 20000) tracked.delete(k); else { got += g; want += w }
+        return { got, want, busy: got < want }
+      },
+    },
     on(event, fn) {
       if (!handlers.has(event)) handlers.set(event, new Set())
       handlers.get(event).add(fn)

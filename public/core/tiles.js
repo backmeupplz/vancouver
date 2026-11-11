@@ -811,7 +811,8 @@ export class Tiles {
   // what's in view has arrived: [tiles in, tiles in view] (main.js: the loading screen, then the loading indicator)
   counts() {
     let want = 0, got = 0
-    for (const t of this.tiles.values()) if (t.used === this.frame) { want++; if (t.state === 'ready' || t.state === 'missing') got++ }
+    // (a tile counts from its first request: in view, or still being fetched, decoded or uploaded; in when drawn)
+    for (const t of this.tiles.values()) if (t.used === this.frame || t.state === 'loading' || t.state === 'warming') { want++; if (t.state === 'ready' || t.state === 'missing') got++ }
     return [got, want]
   }
   progress() { const [got, want] = this.counts(); return want ? got / want : 0 } // (0..1)

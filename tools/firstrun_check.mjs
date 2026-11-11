@@ -36,12 +36,11 @@ const look = () => {
   const seen = (e) => { const r = e.getBoundingClientRect(), s = getComputedStyle(e); return e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) && +s.opacity > 0.3 && r.width > 2 && r.height > 2 && r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight }
   const name = (e) => (e.id ? '#' + e.id : '.' + [...e.classList].join('.')) + (e.textContent.trim() ? ` "${e.textContent.trim().replace(/\s+/g, ' ').slice(0, 24)}"` : '')
   const open = [...document.querySelectorAll('.panel, [role=dialog], dialog[open], #start')].filter((e) => { const r = e.getBoundingClientRect(); return seen(e) && !e.matches('.fs, .fs-card') && r.width > 180 && r.height > 100 }).map(name) // (a button or a toast is a .panel too: a sheet is bigger; the fishing cards are its HUD)
-  // (not the frame rate chip: the keys strip is drawn over it for its 7 s, and for a whole delivery shift)
   // a box: something positioned over the canvas that paints (a background, a border) and is not most of the screen
   const paints = (e) => { const s = getComputedStyle(e); return (!/rgba\(.*, 0\)|transparent/.test(s.backgroundColor) || s.backgroundImage !== 'none' || parseFloat(s.borderTopWidth) > 0) }
   const boxes = []
   const walk = (e, placed) => {
-    if (e.id === 'perf' || e.tagName === 'CANVAS' || e.tagName === 'SCRIPT' || e.tagName === 'STYLE' || !seen(e)) { if (getComputedStyle(e).display === 'contents') for (const c of e.children) walk(c, placed); return }
+    if (e.tagName === 'CANVAS' || e.tagName === 'SCRIPT' || e.tagName === 'STYLE' || !seen(e)) { if (getComputedStyle(e).display === 'contents') for (const c of e.children) walk(c, placed); return }
     const s = getComputedStyle(e), r = e.getBoundingClientRect()
     placed ||= s.position === 'fixed' || s.position === 'absolute'
     if (placed && paints(e) && r.width * r.height < innerWidth * innerHeight * 0.5) return boxes.push({ e, r })
@@ -65,11 +64,14 @@ try {
     await settle(page, 500)
     await starts[m](page)
     await page.waitForFunction(() => city.player, null, { timeout: 120000 })
-    await page.waitForTimeout(8500) // (the prompt came 3 s after the dive; the keys strip fades at 7 s)
+    await page.waitForTimeout(7800) // (the prompt came 3 s after the dive; the keys strip fades at 7 s; the chip's check follows)
     await page.waitForFunction(() => { const h = document.querySelector('.dlv-how, .sl-how'); return !h || h.hidden || !h.checkVisibility() }, null, { timeout: 30000 }).catch(() => {})
     await page.evaluate(() => [...document.querySelectorAll('.sl-learn button')].find((b) => /Let.s sail/.test(b.textContent))?.click()) // (sailing's how-to stays until it is read)
-    await page.waitForTimeout(600)
+    await page.waitForFunction(() => !document.querySelector('.toast'), null, { timeout: 15000 }).catch(() => {}) // (a toast comes and goes over the cards on a phone: not the HUD)
+    await page.evaluate(() => city.loading.track('check', 0, 1)) // the loading chip shown for the look: it must be clear of the HUD too
+    await page.waitForTimeout(1300) // (the chip's spot is found every 400 ms)
     const r = await page.evaluate(look), fails = []
+    await page.evaluate(() => city.loading.track('check', 1, 1))
     if (r.open.length) fails.push('open: ' + r.open.join(', '))
     if (r.over.length) fails.push('overlap: ' + r.over.join('; '))
     if (m === 'fishing' && (!r.fishing || r.photoWalk)) fails.push(r.fishing ? 'the photo walk card is up while fishing' : 'not fishing')
