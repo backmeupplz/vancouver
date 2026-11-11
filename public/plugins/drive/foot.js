@@ -40,7 +40,7 @@ const STEPS = { path: ['bandpass', 1500, 1.2, 0.05, 0.05], grass: ['lowpass', 70
 //   chase, orbit (the drive plugin's camera orbit and its input), yawOf(dx, dy) (the yaw facing that way), wallHit(x0, y0, x1, y1), wet(x, y), fwdX, fwdY, flash(), hikeSpeed (m/s) }
 export function makeFoot(THREE, city, api) {
   const { man } = api
-  let saved = { shots: {}, beaches: [], wild: 0, splits: {}, best: {}, pets: { day: 0, ids: [] } }
+  let saved = { shots: {}, beaches: [], wild: 0, splits: {}, best: {}, stages: {}, reach: {}, pets: { day: 0, ids: [] } }
   try { Object.assign(saved, JSON.parse(localStorage.getItem(KEY)) || {}) } catch {}
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(saved)) } catch {} }
   const award = (kind, n, meta) => { try { city.progress?.award(kind, n, meta) } catch (e) { console.warn('foot: progress', e) } }
@@ -85,7 +85,7 @@ export function makeFoot(THREE, city, api) {
   }
   const W = { m: null, x: 0, y: 0, a: 0, t: 0, flee: 0, seen: false, next: 20 }
 
-  const S = { on: false, hike: null, framing: false, tilt: 0.08, sit: null, d0: 0, q: 0, splits: [], near: null, nearAt: 0 }
+  const S = { on: false, hike: null, framing: false, tilt: 0.08, sit: null, d0: 0, q: 0, mark: 0, splits: [], near: null, nearAt: 0 }
   const v = new THREE.Vector3()
   const ground = (x, y, d) => { const h = city.world.heightAt(x, -y); return Number.isFinite(h) && h !== 0 ? h : d }
 
@@ -239,21 +239,41 @@ export function makeFoot(THREE, city, api) {
   function par(id) { const T = TRAILS[id]; return T ? (T[0] * (1 + 1.2 * (T[1] / T[0]))) / api.hikeSpeed : 0 }
   function hikeStep(H, now) {
     const d = Math.hypot(H.gx - man.x, H.gy - man.y)
-    if (!S.d0) { S.d0 = d; S.q = 0; S.splits = [] }
-    if (!H.t0 || H.done) return
+    if (!S.d0) { S.d0 = d; S.q = 0; S.mark = 0; S.splits = [] }
+    if (!H.t0 || H.done || H.stage != null) return // (a stage run is one stage: no quarter marks inside it)
     const f = 1 - d / S.d0
     if (S.q < 3 && f >= (S.q + 1) / 4) {
       const secs = (now - H.t0) / 1000, was = saved.splits[H.id]?.[S.q], diff = was ? secs - was : 0
       S.splits.push(+secs.toFixed(1)); S.q++
+      stageDone(H.id, S.q - 1, secs - S.mark, S.q); S.mark = secs
       man.stamina = 1; man.winded = false
       api.popup(`${['¼', '½', '¾'][S.q - 1]} · ${mmss(secs)}`, `${was ? `${diff <= 0 ? '−' : '+'}${mmss(Math.abs(diff))} on your best · ` : ''}second wind!`)
       api.sfx.pickup(); award('hike.quarter', 20, { quiet: true })
     }
   }
+  // stages: the trail's four quarters, each with its own best and medal (a quarter's par is a quarter of the trail's);
+  // `reach` is the furthest stage a run can start at (one more than the last quarter mark crossed)
+  const stagePar = (id) => par(id) / 4
+  const canStage = (id) => par(id) > 420 // (a trail shorter than ~7 min is just a trail)
+  function stageDone(id, k, secs, reach) {
+    const b = (saved.stages[id] ||= [0, 0, 0, 0])
+    if (secs > 5 && (!b[k] || secs < b[k])) b[k] = +secs.toFixed(1)
+    saved.reach[id] = Math.max(saved.reach[id] || 0, Math.min(3, reach))
+    save()
+  }
+  const medalOf = (secs, p) => (p && secs ? MEDALS.findIndex((q) => secs <= p * q[1]) : -1)
   // at the top: keeps the splits of a best time; returns a line for the photo card
   function summit(H, secs) {
+    if (H.stage != null) { // the end of one stage
+      const p = stagePar(H.id), m = medalOf(secs, p)
+      stageDone(H.id, H.stage, secs, H.stage + 1)
+      award('hike', 40 + (m >= 0 ? [100, 70, 40][m] : 0), { label: H.name })
+      const nxt = m > 0 ? MEDALS[m - 1] : m < 0 && p ? MEDALS[2] : null
+      return `${m >= 0 ? `${MEDALS[m][0]} ` : ''}${nxt ? `${nxt[0]} under ${mmss(p * nxt[1])}` : m === 0 ? 'Gold pace!' : ''}`
+    }
     const p = par(H.id), m = p ? MEDALS.findIndex((q) => secs <= p * q[1]) : -1, best = saved.best[H.id]
     if (secs && (!best || secs < best)) { saved.best[H.id] = +secs.toFixed(1); saved.splits[H.id] = S.splits.slice(); save() }
+    stageDone(H.id, 3, secs - S.mark, 3)
     award('hike', 150 + (m >= 0 ? [300, 200, 100][m] : 0), { label: H.name })
     const nxt = m > 0 ? MEDALS[m - 1] : m < 0 && p ? MEDALS[2] : null
     return `${m >= 0 ? `${MEDALS[m][0]} ` : ''}${nxt ? `${nxt[0]} under ${mmss(p * nxt[1])}` : m === 0 ? 'Gold pace!' : ''}`
@@ -368,6 +388,7 @@ export function makeFoot(THREE, city, api) {
       const d = S.near.d
       return { title: `Photo walk · ${n} of ${shots.length}`, line: S.near.name, sub: d < S.near.r ? 'In range: frame it and snap' : `${d < 1000 ? `${Math.round(d / 10) * 10} m` : `${(d / 1000).toFixed(1)} km`} · snaps from ${S.near.r} m`, target: S.near }
     },
+    stages: (id) => (canStage(id) ? { reach: saved.reach[id] || 0, bests: saved.stages[id] || [0, 0, 0, 0], medals: (saved.stages[id] || []).map((b) => { const m = medalOf(b, stagePar(id)); return m >= 0 ? MEDALS[m][0] : '' }) } : null),
     medal: (id) => { const p = par(id), b = saved.best[id], m = p && b ? MEDALS.findIndex((q) => b <= p * q[1]) : -1; return m >= 0 ? MEDALS[m][0] : '' },
     dispose() { heart.material.map.dispose(); heart.material.dispose(); css.remove(); btns.remove(); frameEl.remove(); mat.dispose(); for (const m of Object.values(models)) m.geometry.dispose() },
   }

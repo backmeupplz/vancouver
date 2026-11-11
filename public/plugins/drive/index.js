@@ -30,6 +30,7 @@ import { makeFoot } from './foot.js'
 import { makeProps, LAMP, STOP, YIELD, BUS, BOLLARD, BENCH } from './props.js'
 import { makeKerbs } from './kerbs.js'
 import { makeFeel } from './feel.js'
+import { makeBonus, boxGap, airPay, AIR_MIN } from './bonus.js'
 import { deliveryGame } from './deliver.js'
 import { clamp, smooth, wrap, esc, vancouver, circleBox, gores, stripped, GORE } from '../../core/util.js'
 import { cellsNear, nearestStreet, abbr } from '../../core/streets.js'
@@ -554,7 +555,7 @@ export default function drive(city) {
       body.dlv-on #bar, body.dlv-on #hint, body.dlv-on #about, body.dlv-on #tools, body.dlv-on .tool-panel { display: none !important }
       body.dlv-on.dlv-touchy .lofi { left: 50% !important; transform: translateX(-50%); bottom: 168px !important; }
       .dlv-touch button { -webkit-touch-callout: none; }
-      .dlv-menu { display: grid; gap: 6px; }
+      .dlv-menu { display: grid; gap: 6px; max-height: calc(100vh - 110px); overflow-y: auto; overscroll-behavior: contain; }
       .dlv-menu button { display: flex; gap: 10px; align-items: center; text-align: left; font: inherit; color: var(--text); background: rgba(255,255,255,.05); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
       .dlv-menu button:hover { background: rgba(255,255,255,.12) }
       .dlv-menu button span { font-size: 18px } .dlv-menu small { display: block; color: var(--muted); font-size: 11.5px }
@@ -707,11 +708,16 @@ export default function drive(city) {
     const keysLine = touchy ? `Left: steer · right: gas and brake${game ? ' · Doors button at stops' : ` · ${taxi ? 'Drift and Nitro' : 'Handbrake'} beside them`}`
       : `W gas · S brake · A D steer · ${game ? 'E doors' : taxi ? 'Space drift · Shift nitro' : 'Space handbrake'} · a gamepad works too`
     ui.how.innerHTML = `<h3>${title}</h3><ol>${lines.map((l) => `<li>${l}</li>`).join('')}</ol><div class="k">${keysLine}</div>`
+    city.ui.clearToasts?.() // (what is up or waiting from before the card is stale)
+    howHold?.(); howHold = city.ui.hold?.() // taken first: nothing shows over the card
     ui.how.hidden = false; ui.how.classList.remove('fade')
     clearTimeout(howT); howT = setTimeout(hideHowTo, 10000)
-    howHold?.(); howHold = city.ui.hold?.() // toasts (wet roads, lane assist) wait for the card
   }
-  function hideHowTo() { if (ui.how.hidden || ui.how.classList.contains('fade')) return; clearTimeout(howT); ui.how.classList.add('fade'); setTimeout(() => { ui.how.hidden = true; howHold?.(); if (!onFoot && state === 'play') assistHint() }, 400) } // (the hint once the card has faded: over it on a phone held sideways, #591)
+  function hideHowTo() { if (ui.how.hidden || ui.how.classList.contains('fade')) return; clearTimeout(howT); ui.how.classList.add('fade'); setTimeout(() => { ui.how.hidden = true; howHold?.(); if (!onFoot && state === 'play') { assistHint(); roadHint() } }, 400) }
+  function roadHint() { // wet or snowy roads: queued behind the other start-of-mode hints, and never over the how-to card
+    const g = gripNow()
+    if (g < 0.8 && ui.how.hidden) city.ui.toast(g < 0.6 ? 'Snow on the roads: gentle on the pedals, the van slides and takes a long way to stop.' : 'Wet roads: leave a little more room to stop.', 5000)
+  } // (the hint once the card has faded: over it on a phone held sideways, #591)
   function showHelp() { // the keys, for a few seconds after each change between van and feet (always while delivering)
     ui.help.textContent = taxi ? taxi.help() : game ? 'W gas · S brake (a tap is gentle, hold for more) · A D steer · E doors · H horn · R back on the route · Esc end the shift'
       : hike ? 'WASD or arrows to walk · Shift to push on (it tires you; each quarter mark is a second wind) · the trail guides you when you let go · Esc to the map'
@@ -759,7 +765,7 @@ export default function drive(city) {
   assistLabel()
   const keys = new Set()
   let feel = null // feel.js: tyre marks, sparks, speed lines, squeal (while something is driven)
-  let howT = 0, howHold = null, drift = { m: 0, t: 0, show: 0, text: '' } // a free-roam drift under way: metres so far
+  let bonus = makeBonus(), stunt = { text: '', show: 0 }, howT = 0, howHold = null, drift = { m: 0, t: 0, show: 0, text: '' } // a free-roam drift under way: metres so far
   let autopilot = null, probe = null // ?drivedebug (tools/drive_check.mjs): the input instead of the keys; told of every hit
 
   const button = city.ui.addButton({ label: 'Explore', icon: '🧭', title: 'Explore the streets by van, bus, cab or on foot, deliver parcels (D), hike a trail', panel: true, dock: true })
@@ -787,7 +793,16 @@ export default function drive(city) {
       if (b.dataset.m === 'hike') { // the trailheads, then back to the menu
         const log = hikeLog()
         menuEl.innerHTML = HIKES.map((h) => `<button data-h="${h.id}"><span>⛰️</span><div>${h.name}<small>${h.blurb}</small></div>${log[h.id] ? `<span class="done">${foot.medal(h.id) || '✓'} ${mmss(log[h.id].best)}</span>` : ''}</button>`).join('') + '<button class="back" data-back>‹ Back</button>'
-        for (const e of menuEl.querySelectorAll('[data-h]')) e.addEventListener('click', () => { closeMenu(); startHike(HIKES.find((h) => h.id === e.dataset.h)) })
+        for (const e of menuEl.querySelectorAll('[data-h]')) e.addEventListener('click', () => {
+          const h = HIKES.find((q) => q.id === e.dataset.h), st = foot.stages(h.id)
+          if (!st) { closeMenu(); startHike(h); return }
+          const one = (k, label, sub, tag, off) => `<button data-s="${k}"${off ? ' disabled style="opacity:.45"' : ''}><span>${k < 0 ? '⛰️' : '🚩'}</span><div>${label}<small>${sub}</small></div>${tag ? `<span class="done">${tag}</span>` : ''}</button>`
+          menuEl.innerHTML = `<div class="bus-note" style="padding:4px 8px">${h.name}</div>` + one(-1, 'Full trail', 'All four stages in one go', log[h.id] ? `${foot.medal(h.id) || '✓'} ${mmss(log[h.id].best)}` : '')
+            + [0, 1, 2, 3].map((k) => one(k, `Stage ${k + 1}`, k > st.reach ? 'Reach the mark before to unlock' : `Quarter ${k + 1} of the trail, a few minutes`, st.bests[k] ? `${st.medals[k] || '✓'} ${mmss(st.bests[k])}` : '', k > st.reach)).join('')
+            + '<button class="back" data-back>‹ Back</button>'
+          for (const s of menuEl.querySelectorAll('[data-s]')) s.addEventListener('click', () => { closeMenu(); startHike(h, +s.dataset.s < 0 ? null : +s.dataset.s) })
+          menuEl.querySelector('[data-back]').addEventListener('click', () => { menuEl.innerHTML = menuHTML; menu() })
+        })
         menuEl.querySelector('[data-back]').addEventListener('click', () => { menuEl.innerHTML = menuHTML; menu() })
         return
       }
@@ -922,13 +937,21 @@ export default function drive(city) {
     publishPlayer(true)
   }
   // a hike: straight to its trailhead (the nearest trail there once its tiles are in), facing up the trail
-  function startHike(h) {
+  function startHike(h, stage = null) {
     if (state === 'pick') cancelPick()
     if (state !== 'off') return
     audio()
     const a = city.world.fromLatLon(...h.from), b = city.world.fromLatLon(...h.to)
-    const x = a.x, y = -a.z, gx = b.x, gy = -b.z
-    const r = nearestPiece(x, y, (p) => trail(p) && !p.z, () => 0, 60)
+    let x = a.x, y = -a.z, gx = b.x, gy = -b.z
+    if (stage != null) { // one stage: from the trail's k/4 mark to its (k+1)/4 mark (along the line to the goal; the goal is put on its trail once loaded)
+      const lx = (f) => x + (b.x - x) * f, ly = (f) => y + (-b.z - y) * f, k = stage
+      const ex = lx((k + 1) / 4), ey = ly((k + 1) / 4)
+      const sx = lx(k / 4), sy = ly(k / 4)
+      h = { ...h, name: `${h.name} · stage ${k + 1} of 4`, goal: k < 3 ? `the ${['¼', '½', '¾'][k]} mark` : h.goal, stage: k, ele: k < 3 ? undefined : h.ele }
+      if (k < 3) { gx = ex; gy = ey }
+      x = sx; y = sy
+    }
+    const r = nearestPiece(x, y, (p) => trail(p) && !p.z, () => 0, stage ? 90 : 60)
     const spot = r ? { x: r.x, y: r.y } : { x, y }
     spot.yaw = yawFromDir(Math.atan2(gy - spot.y, gx - spot.x))
     start('hike', spot, { x, y, hike: { ...h, gx, gy, sx0: spot.x, sy0: spot.y, t0: 0, climb: 0, lastH: null, snapped: !!r, photo: null, done: false } })
@@ -1471,7 +1494,7 @@ export default function drive(city) {
     car.pitch += (Math.atan2((fl + fr - bl - br) / 2, wb) - car.pitch) * (1 - Math.exp(-10 * dt))
     car.roll += (Math.atan2((fr + br - fl - bl) / 2, tw * 2) - car.roll) * (1 - Math.exp(-10 * dt))
     car.spin += (car.speed * dt) / car.V.wheel
-    if (car.V.airYaw) fly(dt, h0)
+    if (car.V.airYaw || !game) fly(dt, h0) // (a bus stays on the road; the van too gets its air)
   }
   // an arcade cab can leave the road: where the road falls away faster than gravity (over a crest, off a deck's end)
   // it flies on, car.lift metres over the road and car.vy up, and lands with a jolt (taxi.js scores the air)
@@ -1485,6 +1508,7 @@ export default function drive(city) {
         const hit = clamp((climb - car.vy) / 9, 0, 1)
         jolt(car, clamp(hit, 0.15, 0.9), 1, 0); sfx.kerb(clamp(hit + 0.3, 0.3, 1)); buzz(Math.round(20 + 40 * hit)); shake = Math.max(shake, 0.1 + 0.3 * hit)
         taxi?.landed(car.airT, car.airMax, car.airDeck)
+        if (!taxi && !game) airBonus(car.airT, car.airMax)
       }
       car.lift = 0; car.vy = climb; car.airT = 0; car.airMax = 0
       return
@@ -1553,6 +1577,15 @@ export default function drive(city) {
     if (man.stamina <= 0) man.winded = true; else if (man.stamina > 0.4) man.winded = false
     return I.up ? (pushing ? HUSTLE : HIKE) * f : I.down ? -WALK * 0.6 * f : 0
   }
+  // wading: the walker goes into the sea or a lake to the knee (WADE metres of water over the ground) and no further:
+  // deeper is a wall. Only near mapped water (low dry land, a dike's lee, stays walkable at any tide)
+  const WADE = 0.5
+  let wadeT = 0
+  function deep(x, y) {
+    const g = city.world.heightAt(x, -y)
+    if (!Number.isFinite(g) || (city.sea?.at?.(x, -y) ?? 0) - g <= WADE) return false
+    return isWater(x, y) || isWater(x + 6, y) || isWater(x - 6, y) || isWater(x, y + 6) || isWater(x, y - 6)
+  }
   function walk(dt, I) {
     if (man.board) { // walking round to the van's door, then in
       const b = man.board, e = clamp((performance.now() - b.t0) / b.ms, 0, 1)
@@ -1590,9 +1623,10 @@ export default function drive(city) {
     const fx = fwdX(man.yaw), fy = fwdY(man.yaw)
     let nx = man.x + fx * man.speed * dt, ny = man.y + fy * man.speed * dt
     // water: only where a deck or a path goes over it
-    const wet = (x, y) => isWater(x, y) && !footSurface(x, y, man.h).deck && !(nearestRoad(x, y, 6, false, true)?.d < 0.6)
+    const wet = (x, y) => (isWater(x, y) || deep(x, y)) && !footSurface(x, y, man.h).deck && !(nearestRoad(x, y, 6, false, true)?.d < 0.6)
     if ((nx !== man.x || ny !== man.y) && wet(nx + fx * 0.4, ny + fy * 0.4)) {
       if (!wet(nx + fx * 0.4, man.y)) ny = man.y; else if (!wet(man.x, ny + fy * 0.4)) nx = man.x; else { nx = man.x; ny = man.y }
+      if (Math.abs(man.speed) > 0.5 && performance.now() - wadeT > 1500) { wadeT = performance.now(); sfx.splash() }
     }
     if (man.deck && (nx !== man.x || ny !== man.y)) { // a deck's railing, a tunnel's walls
       const now = railPast(man.x, man.y, man.h - 0.5)
@@ -1835,9 +1869,8 @@ export default function drive(city) {
   function summit(now) {
     hike.done = true
     const secs = hike.t0 ? (now - hike.t0) / 1000 : 0, log = hikeLog(), prev = log[hike.id]
-    const best = !prev || secs < prev.best
-    log[hike.id] = { best: best ? secs : prev.best, n: (prev?.n || 0) + 1 }
-    try { localStorage.setItem('drive.hikes', JSON.stringify(log)) } catch {}
+    const best = hike.stage != null ? false : !prev || secs < prev.best // (a stage's best lives in foot.js)
+    if (hike.stage == null) { log[hike.id] = { best: best ? secs : prev.best, n: (prev?.n || 0) + 1 }; try { localStorage.setItem('drive.hikes', JSON.stringify(log)) } catch {} }
     sfx.summit(); buzz([40, 60, 40])
     hideMarkers()
     man.speed = 0
@@ -1898,9 +1931,7 @@ export default function drive(city) {
         if (deliver) ui.co.hidden = false; else if (!hike && !game && !taxi) ui.read.hidden = false
         ui.touch.hidden = false
         showHelp()
-        if (!onFoot) showHowTo() // (the lane-assist hint follows the card)
-        const g = gripNow()
-        if (!onFoot && g < 0.8) city.ui.toast(g < 0.6 ? 'Snow on the roads: gentle on the pedals, the van slides and takes a long way to stop.' : 'Wet roads: leave a little more room to stop.', 5000)
+        if (!onFoot) showHowTo() // (the lane-assist hint, then the road hint, follow the card, one toast at a time)
         hudAt = 0
       }
       return
@@ -1909,7 +1940,7 @@ export default function drive(city) {
     dt = Math.min(dt, 0.05)
     if (!ui.how.hidden && (keys.size || touchState.gas || touchState.brake)) hideHowTo()
     const I = ui.sheet.hidden && !taxi?.frozen ? autopilot?.() || input() : STILL
-    if (onFoot) { walk(dt, I); if (hasVan) drive(dt, { steer: 0, up: false, down: false, hand: true }); feel?.quiet() } else { drive(dt, I); feel.update(dt, time, car, pcam, !taxi); if (!taxi && !game && !deliver) driftScore(dt, now) }
+    if (onFoot) { walk(dt, I); if (hasVan) drive(dt, { steer: 0, up: false, down: false, hand: true }); feel?.quiet() } else { drive(dt, I); feel.update(dt, time, car, pcam, !taxi); if (!taxi && !game) { nearMisses(now); if (!deliver) driftScore(dt, now) } }
     engineNote()
     publish()
     place()
@@ -1990,6 +2021,34 @@ export default function drive(city) {
       D.m = 0
     }
   }
+  // van near misses (a moving car passed within a metre at speed, untouched; chains within 4 s) and airtime pay
+  function stuntPay(pay, what, text) {
+    stunt.text = `${text} · +$${pay}`; stunt.show = performance.now() + 2200
+    city.progress?.award('stunt', pay, { what, quiet: !deliver, ...(deliver ? { label: `+$${pay} ${what}` } : {}) })
+    sfx.pickup()
+  }
+  const seenNear = new Set()
+  function nearMisses(now) {
+    const kmh = Math.abs(car.speed) * 3.6
+    seenNear.clear()
+    if (car.lift < 0.5) {
+      const me = { x: car.x, y: car.y, fx: fwdX(car.yaw), fy: fwdY(car.yaw), hl: car.V.hl, hw: car.V.hw }
+      for (const o of others(car.x, car.y, 9)) {
+        if (o.mp) continue
+        const gap = boxGap(me, otherBox(o))
+        if (gap < 2.5) seenNear.add(o.id)
+        bonus.track(o.id, gap, (o.speed || 0) > 1.5, kmh)
+      }
+    }
+    for (const b of bonus.sweep(now, seenNear)) awards.near++, stuntPay(b.pay, 'near miss', `Near miss${b.mult > 1 ? ` ×${b.mult}` : ''}`)
+  }
+  const awards = { air: 0, near: 0 } // (the debug hook counts what was paid)
+  function airBonus(secs, high) {
+    if (secs <= AIR_MIN || high < 0.25 || Math.abs(car.speed) < 8) return // (a deck joint or a kerb is not a jump: wheels 0.25 m clear, at speed)
+    job?.bump(3) // (a fragile parcel is rattled by a landing, as by any knock)
+    const pay = airPay(secs)
+    if (pay) { awards.air++; stuntPay(pay, 'airtime', `Air ${secs.toFixed(1)} s`) }
+  }
   function hud(t) {
     if (taxi) { ui.tact.hidden = ui.act.hidden = ui.job.hidden = ui.hrn.hidden = true; ui.hb.hidden = ui.assist.hidden = false; ui.brk.textContent = 'Brake'; return } // the rest is taxi.js's
     if (game) { // E: the doors (or the trolley poles); the bus's own cards are route.js's
@@ -2012,7 +2071,7 @@ export default function drive(city) {
     ui.stam.hidden = !hike; ui.aboard.hidden = !deliver
     if (!deliver && !hike) {
       const sp = Math.abs(P.speed) * 3.6, gear = onFoot ? '' : ` · ${car.gear < 0 ? 'R' : `D${car.gear}`}`
-      const dr = onFoot ? '' : drift.m > 4 ? ` <span class="gain">· Drift ${Math.round(drift.m)} m</span>` : performance.now() < drift.show ? ` <span class="gain">· ${drift.text}</span>` : ''
+      const dr = onFoot ? '' : drift.m > 4 ? ` <span class="gain">· Drift ${Math.round(drift.m)} m</span>` : performance.now() < drift.show ? ` <span class="gain">· ${drift.text}</span>` : performance.now() < stunt.show ? ` <span class="gain">· ${stunt.text}</span>` : ''
       ui.read.innerHTML = `<b>${Math.round(sp)}</b> km/h${gear}${dr}${name ? ` <span class="st">· ${esc(name)}</span>` : ''}`
       const c = onFoot && !man.board && !city.fishing?.active && foot.card() // a free walk: the photo walk’s card (not over a rod in hand)
       ui.job.hidden = !c
@@ -2070,7 +2129,7 @@ export default function drive(city) {
   document.addEventListener('visibilitychange', onVis)
 
   // ?drivedebug: the state, for tests in a browser (window.driveDebug)
-  if (location.search.includes('drivedebug')) window.driveDebug = { car, man, chase, walker, foot, isWater, goal, get run() { return job?.run }, get job() { return job }, get drift() { return drift }, get feel() { return feel }, get hike() { return hike }, get errand() { return errand }, get shift() { return job?.S }, get state() { return state }, startHike: (id) => startHike(HIKES.find((h) => h.id === id)), propsNear, nearestRoad, wallHit, railPast,
+  if (location.search.includes('drivedebug')) window.driveDebug = { awards, deep, WADE, car, man, chase, walker, foot, isWater, goal, get run() { return job?.run }, get job() { return job }, get drift() { return drift }, get feel() { return feel }, get hike() { return hike }, get errand() { return errand }, get shift() { return job?.S }, get state() { return state }, startHike: (id) => startHike(HIKES.find((h) => h.id === id)), propsNear, nearestRoad, wallHit, railPast,
     get game() { return game }, get horn() { return !!horn }, get taxi() { return taxi }, showGarage, startTaxi: (x, y, c = { cab: 0, livery: 0, driver: 0 }) => { taxiChoice = c; start('taxi', carSpawn(x, y) || { x, y, yaw: 0 }, { x, y }) }, input, secs, collide, surface, frame,
     set autopilot(f) { autopilot = f }, set probe(f) { probe = f }, stop: () => { if (state === 'off') return; game?.dispose(); taxi?.dispose(); taxi = null; state = 'out'; finish() },
     start: (kind, x, y, yaw = 0) => start(kind, { x, y, yaw }, { x, y }), startBus: (name, dir = 0, from = 'first') => loadLines().then(({ man }) => { const ri = man.routes.findIndex((r) => r.name === name); return startBus({ ri, r: man.routes[ri], dir, from, man }) }) }

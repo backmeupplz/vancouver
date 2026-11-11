@@ -92,3 +92,23 @@ import { busComfort, COMFORT } from '../public/plugins/drive/van.js'
   console.log(`ok: comfort: bend ${bend.m.toFixed(1)}%, hard corner ${hard.m.toFixed(1)}%, a minute of it ${(hard.m + long.m).toFixed(1)}%, 30 s smooth +${back.m.toFixed(1)}%; bus full lock from 32 km/h ${pk.toFixed(1)} m/s² ${m.toFixed(1)}%, full brake ${pd.toFixed(1)} m/s² ${m2.toFixed(1)}%`)
   assert(m < 0 && m2 < 0, 'the bus at full lock and on full brake upsets its riders')
 }
+// van bonuses (drive/bonus.js): a scripted near miss pays once, chains, and a touch or a slow pass pays nothing; air pays by the second
+import { boxGap, makeBonus, airPay } from '../public/plugins/drive/bonus.js'
+{
+  const me = { x: 0, y: 0, fx: 0, fy: 1, hl: 2.5, hw: 1 }, car = (x) => ({ x, y: 0, fx: 0, fy: 1, hl: 2.2, hw: 0.9 })
+  assert(Math.abs(boxGap(me, car(2.4)) - 0.5) < 1e-6 && boxGap(me, car(1.5)) < 0, 'box gap')
+  const pass = (b, id, gap, moving, kmh, now) => { b.track(id, gap, moving, kmh); b.track(id, gap + 3, moving, kmh); return b.sweep(now, new Set()) }
+  const b = makeBonus(), paid = []
+  paid.push(...pass(b, 1, 0.6, true, 50, 1000))
+  assert(paid.length === 1 && paid[0].mult === 1, 'one near miss pays once')
+  paid.push(...pass(b, 2, 0.6, true, 50, 2500)); paid.push(...pass(b, 3, 0.6, true, 50, 3500))
+  assert(paid.map((p) => p.mult).join() === '1,2,3', 'chain within 4 s')
+  for (let i = 4; i < 9; i++) paid.push(...pass(b, i, 0.6, true, 50, 3600 + i))
+  assert(Math.max(...paid.map((p) => p.mult)) === 4, 'chain capped at x4')
+  assert(pass(b, 20, 0.6, true, 50, 20000).length === 1 &&pass(b, 21, 0.6, true, 20, 30000).length === 0, 'too slow pays nothing')
+  assert(pass(b, 22, 0.6, false, 50, 40000).length === 0, 'a parked/still one pays nothing')
+  b.track(23, 0.6, true, 50); b.track(23, -0.1, true, 50)
+  assert(b.sweep(50000, new Set()).length === 0, 'a touch pays nothing')
+  assert(airPay(0.3) === 0 && airPay(1) === 6 && airPay(2) === 12, 'air pays by the second, from 0.4 s')
+  console.log('ok: near-miss and airtime bonuses')
+}
