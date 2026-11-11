@@ -336,11 +336,14 @@ export default function drive(city) {
     }
     return best
   }
-  function isWater(x, y) {
-    const t = infos.get(ckey(Math.floor(x / 1024), Math.floor(y / 1024)))
-    if (!t?.water) return false
-    const n = t.water.n, i = Math.floor(((x - t.ox) / 1024) * n), j = Math.floor(((y - t.oy) / 1024) * n)
-    return i >= 0 && j >= 0 && i < n && j < n && t.water.mask[j * n + i] === 1
+  const isWater = (x, y) => city.world.isWater(x, -y) // open water: the 4 m mask, and not a pier
+  // a step from (x0, y0) to (x1, y1) that goes on or off a pier's side over a drop: no walking off a deck onto the sand under it, nor up onto it from the beach
+  const PIER_STEP = 0.6
+  function pierEdge(x0, y0, x1, y1) {
+    const a = city.world.pierAt(x0, -y0), b = city.world.pierAt(x1, -y1)
+    if (!a === !b) return false
+    const p = a || b, o = a ? [x1, y1] : [x0, y0]
+    return Math.abs(p.y - city.world.heightAt(o[0], -o[1])) > PIER_STEP
   }
   // two boxes { x, y, fx, fy, hl, hw } (separating axes): the way to push a out of b { nx, ny, depth }, or null
   function boxBox(a, b) {
@@ -879,7 +882,7 @@ export default function drive(city) {
   const yawFromDir = (dir) => dir - Math.PI / 2 // road direction atan2(dy, dx) in (x, north) to a yaw
   const fwdX = (yaw) => -Math.sin(yaw), fwdY = (yaw) => Math.cos(yaw) // forward in (x, north)
   // photo walk, sitting, hike splits and wildlife (foot.js)
-  const foot = makeFoot(THREE, city, { man, walker, popup, sfx, audio: () => (audio() ? master : null), pathAt: (x, y) => { const r = nearestRoad(x, y, 3, true, true, false, man.h - 0.5); return r ? { d: r.d, drv: r.s.drv, steps: r.s.p.kind === 12 } : null }, chase, orbit, yawOf: (dx, dy) => yawFromDir(Math.atan2(dy, dx)), wallHit, wet: isWater, fwdX, fwdY, hikeSpeed: HIKE, flash() { ui.flash.hidden = false; ui.flash.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => ui.flash.classList.remove('on'))); setTimeout(() => { ui.flash.hidden = true }, 1000) } })
+  const foot = makeFoot(THREE, city, { man, walker, popup, sfx, audio: () => (audio() ? master : null), pathAt: (x, y) => { const r = nearestRoad(x, y, 3, true, true, false, man.h - 0.5); return r ? { d: r.d, drv: r.s.drv, steps: r.s.p.kind === 12 } : null }, chase, orbit, yawOf: (dx, dy) => yawFromDir(Math.atan2(dy, dx)), wallHit, wet: isWater, pierAt: (x, y) => city.world.pierAt(x, -y), fwdX, fwdY, hikeSpeed: HIKE, flash() { ui.flash.hidden = false; ui.flash.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => ui.flash.classList.remove('on'))); setTimeout(() => { ui.flash.hidden = true }, 1000) } })
 
   function start(kind, spot, at) {
     deliver = kind === 'deliver'
@@ -1416,6 +1419,9 @@ export default function drive(city) {
       }
       const ax = x + fx * Math.sign(car.speed || 1) * 2, ay = y + fy * Math.sign(car.speed || 1) * 2
       if (!s.deck && isWater(ax, ay) && !roadAt(ax, ay, car.h)) return 'water'
+      if (pierEdge(car.x, car.y, ax, ay)) return 'water'
+      const pr = city.world.pierAt(ax, -ay)
+      if (pr && !pr.road) return 'water'
       return null
     }
     const why = (nx !== car.x || ny !== car.y) && blocked(nx, ny)
@@ -1624,7 +1630,7 @@ export default function drive(city) {
     let nx = man.x + fx * man.speed * dt, ny = man.y + fy * man.speed * dt
     // water: only where a deck or a path goes over it
     const wet = (x, y) => (isWater(x, y) || deep(x, y)) && !footSurface(x, y, man.h).deck && !(nearestRoad(x, y, 6, false, true)?.d < 0.6)
-    if ((nx !== man.x || ny !== man.y) && wet(nx + fx * 0.4, ny + fy * 0.4)) {
+    if ((nx !== man.x || ny !== man.y) && (wet(nx + fx * 0.4, ny + fy * 0.4) || pierEdge(man.x, man.y, nx + fx * 0.4, ny + fy * 0.4))) {
       if (!wet(nx + fx * 0.4, man.y)) ny = man.y; else if (!wet(man.x, ny + fy * 0.4)) nx = man.x; else { nx = man.x; ny = man.y }
       if (Math.abs(man.speed) > 0.5 && performance.now() - wadeT > 1500) { wadeT = performance.now(); sfx.splash() }
     }

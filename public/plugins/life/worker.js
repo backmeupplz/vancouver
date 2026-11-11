@@ -115,6 +115,19 @@ const startHeading = (p) => Math.atan2(p.y[1] - p.y[0], p.x[1] - p.x[0])
 const turn = (a, b) => Math.atan2(Math.sin(b - a), Math.cos(b - a))
 
 // ground height from one tile's terrain grid (world x, y north): clamped at the tile's edge, so only for points in it
+// a pier's top at tile-local (x, y) at the lowest tide: core/util.js pierTop, inline as this worker imports nothing (the drawn y at tide 0 is the stored one)
+function pierTop(P, x, y) {
+  const i = Math.floor(x / P.c), j = Math.floor(y / P.c)
+  if (i < 0 || j < 0 || i >= 128 || j >= 128) return null
+  const k = j * 128 + i, T = P.tri
+  for (let s = P.start[k]; s < P.start[k + 1]; s++) {
+    const t = P.list[s], o = t * 6, ax = T[o], ay = T[o + 1], bx = T[o + 2], by = T[o + 3], cx = T[o + 4], cy = T[o + 5], d = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+    if (!d) continue
+    const u = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / d, v = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / d, w = 1 - u - v
+    if (u >= -1e-6 && v >= -1e-6 && w >= -1e-6) return u * P.y[t * 3] + v * P.y[t * 3 + 1] + w * P.y[t * 3 + 2]
+  }
+  return null
+}
 function tileH(t, x, y) {
   const { n, h } = t.terrain, size = t.size, c = size / (n - 1)
   const fx = Math.min(n - 1.0001, Math.max(0, (x - t.ox) / c)), fy = Math.min(n - 1.0001, Math.max(0, (size - (y - t.oy)) / c))
@@ -125,7 +138,9 @@ function tileH(t, x, y) {
     const at = (a, b) => { const s = f.B[(b >> 4) * f.nb + (a >> 4)]; return s < 0 ? 0 : f.V[s * 256 + (b & 15) * 16 + (a & 15)] }
     g += at(a, b) * (1 - p) * (1 - q) + at(a + 1, b) * p * (1 - q) + at(a, b + 1) * (1 - p) * q + at(a + 1, b + 1) * p * q
   }
-  return t.terrain.wall ? wallH(t.terrain.wall, g, x - t.ox, y - t.oy) : g
+  if (t.terrain.wall) g = wallH(t.terrain.wall, g, x - t.ox, y - t.oy)
+  if (t.terrain.pier) { const p = pierTop(t.terrain.pier, x - t.ox, y - t.oy); if (p !== null && p > g) return p } // (a pier's deck, at the lowest tide)
+  return g
 }
 // the seawalls' walks over the terrain (core/util.js wallHeight, copied: this classic worker can't import it)
 function wallH(W, g, x, y) {

@@ -1,7 +1,7 @@
 // Shared materials for the streamed map. All surfaces are Lambert (so the sun, the shadows and the ink pass
 // work) with their detail drawn procedurally in the fragment shader: crisp at any zoom, nothing to download.
 import * as THREE from 'three'
-import { NOISE_GLSL, SEA0, SEA_RISE, BED_TOP, BED_S } from './util.js'
+import { NOISE_GLSL, SEA0, SEA_RISE, BED_TOP, BED_S, FLOAT_UP } from './util.js'
 import { LOOK_GLSL, lookUniforms } from './look.js'
 import { treeForm, FORMS, ASPECT } from './treeforms.js'
 
@@ -93,7 +93,7 @@ export function groundMaterial(far = false) {
         // highest tide at the beach's edge: tile-worker.js ground, tidal), the ground itself on sand and by the sea
         float seaY = ${SEA0.toFixed(2)} + tide, h0 = transformed.y;
         vBed = 50.0;
-        if (cls > 19.5 && cls < 20.5) transformed.y = max(h0, seaY + 0.45); // a dock stays above the water
+        if (cls > 19.5 && cls < 20.5) { if (tidal > 0.25) { float s = h0 - (tidal > 0.75 ? ${FLOAT_UP.toFixed(2)} : -0.15); transformed.y += max(s, seaY) - s; } } // a float rides the water (tile-worker.js ground; its timber skirt hangs below)
         else if (cls > 18.5 && cls < 19.5) {
           transformed.y = max(h0, seaY);
           vBed = tidal > 0.0 ? ${BED_TOP.toFixed(2)} - ${BED_S} * (1.0 - tidal) * 127.5 : -9.0;

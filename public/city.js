@@ -23,6 +23,9 @@ export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll
       fromLatLon(lat, lon) { const [x, n] = ll(lat, lon); return new THREE.Vector3(x, zAt(x, n), -n) },
       toLatLon(x, z) { return toLatLon(x, -z) },
       heightAt(x, z) { return zAt(x, -z) },
+      // the pier (float or fixed deck) as drawn at (x, z): { y, road, fixed } or null; isWater: open water, not a pier
+      pierAt(x, z) { return tiles?.pierAt(x, -z) ?? null },
+      isWater(x, z) { return tiles?.isWater(x, -z) ?? false },
       // street furniture's footing: the nearest point { x, z } at least `margin` m off the carriageways and cycle tracks
       // the map draws, within maxD m; null where (x, z) is clear already (or the detail tile isn't loaded)
       offRoad(x, z, margin = 0.6, maxD = 8) { const p = tiles?.offRoad(x, -z, margin, maxD); return p && { x: p.x, z: -p.y } },
@@ -75,7 +78,7 @@ export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll
     sea: {
       get level() { return surface?.tide.value ?? 0 },
       set level(v) { if (!surface || v === surface.tide.value) return; surface.tide.value = v; tiles?.setSea(v); requestRender(); city.emit('tide', v) },
-      at(x, z) { return seaSurface(zAt(x, -z), surface?.tide.value ?? 0) }, // the still water's height at a point on the water
+      at(x, z) { return seaSurface(zAt(x, -z, true), surface?.tide.value ?? 0) }, // the still water's height at a point on the water
       surfaceAt: null,
     },
     post, // { uniforms: { gain (vec3), sat (float) } } colour grade of the final image

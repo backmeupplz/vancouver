@@ -86,12 +86,7 @@ export default function fish(city) {
   const tk = (t) => Math.round(t.ox / 1024) + ',' + Math.round(t.oy / 1024)
   const offTiles = city.world.eachTile((t) => { if (!t.level) tiles.set(tk(t), t) })
   const offUnload = city.on('tile:unload', (t) => { if (!t.level && tiles.get(tk(t)) === t) tiles.delete(tk(t)) })
-  function isWater(x, z) {
-    const t = tiles.get(Math.floor(x / 1024) + ',' + Math.floor(-z / 1024)), w = t?.water
-    if (!w) return false
-    const n = w.n, i = Math.floor(((x - t.ox) / 1024) * n), j = Math.floor(((-z - t.oy) / 1024) * n)
-    return i >= 0 && j >= 0 && i < n && j < n && w.mask[j * n + i] === 1
-  }
+  const isWater = (x, z) => city.world.isWater(x, z) // the 4 m mask and not a pier: the bobber never lands on a deck
   const spots = SPOTS.map((s) => { const p = city.world.fromLatLon(s.lat, s.lon); return { ...s, x: p.x, z: p.z, r: s.kind === 'lake' ? 480 : s.kind === 'beach' || s.kind === 'river' ? 300 : 150 } })
   // where the player is fishing: a named spot, or just this water (a lake stands above the sea; the Fraser by where it is)
   function placeAt(x, z, wx, wz) {

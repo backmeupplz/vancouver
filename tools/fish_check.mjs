@@ -73,9 +73,9 @@ try {
           if (d < best) { best = d; fn?.(ax + bx * k, az + bz * k) } } }
       return best
     }
-    const dry = (x, z) => !F.isWater(x, z) || onPath(x, z) < 0.6
+    const dry = (x, z) => !F.isWater(x, z) // (a pier is not water: core/tiles.js isWater)
     const test = (x, z) => { const e = dry(x, z) && edge(x, z); return e && !inside(x, z) && (onPath(x, z) < 0.6 || walk(x, z) >= 0) ? e : null }
-    const r = { id, loaded: F.tiles.has(K(s.x, -s.z)), dry: dry(s.x, s.z), edge: edge(s.x, s.z), walk: Math.round(Math.min(onPath(s.x, s.z), walk(s.x, s.z) < 0 ? 1e9 : walk(s.x, s.z))), inside: inside(s.x, s.z), x: s.x, z: s.z }
+    const r = { id, loaded: F.tiles.has(K(s.x, -s.z)), dry: dry(s.x, s.z), edge: edge(s.x, s.z), walk: Math.round(Math.min(onPath(s.x, s.z), walk(s.x, s.z) < 0 ? 1e9 : walk(s.x, s.z))), inside: inside(s.x, s.z), x: s.x, z: s.z, pier: !!city.world.pierAt(s.x, s.z), kind: s.kind }
     if (r.walk > 1e6) r.walk = -1
     r.ok = r.loaded && !!test(s.x, s.z)
     if (!r.ok && snap) for (let q = 2; q <= 400 && !r.snap; q += 2) for (let a = 0; a < 24; a++) { const x = s.x + Math.sin(a * Math.PI / 12) * q, z = s.z + Math.cos(a * Math.PI / 12) * q; if (test(x, z)) { const ll = city.world.toLatLon(x, z); r.snap = `${ll.lat.toFixed(5)}, ${ll.lon.toFixed(5)} (${q} m off)`; break } }
@@ -88,9 +88,18 @@ try {
     await goto(s.id)
     const r = await page.evaluate(check, [s.id, !!o.snap])
     if (!r.ok) bad++
-    console.log(`${r.ok ? 'ok  ' : 'FAIL'} ${s.id.padEnd(12)} ${r.loaded ? '' : 'tile not loaded '}${r.dry ? 'dry' : 'IN WATER'}, water ${r.edge ? r.edge.d.toFixed(1) + ' m' : 'NONE within 13 m'}, path ${r.walk >= 0 ? r.walk + ' m' : 'NONE'}${r.inside ? ', INSIDE A BUILDING' : ''}${r.onPath ? `  → ${r.onPath}` : r.snap ? `  → ${r.snap}` : ''}`)
+    console.log(`${r.ok ? 'ok  ' : 'FAIL'} ${s.id.padEnd(12)} ${r.loaded ? '' : 'tile not loaded '}${r.dry ? 'dry' : 'IN WATER'}, water ${r.edge ? r.edge.d.toFixed(1) + ' m' : 'NONE within 13 m'}, path ${r.walk >= 0 ? r.walk + ' m' : 'NONE'}${r.inside ? ', INSIDE A BUILDING' : ''}${r.kind === 'pier' ? (r.pier ? ', on its pier' : ', NOT on a pier') : ''}${r.onPath ? `  → ${r.onPath}` : r.snap ? `  → ${r.snap}` : ''}`)
   }
 
+  // 200 casts round the compass from three piers (one 3.5 m wide): no bobber ever lands on a deck
+  if (o.spots !== '0') for (const id of ['jericho', 'ambleside', 'crescent']) {
+    const spot = SPOTS.find((q) => q.id === id)
+    if (!spot) continue
+    await goto(id)
+    const n = await page.evaluate(([x, z]) => { let bad = 0, tot = 0; for (let a = 0; a < 200; a++) for (let d = 3; d <= 30; d += 3) { const px = x + Math.sin(a * Math.PI / 100) * d, pz = z + Math.cos(a * Math.PI / 100) * d; if (fishDebug.isWater(px, pz)) { tot++; if (city.world.pierAt(px, pz)) bad++ } } return { bad, tot } }, [spot.x, spot.z])
+    console.log(`${n.bad ? 'FAIL' : 'ok  '} casts ${id}: ${n.bad} of ${n.tot} bobbers on a deck`)
+    if (n.bad) bad++
+  }
   if (o.only === 'spots') throw new Error('spots only')
   // a catch and a haul at Jericho Pier
   await goto(o.at)
