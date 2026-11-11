@@ -73,7 +73,7 @@ const cap = (s) => s[0].toUpperCase() + s.slice(1)
 export default function fish(city) {
   const { THREE } = city
   // ================================================================ the save: the logbook
-  const save = { log: {}, crab: { kept: 0, back: 0, fines: 0, best: {} }, day: '', today: [], keptToday: 0, how: false, seals: 0, ranger: 0, onMap: true }
+  const save = { log: {}, crab: { kept: 0, back: 0, fines: 0, best: {} }, day: '', today: [], keptToday: 0, how: false, seals: 0, ranger: 0, spotsOnMap: false } // (the saved key is spotsOnMap: off unless the player switches it on)
   try { Object.assign(save, JSON.parse(localStorage.getItem(KEY)) || {}) } catch {}
   const persist = () => { try { localStorage.setItem(KEY, JSON.stringify(save)) } catch {} }
   const newDay = () => { const d = vancouver(Date.now()).ymd; if (save.day !== d) { save.day = d; save.today = []; save.keptToday = 0 } }
@@ -416,8 +416,8 @@ export default function fish(city) {
     if (!tool.panel) return
     const row = (s) => `<button class="fs-it" data-s="${s.id}"><div>${esc(s.name)}<small class="fs-dim">${s.closed ? esc(s.blurb) : esc(bitingText(s))}</small></div><span>${s.closed ? 'no fishing' : s.crab != null ? s.kind + ' · crab' : s.kind}</span></button>`
     tool.panel.innerHTML = `<div class="fs-list"><h4>Today · ${esc(tideText())}</h4><div class="fs-dim">Walk to the water’s edge or out on a pier and a 🎣 prompt appears (F). Drop a crab trap off a pier (T). Under sail, F trolls a line.</div>
-      <label><input type="checkbox" ${save.onMap ? 'checked' : ''}> Show the spots on the map</label><h4>Spots</h4><div class="sc" style="max-height:min(26vh,200px)">${spots.map(row).join('')}</div>${logHTML()}</div>`
-    tool.panel.querySelector('input').onchange = (e) => { save.onMap = e.target.checked; persist(); showMarks(); city.requestRender() }
+      <label><input type="checkbox" ${save.spotsOnMap ? 'checked' : ''}> Show the spots on the map</label><h4>Spots</h4><div class="sc" style="max-height:min(26vh,200px)">${spots.map(row).join('')}</div>${logHTML()}</div>`
+    tool.panel.querySelector('input').onchange = (e) => { save.spotsOnMap = e.target.checked; persist(); showMarks(); city.requestRender() }
     for (const b of tool.panel.querySelectorAll('[data-s]')) b.onclick = () => { // the map goes there
       const s = spots.find((q) => q.id === b.dataset.s)
       if (city.player || city.view.camera !== city.camera) return city.ui.toast(`${s.name}: ${s.blurb}`)
@@ -435,7 +435,7 @@ export default function fish(city) {
   const pole = M.marker(); pole.visible = false; city.scene.add(pole) // in a game: one depth-tested pole at the nearest spot, on foot or afloat
   function showMarks() {
     const P = city.player
-    marks.visible = save.onMap && !P
+    marks.visible = save.spotsOnMap && !P
     let best = null, bd = 250
     if (P && (P.mode === 'foot' || P.mode === 'boat')) for (const s of spots) { const d = Math.hypot(s.x - P.x, s.z - P.z); if (d < bd) { bd = d; best = s } }
     if (best) { pole.position.set(best.x, Math.max(city.world.heightAt(best.x, best.z), 0), best.z); pole.scale.setScalar(clamp(bd / 60, 1, 4)) }
