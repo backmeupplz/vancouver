@@ -2904,7 +2904,8 @@ def off_walls(lines, sw, gap=0.75, out_=seawall.SHIFT + 1):
         mv = (np.abs((d * t[q]).sum(1)) > 0.7) & (sd > -out_) & (need > 0)
         if mv.any(): Q[mv] += n[q[mv]] * need[mv, None]; L = dict(L, pts=[tuple(c) for c in Q])
         g = LineString(L['pts'])
-        if not face.intersects(g): out.append(L); continue
+        # (across it, or ending on it: stairs hung from a walk's path that was moved in start on the line itself, #579)
+        if not face.intersects(g) and min(Point(g.coords[0]).distance(face), Point(g.coords[-1]).distance(face)) >= gap: out.append(L); continue
         dd = g.difference(cut)
         parts = [p for p in getattr(dd, 'geoms', [dd]) if p.geom_type == 'LineString' and p.length >= 0.5]
         parts.sort(key=lambda p: g.project(Point(p.coords[0])))
@@ -3208,6 +3209,11 @@ def selftest():
     RETUN.clear()
     assert t['tunnel'] == 'yes' and c == [(70.0, 0.0), (100.0, 0.0)] and r[1] == 2 and r2 == [1, r[0]] and c2 == [(0.0, 0.0), (70.0, 0.0)] and b == 7 and a > 1 << 33 and r[0] < 1 << 53 and 'tunnel' not in t2
     rules_selftest()
+    # stairs that start on a wall's line (#579): cut, the piece starting past the gap; a path 5 m off is left whole
+    wl = [(np.array([[0.0, 0], [20, 0]]), np.full(2, 3.0), np.zeros(2), np.full(2, 3.0), np.ones(2), np.zeros(2), None)]
+    st = lambda x0, y0, y1: dict(kind='steps', z=None, w=2.0, a=1, b=2, pts=[(x0, y0), (x0, y1)])
+    o = off_walls([st(5, -0.05, -4), st(5, -5, -9)], wl)
+    assert len(o) == 2 and min(min(c[1] for c in L['pts']) for L in o[:1]) == -4 and o[0]['pts'][0][1] <= -0.75 and o[1]['pts'][0][1] == -5, o
     print('selftest ok')
 
 
