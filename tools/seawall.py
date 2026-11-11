@@ -36,9 +36,13 @@ PAVED = {'asphalt', 'concrete', 'paved', 'paving_stones', 'concrete:plates', 'se
 RAILS = {'fence', 'handrail', 'guard_rail', 'railing'}
 
 
+TRAILS = {}  # gather(): the paths that are not walks (tiles.py draws them all: the paved width counts them)
+
+
 def gather():
     """the coastline, the at-grade walks, the beaches and the railings of the whole map, each way once"""
     coast, paths, sand, rails, builds = {}, {}, {}, {}, {}
+    TRAILS.clear()
     for f in sorted(glob.glob('data/feat/*.pkl')):
         with open(f, 'rb') as fh: d = pickle.load(fh)
         for wid, pts, refs, t in d.get('lines', []):
@@ -48,6 +52,8 @@ def gather():
             if k in WALK and t.get('bridge', 'no') == 'no' and t.get('tunnel', 'no') == 'no' and t.get('man_made') != 'pier' and t.get('area') != 'yes' \
                     and (k != 'path' or t.get('surface') in PAVED or t.get('bicycle') == 'designated'):
                 paths[wid] = (pts, hnum(t.get('width')) or WALK[k])
+            elif (k in WALK or k == 'steps') and t.get('bridge', 'no') == 'no' and t.get('tunnel', 'no') == 'no' and t.get('man_made') != 'pier' and t.get('area') != 'yes':
+                TRAILS[wid] = (pts, hnum(t.get('width')) or WALK.get(k, 2.0))  # (what the walks' paths are not: an unpaved trail, stairs)
             if t.get('barrier') in RAILS: rails[wid] = pts
         for wid, prs, t in d.get('areas', []):
             if t.get('natural') in ('beach', 'sand') or t.get('leisure') == 'beach_resort': sand[wid] = prs
@@ -102,15 +108,20 @@ BAND = 0.95  # metres the walk's top may sit off the LiDAR ground on it (tools/g
 CLEAR = 0.3  # metres between the edge of a path along a wall and its line
 WALK_GRADE = 0.1  # the steepest a walk's top climbs along it where the ground lets it (tools/geom_rules.py SW_STEP: 0.2)
 SHIFT = 2.0  # metres a path along a wall may be mapped out past its edge (OSM against the LiDAR): moved in onto the walk
+GAPW = 4.0  # metres of gap between the edge of the walk so far and the next path for it to be the walk's too (paved width)
+LVL = 0.8  # metres a path's own level may be off the top for it to be the walk's
+O0 = 2.0  # the nearest to the line the top lets go of the ground (the strip on the line stays the top: sitting on the edge, the fish and sail checks)
+SLOPE, BMIN = 0.1, 1.0  # the blend's steepest (m of height over m of ground) and its shortest, metres
 
 
-def fit(P, n, z, w, pw, plines, ptree):
+def fit(P, n, z, w, pw, plines, ptree, tr=None):
     """a run's wall fitted to the LiDAR ground and its walk's paths (P its points on the coastline, n their normals to
     the land, z its top so far, w its walk's reach): the top the smoothest line that stays within BAND of the ground at
     the paths along it and across the walk (to 4 m in, or its reach), the reach in as far as the ground stays so, the
     line in to where the ground comes up to the top (the coastline is often drawn out at the foot of the rocks below
-    it) but out past every path along the walk -> (the line's offset in from P, top, reach from the line)"""
-    from scipy.ndimage import maximum_filter1d, median_filter, minimum_filter1d, uniform_filter1d
+    it) but out past every path along the walk -> (the line's offset in from P, top, reach from the line, the walk's paved
+    width from the line)"""
+    from scipy.ndimage import maximum_filter1d, median_filter, minimum_filter1d, percentile_filter, uniform_filter1d
     from scipy.spatial import cKDTree
     from shapely.geometry import LineString
     m = len(P)
@@ -119,18 +130,27 @@ def fit(P, n, z, w, pw, plines, ptree):
     D = np.stack([hr_lookup(P[:, 0] + o * n[:, 0], P[:, 1] + o * n[:, 1], 1) for o in off], 1)
     # the paths along the run (not across it: stairs, ramps), every metre: (its point, offset in, LiDAR ground, half width)
     near = cKDTree(P)
-    S = []
-    for q in ptree.query(LineString(P).buffer(REACH + 4)):
-        Q = np.array(densify(list(plines[q].coords), 1.0))
-        if len(Q) < 2: continue
-        d = np.gradient(Q, axis=0); d /= np.maximum(np.hypot(d[:, 0], d[:, 1]), 1e-9)[:, None]
-        _, k = near.query(Q)
-        o = ((Q - P[k]) * n[k]).sum(1); a = ((Q - P[k]) * t[k]).sum(1)
-        sel = (np.abs((d * t[k]).sum(1)) > 0.7) & (np.abs(a) <= STEP) & (o > -4) & (o < REACH + 2)
-        if sel.any(): S.append(np.c_[k[sel], o[sel], hr_lookup(Q[sel, 0], Q[sel, 1], 1), np.full(sel.sum(), pw[q][1] / 2), Q[sel]])
-    S = np.concatenate(S) if S else np.zeros((0, 6))
-    S = S[np.isfinite(S[:, 2])]
+    def along(lines, tree, hw):
+        S = []
+        for q in tree.query(LineString(P).buffer(REACH + 4)):
+            Q = np.array(densify(list(lines[q].coords), 1.0))
+            if len(Q) < 2: continue
+            d = np.gradient(Q, axis=0); d /= np.maximum(np.hypot(d[:, 0], d[:, 1]), 1e-9)[:, None]
+            _, k = near.query(Q)
+            o = ((Q - P[k]) * n[k]).sum(1); a = ((Q - P[k]) * t[k]).sum(1)
+            sel = (np.abs((d * t[k]).sum(1)) > 0.7) & (np.abs(a) <= STEP) & (o > -4) & (o < REACH + 2)
+            if sel.any():
+                lid = hr_lookup(Q[:, 0], Q[:, 1], 1)  # (a path's own level: the low fifth of the LiDAR along 31 m of it, a cliff only ever raises a 2 m cell)
+                lv = percentile_filter(np.where(np.isfinite(lid), lid, 99.0), 20, size=31, mode='nearest')
+                S.append(np.c_[k[sel], o[sel], lid[sel], np.full(sel.sum(), hw[q]), Q[sel], lv[sel], np.full(sel.sum(), q)])
+        S = np.concatenate(S) if S else np.zeros((0, 8))
+        return S[np.isfinite(S[:, 2])]
+    S = along(plines, ptree, [p[1] / 2 for p in pw])
+    LV = S[:, 6:]; S = S[:, :6]
     by = [S[S[:, 0] == k] for k in range(m)]
+    # (the paved width counts every path along the walk as the tiles draw them: a trail or stairs by the walk is paved ground too)
+    A = np.c_[S, LV]
+    if tr: A = np.r_[A, along(*tr) + [0, 0, 0, 0, 0, 0, 0, len(pw)]]
     # (to start: the ground a metre to 4 m in, the walk's paths' own LiDAR read low where one is mapped out over the edge)
     plateau = np.nanmedian(np.where((off >= 2) & (off <= 5), D, np.nan), 1)
     T = smooth_top(np.where(np.isfinite(plateau), np.fmax(plateau, z), z), GRADE, STEP); W = np.minimum(w, EDGE)
@@ -186,7 +206,28 @@ def fit(P, n, z, w, pw, plines, ptree):
         a = int(np.argmax(on)); far = np.flatnonzero(~on[a:] & np.isfinite(D[k][j][a:]))
         if len(far): lim[k] = off[j][a + far[0]] - 0.5 - ed[k]
     W = np.maximum(np.minimum(W, minimum_filter1d(lim, 3, mode='nearest')), 1.0)
-    return ed, T, W
+    # the walk's paved width: the far edge of the paths that are the walk's (the first within GAPW of the edge so far, and
+    # of the top's own level), a path mapped out over the edge as tools/tiles.py off_walls moves it; never under the
+    # reach or O0, the top does not let go of the ground inside it
+    # (a path mapped out over the edge is drawn moved in onto the walk: its level is the LiDAR's there)
+    kk = A[:, 0].astype(int); mv = (A[:, 1] - A[:, 3] < ed[kk] + CLEAR) & (A[:, 1] > ed[kk] - SHIFT - 1)
+    for q in np.unique(A[mv, 7]):
+        r = np.flatnonzero(mv & (A[:, 7] == q)); Q2 = A[r, 4:6] + n[kk[r]] * (ed[kk[r]] + CLEAR + A[r, 3] - A[r, 1])[:, None]
+        l2 = hr_lookup(Q2[:, 0], Q2[:, 1], 1); A[r, 6] = percentile_filter(np.where(np.isfinite(l2), l2, 99.0), 20, size=31, mode='nearest')
+    pby = [A[kk == k] for k in range(m)]
+    floor = np.minimum(W, O0); flat = floor.copy()
+    for k in range(m):
+        c = []
+        for _, o, _, hw, _, _, lv, _ in pby[k]:
+            lo, hi = o - hw - ed[k], o + hw - ed[k]
+            if lo < CLEAR and o > ed[k] - SHIFT - 1: lo, hi = CLEAR, CLEAR + 2 * hw
+            if lo + hw > 0: c.append((lo, hi, lv))
+        edge = floor[k]
+        for lo, hi, lv in sorted(c):
+            if lo > edge + GAPW or abs(lv - T[k]) > LVL: break
+            edge = max(edge, hi + 0.5)
+        flat[k] = min(edge, REACH)
+    return ed, T, W, np.maximum(uniform_filter1d(median_filter(flat, 9, mode='nearest'), 5, mode='nearest'), floor)
 
 
 def off_edges(P, clear=0.8):
@@ -224,6 +265,7 @@ def detect(coast, paths, sand, rails, why=None):
     plines = [LineString(p) for p, _ in pw]
     widths = np.array([w for _, w in pw])
     ptree = STRtree(plines)
+    tl = [LineString(p) for p, _ in TRAILS.values()]; tr = (tl, STRtree(tl), [w / 2 for _, w in TRAILS.values()]) if tl else None  # (the walks' paved width: trails and stairs too)
     sp = []
     for prs in sand.values():
         for o, ins in prs:
@@ -312,7 +354,7 @@ def detect(coast, paths, sand, rails, why=None):
             from scipy.ndimage import maximum_filter1d, median_filter, uniform_filter1d
             z = smooth_top(z, GRADE, STEP)
             w = np.minimum(uniform_filter1d(maximum_filter1d(w, 7), 7), EDGE)
-            ed, z, w = fit(P[s:e], n[s:e], z, w, pw, plines, ptree)
+            ed, z, w, pv = fit(P[s:e], n[s:e], z, w, pw, plines, ptree, tr)
             f = np.minimum(uniform_filter1d(median_filter(f, 9, mode='nearest'), 5, mode='nearest'), z - 0.8)
             Pw = off_edges(P[s:e] + n[s:e] * ed[:, None])
             rail = np.zeros(e - s, bool)
@@ -332,7 +374,7 @@ def detect(coast, paths, sand, rails, why=None):
             if other: keep &= shapely.distance(shapely.points(Pw), shapely.MultiLineString(other)) > TWIN
             for a, b in runs_of(keep, 2, int(16 / STEP)):
                 k = np.flatnonzero(keep[a:b]) + a
-                out.append((wid, Pw[k], z[k], w[k], rail[k], f[k])); lines.append((wid, LineString(Pw[k])))
+                out.append((wid, Pw[k], z[k], w[k], rail[k], f[k], pv[k])); lines.append((wid, LineString(Pw[k])))
     return out
 
 
@@ -412,7 +454,7 @@ def bake():
     ro = np.cumsum([0] + [len(r[1]) for r in R])
     pts = np.concatenate([r[1] for r in R]).astype(np.float32)
     np.savez_compressed(OUT, xy=pts, top=np.concatenate([r[2] for r in R]).astype(np.float32), reach=np.concatenate([r[3] for r in R]).astype(np.float32),
-                        gw=np.concatenate([walk_ground(r[1], r[3], r[2]) for r in R]).astype(np.float32),
+                        gw=np.concatenate([walk_ground(r[1], r[3], r[2]) for r in R]).astype(np.float32), pave=np.concatenate([r[6] for r in R]).astype(np.float32),
                         rail=np.concatenate([r[4] for r in R]).astype(bool), foot=np.concatenate([r[5] for r in R]).astype(np.float32), ro=ro.astype(np.int32),
                         kit=np.array(K, np.float32).reshape(-1, 4))
     km = sum(np.hypot(*np.diff(r[1], axis=0).T).sum() for r in R) / 1000
@@ -449,6 +491,35 @@ def walk_grounds(path=None):
     return [walk_ground(P, reach, top) for P, top, reach, _, _ in runs(path)]
 
 
+def paved(path=None):
+    """per run its paved width (fit()'s last value), from data/seawalls.npz: the reach for a file from before it had them"""
+    path = path or OUT
+    if not os.path.exists(path): return []
+    d = np.load(path)
+    if 'pave' in d: return [d['pave'][a:b].astype(float) for a, b in zip(d['ro'][:-1], d['ro'][1:])]
+    return [reach for _, _, reach, _, _ in runs(path)]
+
+
+def handover(P, top, reach, pave, ground):
+    """per point of a run where its top lets go of the ground and over how many metres: from where the drawn terrain
+    (ground, x, y -> z) first meets the top (O0 m in to the reach + 3; none: where it is nearest, up to the reach), a
+    running median then mean over 5 points, never inside the walk's paved width; the blend what is left between the
+    terrain there and the top (SLOPE m of height a metre, BMIN..B_IN), the longest of 3 points, a mean over 5
+    -> (Wd, Bd). Per point decisions that change from point to point along a run make more steps than they remove: it
+    is filtered along the run (tools/geom_rules.py seawall-walk)"""
+    from scipy.ndimage import maximum_filter1d, median_filter, uniform_filter1d
+    N = vnormals(P); W = reach.copy()
+    for k in range(len(P)):
+        a0 = min(O0, reach[k]); o = np.arange(a0, reach[k] + 3.01, 0.25); df = ground(P[k, 0] + N[k, 0] * o, P[k, 1] + N[k, 1] * o) - top[k]; ok = np.isfinite(df)
+        if not ok.any(): continue
+        j = np.flatnonzero((df[:-1] * df[1:] <= 0) & ok[:-1] & ok[1:])
+        if len(j): a = j[0]; W[k] = o[a] + 0.25 * abs(df[a]) / max(abs(df[a]) + abs(df[a + 1]), 1e-6)
+        else: m = ok & (o <= max(reach[k], a0)); m = m if m.any() else ok; W[k] = o[np.flatnonzero(m)[np.argmin(np.abs(df[m]))]]
+    W = np.maximum(uniform_filter1d(median_filter(W, 5, mode='nearest'), 5, mode='nearest'), pave)
+    r = np.abs(ground(P[:, 0] + N[:, 0] * W, P[:, 1] + N[:, 1] * W) - top); r = np.where(np.isfinite(r), r, 1.0)
+    return W, uniform_filter1d(maximum_filter1d(np.clip(r / SLOPE, BMIN, B_IN), 3, mode='nearest'), 5, mode='nearest')
+
+
 def ends(P):
     """per point of a run: 0 at its ends, up to 1 B_END metres along from them (the top blends into the ground there)"""
     s = np.r_[0, np.cumsum(np.hypot(*np.diff(P, axis=0).T))]
@@ -480,6 +551,7 @@ def height(R, g, x, y, low=None):
         best = np.full(len(x), R_); hv = g.copy()  # this run's nearest segment
         f = E[0] if E else ends(P)  # (a tile's piece of a run carries the whole run's)
         gw = E[1] if len(E) > 1 else None  # the terrain on its walk (inland()): what the walk blends to at the run's ends
+        hd = E[2] if len(E) > 2 else None  # where the top lets go of the ground and over how far (handover(): Wd, Bd), else the reach and B_IN
         a, b = P[:-1], P[1:]
         ab = b - a; L2 = np.maximum((ab ** 2).sum(1), 1e-9)
         N = vnormals(P)
@@ -494,9 +566,10 @@ def height(R, g, x, y, low=None):
                           ab[k, 0] * (y - a[k, 1]) - ab[k, 1] * (x - a[k, 0])))
             d = np.where(sd < 0, -dist, dist)
             T = top[k] + (top[k + 1] - top[k]) * u; Ft = foot[k] + (foot[k + 1] - foot[k]) * u; W = reach[k] + (reach[k + 1] - reach[k]) * u; F = f[k] + (f[k + 1] - f[k]) * u
+            Wd, Bd = (W, B_IN) if hd is None else (hd[0][k] + (hd[0][k + 1] - hd[0][k]) * u, hd[1][k] + (hd[1][k + 1] - hd[1][k]) * u)
             Gw = g if gw is None else g + (gw[k] + (gw[k + 1] - gw[k]) * u - g) * np.clip(2 * F, 0, 1)
             side = d > -SLIT if low is None else np.where(np.asarray(low, bool), d >= 0.4, d > -SLIT)
-            w_in = np.clip(1 - (d - W) / B_IN, 0, 1); w_out = np.clip(1 - (-d - LOW) / LOW_B, 0, 1)
+            w_in = np.clip(1 - (d - Wd) / Bd, 0, 1); w_out = np.clip(1 - (-d - LOW) / LOW_B, 0, 1)
             # the walk's side: its top; toward a run's ends first the terrain on the walk (the same across it: the coping stays
             # on the walk while the wall stands, F > 0.5), then the terrain where it is; past its reach the terrain there.
             # the foot's: the water or sand, toward the ends the terrain
@@ -520,7 +593,7 @@ def inland(P, reach, ground):
 
 def tile_walls(path):
     """a baked detail tile's seawall pieces (its SEAW section, tools/tiles.py seawall_section) as height() reads them:
-    [(points, top, reach, rail, foot, end weight[, the walk's ground: its SEAG section])]"""
+    [(points, top, reach, rail, foot, end weight[, the walk's ground: its SEAG section[, (Wd, Bd): its SEAB]])]"""
     import struct
     from common import read_tile
     b, ox, oy, size, sec, ring = read_tile(path)
@@ -535,6 +608,9 @@ def tile_walls(path):
     if 'SEAG' in sec:
         g = np.frombuffer(b, '<i2', sum(len(w[0]) for w in out), sec['SEAG'][0]) / 100; at = np.cumsum([0] + [len(w[0]) for w in out])
         out = [(*w, g[a:c]) for w, a, c in zip(out, at[:-1], at[1:])]
+        if 'SEAB' in sec:  # where each top lets go of the ground, and over how far (handover()): 1/10 m, per point
+            h = np.frombuffer(b, np.uint8, 2 * at[-1], sec['SEAB'][0]).reshape(-1, 2) / 10
+            out = [(*w, (h[a:c, 0], h[a:c, 1])) for w, a, c in zip(out, at[:-1], at[1:])]
     return out
 
 
@@ -549,6 +625,10 @@ def check():
     assert h(50, -2, 1.5) == FOOT and h(50, -20, 1.5) == 1.5  # the water at its foot, the sea further out as it is
     assert h(50, 0.1, 1.5, low=True) == FOOT and h(50, -0.1, 1.5, low=False) == 4.0  # at the line: by class
     assert h(0, 3, 2.0) == 2.0 and abs(h(B_END / 2, 3, 2.0) - 3.0) < 1e-6  # a run's ends blend into the ground
+    hd = (np.full(51, 6.0), np.full(51, 2.0))  # a top that lets go 6 m in over 2 m, not at the reach over B_IN
+    Rh = [(*R[0][:5], np.ones(51), np.full(51, 2.0), hd)]
+    h2 = lambda x, y, g: float(height(Rh, [g], [x], [y])[0])
+    assert h2(50, 6, 2.0) == 4.0 and abs(h2(50, 7, 2.0) - 3.0) < 1e-6 and h2(50, 8.1, 2.0) == 2.0
     print('seawall check ok')
 
 

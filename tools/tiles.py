@@ -141,7 +141,7 @@ TREES = city_trees()
 SECTIONS = lidar_sections()
 BEACH = np.load('data/beachlogs.npz') if os.path.exists('data/beachlogs.npz') else None  # tools/beachlogs.py
 import seawall
-WALLS = [(P, top, foot, reach, seawall.ends(P), rail, gw) for (P, top, reach, rail, foot), gw in zip(seawall.runs(), seawall.walk_grounds())]  # tools/seawall.py, optional
+WALLS = [(P, top, foot, reach, seawall.ends(P), rail, gw, pave) for (P, top, reach, rail, foot), gw, pave in zip(seawall.runs(), seawall.walk_grounds(), seawall.paved())]  # tools/seawall.py, optional
 KIT = np.load(seawall.OUT)['kit'] if os.path.exists(seawall.OUT) else np.zeros((0, 4))  # the beach things OSM maps (tools/seawall.py amenities)
 print('inputs ready', len(TREES), 'city trees', len(SECTIONS), 'lidar sections', flush=True)
 
@@ -441,6 +441,7 @@ def build(ij):
     # the geometry rules (tools/geom_rules.py): their fixes on this cell's buildings and road pieces, then what is left
     q8, qf = np.round(ground8 * 10) / 10, np.round(fine * 100) / 100  # (as drawn: decimetres, the offsets centimetres)
     g8 = lambda x, y: bilinear(q8, x, y, X0, Y0, 8) + bilinear(qf, x, y, X0, Y0, FINE)
+    hand = wall_hand(g8, X0, Y0)
     # the pieces of the next cells that meet this cell's at its seams (a deck ending at the seam, the street going on)
     seam = {n for L in lines for n in (L['a'], L['b'])}
     nxt = [L for L in nbr if L['a'] in seam or L['b'] in seam]
@@ -454,7 +455,7 @@ def build(ij):
             ti_, tj_ = i * 4 + a, j * 4 + b
             terr = ground8[(3 - b) * 128:(4 - b) * 128 + 1, a * 128:a * 128 + 129]  # 8 m: embankments, cuts and seawalls under the roads
             path = f'{OUT}/0/{ti_}_{tj_}.bin'
-            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, shops=shopn, boats=boats, beach=beach, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes, foreign=xdecks):
+            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, shops=shopn, boats=boats, beach=beach, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes, foreign=xdecks, hand=hand):
                 if os.path.exists(path): os.remove(path)  # an earlier bake's, now empty
                 continue
             tf = fine_section(fine[(3 - b) * 512:(4 - b) * 512 + 1, a * 512:a * 512 + 513])
@@ -2666,7 +2667,7 @@ def line_bytes(out, sel, detail):
     return bytes(lb)
 
 
-def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None, shops=(), beach=(), foreign=()):
+def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None, shops=(), beach=(), foreign=(), hand=None):
     tb = box(tx, ty, tx + size, ty + size)
     n = terr.shape[0]
     out.section('TERR', struct.pack('<H', n) + np.clip(np.round(terr * 10), -32768, 32767).astype('<i2').tobytes())
@@ -2692,7 +2693,7 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
             if not parts: continue
             g = unary_union(parts)
         per[k] = g
-    sw = seawalls_near(tx, ty, size) if detail else []
+    sw = seawalls_near(tx, ty, size, hand=hand) if detail else []
     if sw:  # the ground cut along each seawall's line (tools/seawall.py SLIT): the walk's edge on one side, the water or sand at its foot on the other, the face between
         # (where the page draws the face: tile-worker.js seawalls(), the wall at least 0.3 m over its foot)
         hi = [F * (top - foot) for P, top, foot, reach, F, *_ in sw]
@@ -2798,24 +2799,37 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     if sw:
         out.section('SEAW', seawall_section(out, sw))
         out.section('SEAG', np.round(np.concatenate([w[6] for w in sw]) * 100).astype('<i2').tobytes())  # (the walks' ground, tools/seawall.py walk_ground: per point, 1/100 m)
+        if hand is not None: out.section('SEAB', np.round(np.stack([np.concatenate([w[8] for w in sw]), np.concatenate([w[9] for w in sw])], 1) * 10).clip(0, 255).astype(np.uint8).tobytes())  # (where each top lets go of the ground, over how far: tools/seawall.py handover, per point 1/10 m)
     return runs > 0 or nb > 0 or len(sel) > 0
 
 
 WALL_M = 60  # metres round a detail tile its seawalls are kept to (the page's core/util.js WALL_R, and the ground past its edge)
 
 
-def seawalls_near(x0, y0, size, m=WALL_M):
+def wall_hand(g8, X0, Y0, edge=100.0):
+    """{run: (where its top lets go of the ground, over how far)} per point (tools/seawall.py handover) for the runs
+    within WALL_M of the 4 km cell at X0, Y0, whole runs (its filters look along them), on the ground as drawn (g8) but
+    within edge m of the cell's lines on the LiDAR's 8 m nodes (drawn_ground), the same function of position in the cell
+    on the other side of the line: every tile of a run holds the same numbers"""
+    inside = lambda x, y: np.minimum.reduce([x - X0, X0 + L1 - x, y - Y0, Y0 + L1 - y]) >= edge
+    ground = lambda x, y: np.where(inside(x, y), g8(x, y), drawn_ground(x, y))
+    return {q: seawall.handover(R[0], R[1], R[3], R[7], ground) for q, R in enumerate(WALLS)
+            if ((R[0][:, 0] > X0 - WALL_M) & (R[0][:, 0] < X0 + L1 + WALL_M) & (R[0][:, 1] > Y0 - WALL_M) & (R[0][:, 1] < Y0 + L1 + WALL_M)).any()}
+
+
+def seawalls_near(x0, y0, size, m=WALL_M, hand=None):
     """the pieces of the seawalls (WALLS) within m of a tile: [(points, top, foot, reach, end weight, rail)], each piece
     a run's points in reach and one more each side (the end weight is the whole run's: a piece's cut is no end), and the
-    walk's ground per point (seawall.walk_ground)"""
+    walk's ground per point (seawall.walk_ground), its paved width, and with hand ({run: (Wd, Bd)}, wall_hand()) where its top
+    lets go of the ground and over how far"""
     out = []
-    for R in WALLS:
+    for q, R in enumerate(WALLS):
         P = R[0]
         k = np.flatnonzero((P[:, 0] > x0 - m) & (P[:, 0] < x0 + size + m) & (P[:, 1] > y0 - m) & (P[:, 1] < y0 + size + m))
         if not len(k): continue
         for r in np.split(k, np.flatnonzero(np.diff(k) > 1) + 1):
             s_, e_ = max(0, r[0] - 1), min(len(P), r[-1] + 2)
-            if e_ - s_ >= 2: out.append(tuple(v[s_:e_] for v in R))
+            if e_ - s_ >= 2: out.append(tuple(v[s_:e_] for v in (*R, *hand[q])) if hand is not None and q in hand else tuple(v[s_:e_] for v in R))
     return out
 
 
@@ -2920,7 +2934,7 @@ def seawall_section(out, sw):
     """the SEAW section (the page's tile-worker.js terrain()): per piece its point count, per point x, north (Out.q), top
     and foot (1/100 m), reach (1/10 m), end weight (1/255), rail (1 a railing on its edge)"""
     b = bytearray(struct.pack('<I', len(sw)))
-    for P, top, foot, reach, f, rail, _ in sw:
+    for P, top, foot, reach, f, rail, *_ in sw:
         b += struct.pack('<I', len(P))
         for k in range(len(P)):
             b += struct.pack('<hhhhBBB', *out.q(*P[k]), int(round(top[k] * 100)), int(round(foot[k] * 100)), int(min(255, round(reach[k] * 10))), int(round(f[k] * 255)), int(rail[k]))

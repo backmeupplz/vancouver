@@ -768,7 +768,7 @@ def seawall_wall_check(ij, d):
     out = []
     for key, pieces in own.items():
         ox, oy = tiles[key][0], tiles[key][1]
-        for P, top, reach, rail, foot, F, _ in pieces:
+        for P, top, reach, rail, foot, F, *_ in pieces:
             m = (P[:, 0] >= ox) & (P[:, 0] < ox + L0) & (P[:, 1] >= oy) & (P[:, 1] < oy + L0) & (F > 0.5)  # (where the wall stands: not its ends, where it blends into the ground)
             if not m.any(): continue
             n = _wall_frames(P)[m]; P_ = P[m]

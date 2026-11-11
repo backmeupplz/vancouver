@@ -203,7 +203,9 @@ function terrain(t) {
     }
     const e = out.ext // (the walk's terrain a few metres in may lie in the next tile)
     const sg = t.sections.SEAG // the walks' ground (tools/seawall.py walk_ground): the same in every tile a run passes; older tiles: this tile's terrain
-    out.wall = wallGrid(Float32Array.from(P), starts, sg ? (x, y, i) => dv.getInt16(sg.off + 2 * i, true) / 100 : (x, y) => out.f && x >= 0 && y >= 0 && x <= t.size && y <= t.size ? sampleTerr(out, x, y) : e ? sampleGrid(e.h, e.n, e.size, x + e.off, y + e.off) : sampleGrid(h, n, t.size, x, y))
+    const sb = t.sections.SEAB // where each point's top lets go of the ground, and over how many metres (tools/tiles.py: 1/10 m, u8, per point of SEAW); older tiles: the reach and 10 m
+    const D = sb ? Float32Array.from({ length: (P.length / 7) * 2 }, (_, i) => dv.getUint8(sb.off + i) / 10) : null
+    out.wall = wallGrid(Float32Array.from(P), starts, sg ? (x, y, i) => dv.getInt16(sg.off + 2 * i, true) / 100 : (x, y) => out.f && x >= 0 && y >= 0 && x <= t.size && y <= t.size ? sampleTerr(out, x, y) : e ? sampleGrid(e.h, e.n, e.size, x + e.off, y + e.off) : sampleGrid(h, n, t.size, x, y), D)
   }
   return out
 }

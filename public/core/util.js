@@ -45,7 +45,7 @@ export const SEA0 = -0.7, SEA_RISE = 1.4
 // lower water) rises by it; water baked above the sea (a shelf, a lagoon) only once the sea reaches it
 export const seaSurface = (h, level) => (h > SEA0 ? Math.max(h, SEA0 + level) : h + level)
 const WALL_C = 32, WALL_N = 34, WALL_R = 32 // cell, cells across (one past each edge), the furthest a wall reaches (REACH + 4 + B_IN)
-export function wallGrid(P, starts, ground) {
+export function wallGrid(P, starts, ground, D) { // D: per point (where the top lets go, over how far; section SEAB), or none: the reach and B_IN
   const seg = []
   for (let r = 0; r < starts.length - 1; r++) for (let i = starts[r]; i < starts[r + 1] - 1; i++) seg.push(i)
   const lists = Array.from({ length: WALL_N * WALL_N }, () => [])
@@ -67,7 +67,8 @@ export function wallGrid(P, starts, ground) {
   for (let i = 0; i < G.length; i++) { const o = Math.min(P[i * 7 + 4], 4); G[i] = ground ? ground(P[i * 7] + N[i * 2] * o, P[i * 7 + 1] + N[i * 2 + 1] * o, i) : NaN }
   const segRun = new Int32Array(seg.length)
   for (let k = 0, r = 0; k < seg.length; k++) { while (seg[k] >= starts[r + 1]) r++; segRun[k] = r }
-  return { P, N, G, runs: Int32Array.from(starts), seg: Int32Array.from(seg), segRun, start, idx: Int32Array.from(lists.flat()) }
+  if (!D) { D = new Float32Array((P.length / 7) * 2); for (let i = 0; i < D.length; i += 2) { D[i] = P[(i / 2) * 7 + 4]; D[i + 1] = B_IN } }
+  return { P, N, G, D, runs: Int32Array.from(starts), seg: Int32Array.from(seg), segRun, start, idx: Int32Array.from(lists.flat()) }
 }
 // a wall within reach of the 32 m cell of (x, y): the ground there may be the wall's, not the terrain's alone
 export const wallNear = (W, x, y) => { const c = Math.max(0, Math.min(WALL_N - 1, Math.floor(y / WALL_C) + 1)) * WALL_N + Math.max(0, Math.min(WALL_N - 1, Math.floor(x / WALL_C) + 1)); return W.start[c + 1] > W.start[c] }
@@ -97,7 +98,8 @@ export function wallHeight(W, g, x, y, low) {
     const d = sd < 0 ? -dist : dist, lerp = (o) => P[a + o] + (P[b + o] - P[a + o]) * u, F = lerp(5)
     if (low ? d >= 0.4 : d > -0.2) { // the walk: toward a run's ends first the terrain on its walk (the coping stays on it), then the terrain here
       const gw = W.G ? W.G[i] + (W.G[i + 1] - W.G[i]) * u : NaN, Gc = gw === gw ? g + (gw - g) * Math.min(1, 2 * F) : g
-      rh = g + (Gc + (lerp(2) - Gc) * F - g) * Math.max(0, Math.min(1, 1 - (d - lerp(4)) / B_IN))
+      const Wd = W.D[i * 2] + (W.D[i * 2 + 2] - W.D[i * 2]) * u, Bd = W.D[i * 2 + 1] + (W.D[i * 2 + 3] - W.D[i * 2 + 1]) * u
+      rh = g + (Gc + (lerp(2) - Gc) * F - g) * Math.max(0, Math.min(1, 1 - (d - Wd) / Bd))
     } else rh = g + (lerp(3) - g) * Math.max(0, Math.min(1, 1 - (-d - LOW) / LOW_B)) * F
   }
   done()

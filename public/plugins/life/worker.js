@@ -143,7 +143,8 @@ function wallH(W, g, x, y) {
     const d = sd < 0 ? -dist : dist, lerp = (o) => P[a + o] + (P[b + o] - P[a + o]) * u, F = lerp(5)
     if (d > -0.2) {
       const gw = W.G ? W.G[i] + (W.G[i + 1] - W.G[i]) * u : NaN, Gc = gw === gw ? g + (gw - g) * Math.min(1, 2 * F) : g
-      rh = g + (Gc + (lerp(2) - Gc) * F - g) * Math.max(0, Math.min(1, 1 - (d - lerp(4)) / 10))
+      const Wd = W.D[i * 2] + (W.D[i * 2 + 2] - W.D[i * 2]) * u, Bd = W.D[i * 2 + 1] + (W.D[i * 2 + 3] - W.D[i * 2 + 1]) * u
+      rh = g + (Gc + (lerp(2) - Gc) * F - g) * Math.max(0, Math.min(1, 1 - (d - Wd) / Bd))
     } else rh = g + (lerp(3) - g) * Math.max(0, Math.min(1, 1 - (-d - 2) / 8)) * F
   }
   done()
