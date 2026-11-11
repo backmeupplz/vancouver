@@ -69,7 +69,7 @@ export function createCity({ scene, overlay, camera, renderer, controls, zAt, ll
       get sky() { return surface?.sky.value },
       get seaHole() { return surface?.seaHole.value }, // Vector4 (x, sea level, z, radius): no map sea in there (radius 0: off)
     },
-    // the sea: `level`, metres the water stands above the map's baked sea (the tide, set by the weather plugin: the
+    // the sea: `level`, metres the water stands above the lowest sea (0 to 0.7) (the tide, set by the weather plugin: the
     // map's water, docks and berthed boats rise with it, 'tide' is emitted), and `surfaceAt(x, z)`, a plugin's own
     // water surface (the sail plugin's waves while sailing), else null
     sea: {

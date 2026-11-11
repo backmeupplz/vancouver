@@ -25,7 +25,7 @@ look; PLUGINS.md is the plugin contract. Read the parts you need, not the whole 
   `progress/` (cash, XP, levels, maple leaves, dailies, leaderboards: `city.progress`), `weather/`, `transit/`, `ships/`, `planes/`, `landmarks/`, `lofi/`, `multiplayer/`
 - `tools/`: bake (`tiles.py` main, `osm_split.py`, `sea.py`, `heights.py`, `hrdem.py`, `common.py` shared helpers),
   data (`roofs.py`, `beachlogs.py`, `facades.py`, `mapillary.py`, `transit_data.py`), audits/checks (`audit_elev.py`,
-  `audit_trunks.py`, `fish_check.mjs` (fishing rules, spots at the water's edge, a scripted catch and crab haul), `sail_check.mjs` (race marks and starts on water, clear of moored boats), `geom_rules.py` (every geometry rule: checks + fixes, the publish gate; `drawn_check.mjs` its checks on
+  `audit_trunks.py`, `fish_check.mjs` (fishing rules, spots at the water's edge, a scripted catch and crab haul), `tide_check.mjs` (the tide's shore field: no jump along a triangle, none at a lake's sand), `sail_check.mjs` (race marks and starts on water, clear of moored boats), `geom_rules.py` (every geometry rule: checks + fixes, the publish gate; `drawn_check.mjs` its checks on
   what the page draws), `*_check.mjs`, `python3 tools/tiles.py selftest`)
 - `server/` Rust live server (`cargo test`)
 

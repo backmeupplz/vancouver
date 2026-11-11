@@ -3,7 +3,7 @@
 // Walls by what they face and the single-arm street lights follow Slop Toronto's rules (MIT, © 2026 Mr.doob, © 2026 John
 // Fewell; THIRD_PARTY.md).
 import earcut, { refine as delaunay } from '../vendor/earcut.js'
-import { mulberry32 as mulberry, inPoly, sampleGrid, sampleTerr, wallGrid, wallHeight, wallNear, gores, stripped } from './util.js'
+import { mulberry32 as mulberry, inPoly, sampleGrid, sampleTerr, wallGrid, wallHeight, wallNear, gores, stripped, SEA0, BED_TOP, BED_S } from './util.js'
 const GROUND_LIFT = 0 // the ground is one non-overlapping layer (tools/tiles.py), so no class needs lifting
 const KIND = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living', 'pedestrian', 'footway', 'cycleway',
   'path', 'steps', 'track', 'rail', 'lightrail', 'runway', 'taxiway']
@@ -433,11 +433,53 @@ function ground(t, terr, level) {
   const nv = pos.length / 3
   if (!nv) return null
   const P = new Float32Array(pos), I = nv > 65535 ? Uint32Array : Uint16Array
-  // tidal: the water's vertices on a beach's edge (within 2-4 m of the sand's), 255: the water lying on the shore between
-  // them and the sea is the beach the tide uncovers (materials.js). Not where the water is rough under a marina's boats
+  // tidal, a byte a vertex (materials.js ground: the tide). Water: how far it is from a beach's edge, 255 on it and one
+  // less every half metre out (0: no beach within 127 m, always water): the beach's bed falls away from its edge, so
+  // the waterline moves out as the tide falls, wherever the triangles' corners are. A beach's edge: the water's
+  // triangle edges whose ends both lie on sand's (within 2-4 m), with the sea within 64 m (not a river's bar).
+  // Other ground: 255 within FLOOD_R of the sea (it floods when the tide stands over it), else 0
   const tidal = new Uint8Array(nv), sandAt = new Set(), tk = (i, dx, dz) => (Math.round(P[i * 3] / 2) + dx) * 65536 + Math.round(P[i * 3 + 2] / 2) + dz
-  for (let i = 0; i < nv; i++) if (cls[i] === SAND) sandAt.add(tk(i, 0, 0))
-  if (sandAt.size) for (let i = 0; i < nv; i++) if (cls[i] === WATER) for (let d = 0; d < 9 && !tidal[i]; d++) if (sandAt.has(tk(i, (d % 3) - 1, Math.floor(d / 3) - 1))) tidal[i] = 255
+  const SEA_TOP = SEA0 + 0.01, FLOOD_R = 24, BC = 64, ck = (x, z) => Math.floor(x / BC) * 65536 + Math.floor(z / BC)
+  const seaAt = new Set(), floodAt = new Set(), fk = (i, dx, dz) => (Math.floor(P[i * 3] / FLOOD_R) + dx) * 65536 + Math.floor(P[i * 3 + 2] / FLOOD_R) + dz
+  for (let i = 0; i < nv; i++) {
+    if (cls[i] === SAND) sandAt.add(tk(i, 0, 0))
+    else if (cls[i] === WATER && P[i * 3 + 1] <= SEA_TOP) { seaAt.add(ck(P[i * 3], P[i * 3 + 2])); floodAt.add(fk(i, 0, 0)) }
+  }
+  if (seaAt.size) {
+    const near = (set, key) => { for (let d = 0; d < 9; d++) if (set.has(key(d % 3 - 1, Math.floor(d / 3) - 1))) return true; return false }
+    const edge = new Uint8Array(nv), segs = new Map() // beach edges by BC cell: [ax, az, bx, bz, ...]
+    if (sandAt.size) for (let i = 0; i < nv; i++) if (cls[i] === WATER && P[i * 3 + 1] < 3 && near(sandAt, (dx, dz) => tk(i, dx, dz)) && near(seaAt, (dx, dz) => ck(P[i * 3] + dx * BC, P[i * 3 + 2] + dz * BC))) edge[i] = 1
+    for (let q = 0; q < idx.length; q += 3) for (let e = 0; e < 3; e++) {
+      const a = idx[q + e], b = idx[q + (e + 1) % 3]
+      if (a > b || !edge[a] || !edge[b]) continue
+      const ax = P[a * 3], az = P[a * 3 + 2], bx = P[b * 3], bz = P[b * 3 + 2]
+      for (let i = Math.floor(Math.min(ax, bx) / BC); i <= Math.floor(Math.max(ax, bx) / BC); i++) for (let j = Math.floor(Math.min(az, bz) / BC); j <= Math.floor(Math.max(az, bz) / BC); j++) {
+        const k = i * 65536 + j; let l = segs.get(k); if (!l) segs.set(k, (l = [])); l.push(ax, az, bx, bz)
+      }
+    }
+    // how far each of the water's vertices is from a beach's edge
+    const dist = new Float32Array(nv).fill(127), pts = new Map() // pts: ground known under the water near a beach, by BC cell: [x, z, how far out its height puts it, ...]
+    const cells = (map, x, z, r, f) => { for (let u = -r; u <= r; u++) for (let v = -r; v <= r; v++) { const l = map.get((Math.floor(x / BC) + u) * 65536 + Math.floor(z / BC) + v); if (l) f(l) } }
+    if (edge.some((e) => e)) for (let i = 0; i < nv; i++) {
+      if (cls[i] !== WATER) continue
+      if (edge[i]) { dist[i] = 0; const k = ck(P[i * 3], P[i * 3 + 2]); let l = pts.get(k); if (!l) pts.set(k, (l = [])); l.push(P[i * 3], P[i * 3 + 2], 0); continue } // (also on its own: an edge's corner with no edge drawn from it)
+      const x = P[i * 3], z = P[i * 3 + 2]; let best = 127
+      cells(segs, x, z, 2, (l) => { for (let s = 0; s < l.length; s += 4) {
+        const dx = l[s + 2] - l[s], dz = l[s + 3] - l[s + 1], f = Math.min(1, Math.max(0, ((x - l[s]) * dx + (z - l[s + 1]) * dz) / (dx * dx + dz * dz || 1)))
+        best = Math.min(best, Math.hypot(x - l[s] - dx * f, z - l[s + 1] - dz * f))
+      } })
+      dist[i] = best
+      // the water baked on ground that stands over the sea (the foreshore the survey saw): as far out as its height puts it
+      if (best < 127 && P[i * 3 + 1] > SEA_TOP) { const own = Math.max(0, (BED_TOP - P[i * 3 + 1]) / BED_S); if (own < best) { dist[i] = own; const k = ck(x, z); let l = pts.get(k); if (!l) pts.set(k, (l = [])); l.push(x, z, own) } }
+    }
+    for (let i = 0; i < nv; i++) {
+      if (cls[i] === PIER) continue
+      if (cls[i] !== WATER) { if (cls[i] !== SAND && near(floodAt, (dx, dz) => fk(i, dx, dz))) tidal[i] = 255; continue }
+      let best = dist[i]; const x = P[i * 3], z = P[i * 3 + 2]
+      if (best > 0 && pts.size) cells(pts, x, z, 2, (l) => { for (let s = 0; s < l.length; s += 3) best = Math.min(best, l[s + 2] + Math.hypot(x - l[s], z - l[s + 1])) })
+      tidal[i] = best >= 127 ? 0 : 255 - Math.round(best * 2)
+    }
+  }
   return { position: P, normal: normals(terr, P), cls: new Uint8Array(cls), tidal, index: new I(idx), coarse: coarse && new I(coarse) }
 }
 
@@ -2063,4 +2105,4 @@ function trees(t, terr) {
   return { pos, info }
 }
 
-export { parse, build, readBuilding, readLines, pois, carEnds, crosswalks, onCarriage, roadMask, terrain, roads, eachPoly } // for tools/crosswalk_check.mjs, drive_check.mjs, deck_check.mjs, drawn_check.mjs
+export { parse, build, readBuilding, readLines, pois, carEnds, crosswalks, onCarriage, roadMask, terrain, roads, eachPoly, ground } // for tools/crosswalk_check.mjs, drive_check.mjs, deck_check.mjs, drawn_check.mjs
