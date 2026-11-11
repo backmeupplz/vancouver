@@ -4,10 +4,10 @@
 // Never reorder or delete an entry: a leaf's id is `${area index}.${index}` in the player's save. Append only.
 export const AREAS = [
   ['Downtown', [
-    ['Gastown Steam Clock', 49.2844, -123.1089], ['Canada Place', 49.2886, -123.1113], ['Robson Square', 49.2822, -123.1212],
+    ['Gastown Steam Clock', 49.2844, -123.1089], ['Canada Place', 49.2872, -123.1128], ['Robson Square', 49.2822, -123.1212],
     ['Harbour Centre', 49.2846, -123.1117], ['The Olympic Cauldron', 49.2892, -123.1178], ['Dr. Sun Yat-Sen Garden', 49.2797, -123.1040],
-    ['BC Place', 49.2768, -123.1127], ['Science World', 49.2732, -123.1040], ['The English Bay Inukshuk', 49.2846, -123.1437],
-    ['A-maze-ing Laughter', 49.2876, -123.1419], ['The Yaletown Roundhouse', 49.2735, -123.1218], ['Library Square', 49.2797, -123.1156],
+    ['BC Place', 49.2790, -123.1105], ['Science World', 49.2728, -123.1020], ['The English Bay Inukshuk', 49.2846, -123.1437],
+    ['A-maze-ing Laughter', 49.2876, -123.1419], ['The Yaletown Roundhouse', 49.2735, -123.1218], ['Library Square', 49.2790, -123.1145],
     ['CRAB Park', 49.2853, -123.1015], ['Sunset Beach', 49.2797, -123.1380],
   ]],
   ['Stanley Park', [
@@ -18,14 +18,14 @@ export const AREAS = [
   ]],
   ['West Side & UBC', [
     ['Kitsilano Beach', 49.2745, -123.1535], ['Kits Pool', 49.2753, -123.1575], ['The planetarium’s crab', 49.2763, -123.1445],
-    ['Granville Island market', 49.2726, -123.1350], ['Jericho Beach', 49.2727, -123.1930], ['Locarno Beach', 49.2760, -123.2085],
-    ['Spanish Banks', 49.2775, -123.2250], ['The UBC Rose Garden', 49.2694, -123.2565], ['Museum of Anthropology', 49.2695, -123.2590],
+    ['Granville Island market', 49.2716, -123.1350], ['Jericho Beach', 49.2727, -123.1930], ['Locarno Beach', 49.2760, -123.2085],
+    ['Spanish Banks', 49.2775, -123.2250], ['The UBC Rose Garden', 49.2694, -123.2565], ['Museum of Anthropology', 49.2688, -123.2590],
     ['Wreck Beach', 49.26223, -123.26153], ['The UBC clock tower', 49.2675, -123.2545], ['Camosun Bog', 49.2530, -123.1975],
     ['Queen Elizabeth Park lookout', 49.2418, -123.1126], ['VanDusen Garden', 49.2390, -123.1300], ['City Hall', 49.2607, -123.1139],
     ['Fraser River Park', 49.2052, -123.1475],
   ]],
   ['East Van', [
-    ['Grandview Park on the Drive', 49.2755, -123.0695], ['Trout Lake', 49.2555, -123.0625], ['Playland’s wooden coaster', 49.2815, -123.0370],
+    ['Grandview Park on the Drive', 49.2755, -123.0695], ['Trout Lake', 49.2555, -123.0625], ['Playland’s wooden coaster', 49.2813, -123.0415],
     ['New Brighton Park', 49.2905, -123.0365], ['Dude Chilling Park', 49.2640, -123.0965], ['The Punjabi Market', 49.2255, -123.1010],
     ['Everett Crowley Park', 49.2125, -123.0300], ['The East Van cross', 49.2665, -123.0795], ['Strathcona Park', 49.2755, -123.0850],
   ]],
@@ -42,7 +42,7 @@ export const AREAS = [
     ['Cypress Mountain', 49.3960, -123.2045], ['Caulfeild Cove', 49.3385, -123.2530], ['Lions Bay', 49.4550, -123.2360],
   ]],
   ['Burnaby & New West', [
-    ['Kamui Mintara on Burnaby Mountain', 49.2830, -122.9340], ['SFU', 49.2790, -122.9190], ['Deer Lake', 49.2360, -122.9730],
+    ['Kamui Mintara on Burnaby Mountain', 49.2830, -122.9340], ['SFU', 49.2787, -122.9235], ['Deer Lake', 49.2360, -122.9730],
     ['Burnaby Village Museum', 49.2400, -122.9730], ['Metrotown', 49.2260, -123.0030], ['Central Park', 49.2275, -123.0180],
     ['Piper Spit on Burnaby Lake', 49.2475, -122.9395], ['Barnet Marine Park', 49.2905, -122.9265], ['Brentwood', 49.2665, -123.0005],
     ['Confederation Park', 49.2860, -123.0010], ['Burnaby Fraser Foreshore', 49.1940, -122.9990], ['New West Quay', 49.2005, -122.9125],
@@ -56,7 +56,7 @@ export const AREAS = [
   ]],
   ['Richmond', [
     ['Steveston wharf', 49.1245, -123.1845], ['Garry Point', 49.1255, -123.1930], ['Britannia Shipyards', 49.1215, -123.1660],
-    ['The Olympic Oval', 49.1745, -123.1515], ['Iona Beach', 49.2200, -123.2130], ['YVR', 49.1945, -123.1780],
+    ['The Olympic Oval', 49.1745, -123.1515], ['Iona Beach', 49.2200, -123.2130], ['YVR', 49.1965, -123.1840],
     ['Flight Path Park', 49.1835, -123.1575], ['Terra Nova', 49.1745, -123.1990], ['Minoru Park', 49.1650, -123.1440],
     ['The Night Market', 49.1965, -123.1280], ['The Buddhist temple', 49.1335, -123.1235], ['Finn Slough', 49.1205, -123.1005],
   ]],
@@ -74,9 +74,9 @@ export const AREAS = [
   ]],
   ['On the water', [
     ['Under the Lions Gate', 49.3150, -123.1385, 1], ['Off Siwash Rock', 49.3092, -123.1580, 1], ['Among the freighters', 49.2950, -123.1900, 1],
-    ['False Creek', 49.2715, -123.1250, 1], ['Coal Harbour', 49.2930, -123.1240, 1], ['Off Kits Point', 49.2800, -123.1500, 1],
+    ['False Creek', 49.2698, -123.1265, 1], ['Coal Harbour', 49.2930, -123.1240, 1], ['Off Kits Point', 49.2800, -123.1500, 1],
     ['Off Jericho', 49.2795, -123.1950, 1], ['Off Ambleside', 49.3190, -123.1500, 1], ['Point Atkinson', 49.3285, -123.2660, 1],
     ['The Point Grey bell buoy', 49.2850, -123.2650, 1], ['Second Narrows', 49.2955, -123.0265, 1], ['Indian Arm off Deep Cove', 49.3270, -122.9400, 1],
-    ['Port Moody Arm', 49.2900, -122.8800, 1],
+    ['Port Moody Arm', 49.2935, -122.8700, 1],
   ]],
 ]

@@ -295,11 +295,13 @@ export default function progress(city) {
           }
         }
       }
+      l.snap = best < 250 * 250 ? Math.sqrt(best) : -1
       l.x = bx; l.z = -bn; l.set = true; l.y = l.sea ? 0 : city.world.heightAt(l.x, l.z)
       show()
     }
   }
   const offTiles = city.world.eachTile(settle)
+  if (location.search.includes('drivedebug')) window.progressDebug = { leaves: () => LEAVES.map((l) => ({ id: l.id, name: l.name, area: l.area, sea: l.sea, set: l.set, snap: l.snap, x: l.x, z: l.z, ll: AREAS[l.area][1][+l.id.split('.')[1]].slice(1, 3) })), AREAS } // tools/leaves_check.mjs
 
   // on the map: only with the panel's switch on, as big markers; in a game: life-size, turning, near the player
   let nearT = 0, spin = 0
