@@ -45,6 +45,43 @@ export const SEA0 = 0.02, SEA_RISE = 0.7, BED_TOP = SEA0 + SEA_RISE + 0.12, BED_
 // the still water's height where the baked water lies at h, with the sea `level` above the lowest: the sea itself is
 // level; water baked above it (a shelf, a lagoon) only once the sea reaches it
 export const seaSurface = (h, level) => Math.max(h, SEA0 + level)
+// Piers. A float (floating dock) rides its water: FLOAT_UP over seaSurface; its triangles are the pier index, so the
+// walker, the boat and the bobber read what is drawn. tri: 6 per triangle (tile-local x, north), y: 3 per triangle
+// (the drawn top at tide 0), fl: per triangle bits 0-2 vertex rides the tide, 8 road, 16 fixed; 8 m cells, CSR
+export const FLOAT_UP = 0.45
+const PIER_N = 128
+export function pierIndex(tri, y, fl, size) {
+  const c = size / PIER_N, nt = fl.length, cnt = new Uint32Array(PIER_N * PIER_N + 1)
+  const span = (i, f) => {
+    const xs = [tri[i * 6], tri[i * 6 + 2], tri[i * 6 + 4]], ys = [tri[i * 6 + 1], tri[i * 6 + 3], tri[i * 6 + 5]]
+    const cl = (v) => Math.max(0, Math.min(PIER_N - 1, Math.floor(v / c)))
+    for (let j = cl(Math.min(...ys)); j <= cl(Math.max(...ys)); j++) for (let k = cl(Math.min(...xs)); k <= cl(Math.max(...xs)); k++) f(j * PIER_N + k)
+  }
+  for (let i = 0; i < nt; i++) span(i, (k) => cnt[k + 1]++)
+  for (let k = 0; k < PIER_N * PIER_N; k++) cnt[k + 1] += cnt[k]
+  const list = new Uint32Array(cnt[PIER_N * PIER_N]), at = cnt.slice(0, PIER_N * PIER_N)
+  for (let i = 0; i < nt; i++) span(i, (k) => { list[at[k]++] = i })
+  return { tri, y, fl, c, start: cnt, list }
+}
+// the pier's top at tile-local (x, y north) at `tide`, or null; flags (pierFlags) of the triangle found in P.last
+export function pierTop(P, x, y, tide = 0) {
+  const n = PIER_N, i0 = Math.floor(x / P.c), j0 = Math.floor(y / P.c)
+  if (i0 < 0 || j0 < 0 || i0 >= n || j0 >= n) return null
+  const k = j0 * n + i0, T = P.tri
+  for (let s = P.start[k]; s < P.start[k + 1]; s++) {
+    const t = P.list[s], o = t * 6
+    const ax = T[o], ay = T[o + 1], bx = T[o + 2], by = T[o + 3], cx = T[o + 4], cy = T[o + 5]
+    const d = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+    if (d === 0) continue
+    const u = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / d, v = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / d, w = 1 - u - v
+    if (u < -1e-6 || v < -1e-6 || w < -1e-6) continue
+    const f = P.fl[t], Y = P.y, h = [Y[t * 3], Y[t * 3 + 1], Y[t * 3 + 2]]
+    for (let m = 0; m < 3; m++) if (f & (1 << m)) { const s0 = h[m] - FLOAT_UP; h[m] += seaSurface(s0, tide) - s0 }
+    P.flags = f
+    return u * h[0] + v * h[1] + w * h[2]
+  }
+  return null
+}
 const WALL_C = 32, WALL_N = 34, WALL_R = 32 // cell, cells across (one past each edge), the furthest a wall reaches (REACH + 4 + B_IN)
 export function wallGrid(P, starts, ground, D) { // D: per point (where the top lets go, over how far; section SEAB), or none: the reach and B_IN
   const seg = []

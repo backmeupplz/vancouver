@@ -5,7 +5,7 @@ import * as THREE from 'three'
 import { FAMILY, night } from './materials.js'
 import { kit, kitMaterial } from './kit.js'
 import { FORMS, ASPECT } from './treeforms.js'
-import { sampleGrid, sampleTerr, wallHeight, seaSurface } from './util.js'
+import { sampleGrid, sampleTerr, wallHeight, seaSurface, pierTop } from './util.js'
 
 const SIZES = [1024, 4096]
 const ij = (level, i, j) => (level * 4096 + i + 2048) * 4096 + j + 2048 // a tile's number (|i|, |j| < 2048)
@@ -796,10 +796,33 @@ export class Tiles {
     sails.forEach((i, k) => { parts[0].getMatrixAt(i, M); parts[2].setMatrixAt(k, M) })
     for (const im of parts) if (im.count) { im.instanceMatrix.needsUpdate = true; im.computeBoundingSphere() }
   }
-  heightAt(x, y) {
+  // pier index of the detail tile at (x, y): { t, P } or null
+  pierIn(x, y) {
+    const t = this.byIJ.get(ij(0, Math.floor(x / SIZES[0]), Math.floor(y / SIZES[0])))
+    return t?.terrain?.pier ? t : null
+  }
+  // the pier (float or deck) under (x, y) as drawn now: { y, road, fixed } or null
+  pierAt(x, y) {
+    const t = this.pierIn(x, y)
+    if (!t) return null
+    const h = pierTop(t.terrain.pier, x - t.ox, y - t.oy, this.sea || 0)
+    return h === null ? null : { y: h, road: !!(t.terrain.pier.flags & 8), fixed: !!(t.terrain.pier.flags & 16) }
+  }
+  // is (x, y) open water: the tile's water mask (4 m cells) and not a pier (a pier narrower than a cell owns none)
+  isWater(x, y) {
+    const t = this.tiles.get(this.key(0, Math.floor(x / 1024), Math.floor(y / 1024))), w = t?.water
+    if (!w) return false
+    const n = w.n, i = Math.floor(((x - t.ox) / 1024) * n), j = Math.floor(((y - t.oy) / 1024) * n)
+    return i >= 0 && j >= 0 && i < n && j < n && w.mask[j * n + i] === 1 && !this.pierAt(x, y)
+  }
+  heightAt(x, y, raw) { // raw: the terrain without a pier's deck
     for (let level = 0; level < 2; level++) {
       const s = SIZES[level], t = this.byIJ.get(ij(level, Math.floor(x / s), Math.floor(y / s)))
-      if (t?.terrain) { const T = t.terrain, g = T.f ? sampleTerr(T, x - t.ox, y - t.oy) : sampleGrid(T.h, T.n, s, x - t.ox, y - t.oy); return T.wall ? wallHeight(T.wall, g, x - t.ox, y - t.oy) : g } // (the 2 m offsets, the seawalls' walks: core/util.js)
+      if (t?.terrain) {
+        const T = t.terrain, g = (T.f ? sampleTerr(T, x - t.ox, y - t.oy) : sampleGrid(T.h, T.n, s, x - t.ox, y - t.oy)), w = T.wall ? wallHeight(T.wall, g, x - t.ox, y - t.oy) : g // (the 2 m offsets, the seawalls' walks: core/util.js)
+        if (!raw && T.pier) { const p = pierTop(T.pier, x - t.ox, y - t.oy, this.sea || 0); if (p !== null && p > w) return p }
+        return w
+      }
     }
     const g = this.coarse
     if (!g) return 0

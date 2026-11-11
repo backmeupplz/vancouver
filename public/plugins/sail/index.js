@@ -75,10 +75,7 @@ export default function sail(city) {
   function wet(x, z) { // is world (x, z) water?
     const n = -z, t = masks.get(tkey(Math.floor(x / 1024), Math.floor(n / 1024)))
     if (!t) return baseWet(x, n)
-    const w = t.water
-    if (!w) return false
-    const N = w.n, a = Math.floor(((x - t.ox) / 1024) * N), b = Math.floor(((n - t.oy) / 1024) * N)
-    return w.mask[b * N + a] === 1
+    return city.world.isWater(x, z) // (the 4 m mask, and not a pier)
   }
   function dry(x, z, h) { // how many hull points are on land
     const fx = Math.sin(h), fz = Math.cos(h)

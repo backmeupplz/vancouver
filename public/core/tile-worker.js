@@ -3,7 +3,7 @@
 // Walls by what they face and the single-arm street lights follow Slop Toronto's rules (MIT, © 2026 Mr.doob, © 2026 John
 // Fewell; THIRD_PARTY.md).
 import earcut, { refine as delaunay } from '../vendor/earcut.js'
-import { mulberry32 as mulberry, inPoly, sampleGrid, sampleTerr, wallGrid, wallHeight, wallNear, gores, stripped, SEA0, BED_TOP, BED_S } from './util.js'
+import { mulberry32 as mulberry, inPoly, sampleGrid, sampleTerr, wallGrid, wallHeight, wallNear, gores, stripped, SEA0, BED_TOP, BED_S, FLOAT_UP, pierIndex, pierTop } from './util.js'
 const GROUND_LIFT = 0 // the ground is one non-overlapping layer (tools/tiles.py), so no class needs lifting
 const KIND = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'living', 'pedestrian', 'footway', 'cycleway',
   'path', 'steps', 'track', 'rail', 'lightrail', 'runway', 'taxiway']
@@ -116,6 +116,7 @@ function build(t, level) {
   const terr = terrain(t)
   const out = { terrain: terr }
   out.ground = ground(t, terr, level)
+  if (out.ground?.pier) terr.pier = out.ground.pier // (after ground(): the ground is draped on the raw terrain)
   const lines = readLines(t)
   if (level === 0) tubeWalls(lines)
   const ps = pois(t)
@@ -223,7 +224,11 @@ function normals(terr, pos) {
   return n
 }
 // the drawn ground at tile-local (x, y north): the terrain with its 2 m offsets, and the seawalls' walks and feet (low: core/util.js wallHeight)
-const heightAt = (terr, x, y, low) => { const g = sampleTerr(terr, x, y); return terr.wall ? wallHeight(terr.wall, g, x, y, low) : g }
+const heightAt = (terr, x, y, low) => {
+  const g0 = sampleTerr(terr, x, y), g = terr.wall ? wallHeight(terr.wall, g0, x, y, low) : g0
+  if (terr.pier && !low) { const p = pierTop(terr.pier, x, y); if (p !== null && p > g) return p } // (a pier's deck, as drawn)
+  return g
+}
 // does an edge from (ax, ay) to (bx, by) lie on the 2 m offsets (its ends, its middle: a node of the 2 m cell there
 // moved)? Sampled every metre there (the rest of an offset block is the 8 m grid, sampled as anywhere)
 const fineOn = (terr, ax, ay, bx, by) => {
@@ -270,7 +275,7 @@ function ground(t, terr, level) {
   // looks at the edge alone, so both triangles that share an edge split it alike (no cracks; where polygons meet, a gap
   // is under tol); slopes and flat ground keep big triangles (an 8 m grid split everywhere was ~3x the triangles for the same picture).
   const cell = t.size / (terr.n - 1), cap = hmax - hmin < 2 ? Infinity : cell * 4
-  const hz = (x, y, c) => { const h = heightAt(terr, x, y, c === WATER || c === SAND); return c === PIER ? Math.max(h, 0.45) : h }
+  const hz = (x, y, c) => heightAt(terr, x, y, c === WATER || c === SAND) // (a float's rise is added below, once its water is known)
   const bends = (ax, ay, bx, by, c, tol) => {
     if (ax > bx || (ax === bx && ay > by)) return bends(bx, by, ax, ay, c, tol) // one way along an edge, whichever side asks
     const L = Math.hypot(bx - ax, by - ay)
@@ -430,6 +435,43 @@ function ground(t, terr, level) {
     for (const v of add) out.push(v)
   }
   fixT(idx); if (coarse) fixT(coarse)
+  // floats: a class 20 vertex by water rides it (FLOAT_UP over the sea, materials.js: the tide); the rest, on land, lie on the terrain
+  const wk = new Set(), k2 = (x, z) => Math.round(x / 2) * 65536 + Math.round(z / 2), ptid = new Map(), pnorm = new Map()
+  for (let i = 0; i < cls.length; i++) if (cls[i] === WATER) wk.add(k2(pos[i * 3], pos[i * 3 + 2]))
+  const rides = new Uint8Array(cls.length)
+  if (wk.size) for (let i = 0; i < cls.length; i++) {
+    if (cls[i] !== PIER) continue
+    const cx = Math.round(pos[i * 3] / 2), cz = Math.round(pos[i * 3 + 2] / 2)
+    let on = false
+    for (let d = 0; d < 9 && !on; d++) on = wk.has((cx + d % 3 - 1) * 65536 + cz + Math.floor(d / 3) - 1)
+    if (on) { rides[i] = 1; pos[i * 3 + 1] = Math.max(pos[i * 3 + 1], SEA0) + FLOAT_UP; ptid.set(i, 255) }
+  }
+  // skirt: a float's border edge hangs FLOAT_SKIRT of timber down toward the water (not on the tile's edge)
+  if (level === 0 && ptid.size) {
+    const ed = new Map(), S = t.size, on = (u) => Math.abs(u) < 1e-3 || Math.abs(u - S) < 1e-3
+    for (let q = 0; q < idx.length; q += 3) {
+      if (cls[idx[q]] !== PIER) continue
+      for (let e = 0; e < 3; e++) {
+        const a = idx[q + e], b = idx[q + (e + 1) % 3], k = a < b ? a * 4294967296 + b : b * 4294967296 + a
+        const r = ed.get(k)
+        if (r) r.n++; else ed.set(k, { a, b, c: idx[q + (e + 2) % 3], n: 1 })
+      }
+    }
+    for (const { a, b, c, n } of ed.values()) {
+      if (n !== 1 || !rides[a] || !rides[b]) continue
+      const ax = pos[a * 3], az = pos[a * 3 + 2], bx = pos[b * 3], bz = pos[b * 3 + 2]
+      if ((on(ax) && on(bx) && Math.abs(ax - bx) < 1e-3) || (on(-az) && on(-bz) && Math.abs(az - bz) < 1e-3)) continue
+      let nx = bz - az, nz = ax - bx; const L = Math.hypot(nx, nz) || 1
+      nx /= L; nz /= L
+      if ((pos[c * 3] - ax) * nx + (pos[c * 3 + 2] - az) * nz > 0) { nx = -nx; nz = -nz } // away from the deck
+      const ta = pos[a * 3 + 1], tb = pos[b * 3 + 1], v = []
+      for (const [x, y, z, td] of [[ax, ta, az, 255], [bx, tb, bz, 255], [bx, tb - FLOAT_SKIRT, bz, 128], [ax, ta - FLOAT_SKIRT, az, 128]]) { const i = pos.length / 3; pos.push(x, y, z); cls.push(PIER); ptid.set(i, td); pnorm.set(i, [nx, 0, nz]); v.push(i) }
+      // (v0 top a, v1 top b, v2 bottom b) faces (uz, -ux) * SKIRT: out when that points along the outward normal
+      const ux = bx - ax, uz = bz - az
+      const facing = uz * nx + (-ux) * nz
+      if (facing > 0) idx.push(v[0], v[1], v[2], v[0], v[2], v[3]); else idx.push(v[0], v[2], v[1], v[0], v[3], v[2])
+    }
+  }
   const nv = pos.length / 3
   if (!nv) return null
   const P = new Float32Array(pos), I = nv > 65535 ? Uint32Array : Uint16Array
@@ -480,7 +522,21 @@ function ground(t, terr, level) {
       tidal[i] = best >= 127 ? 0 : 255 - Math.round(best * 2)
     }
   }
-  return { position: P, normal: normals(terr, P), cls: new Uint8Array(cls), tidal, index: new I(idx), coarse: coarse && new I(coarse) }
+  for (const [i, v] of ptid) tidal[i] = v
+  const normal = normals(terr, P)
+  for (const [i, n] of pnorm) { normal[i * 3] = n[0] * 127; normal[i * 3 + 1] = 0; normal[i * 3 + 2] = n[2] * 127 }
+  let pier = null
+  if (level === 0) { // the pier index: the drawn class 20 triangles (not the skirt), so what stands on a pier reads what is drawn
+    const T = [], Y = [], F = []
+    for (let q = 0; q < idx.length; q += 3) {
+      const a = idx[q], b = idx[q + 1], c = idx[q + 2]
+      if (cls[a] !== PIER || pnorm.has(a)) continue
+      for (const v of [a, b, c]) T.push(P[v * 3], -P[v * 3 + 2]), Y.push(P[v * 3 + 1])
+      F.push(rides[a] | (rides[b] << 1) | (rides[c] << 2))
+    }
+    if (F.length) pier = pierIndex(new Float32Array(T), new Float32Array(Y), new Uint8Array(F), t.size)
+  }
+  return { position: P, normal, cls: new Uint8Array(cls), tidal, index: new I(idx), coarse: coarse && new I(coarse), pier }
 }
 
 // earcut's triangles made conforming: earcut can run an edge straight over one of the polygon's points (it leaves out a
@@ -576,6 +632,7 @@ function weld(rings, size, tol) {
 }
 
 // detail tiles: a WATER_N x WATER_N mask (1 = water), cell (i east, j north) from the tile's SW corner
+const FLOAT_SKIRT = 0.6
 const WATER_N = 256, WATER = 19, PIER = 20, SAND = 10 // GROUND class indices of water, piers and sand (tools/tiles.py)
 function water(t) { const m = raster(t, new Set([WATER]), WATER_N); return m && { n: WATER_N, mask: m } }
 // and a 1 m mask of the carriageways and cycle tracks as drawn (bits, row-major from the SW corner): street furniture

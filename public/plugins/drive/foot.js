@@ -118,6 +118,7 @@ export function makeFoot(THREE, city, api) {
   }
   // what is underfoot: a path or a street, a wooden deck (a pier, a boardwalk: a footway on a deck), sand, else grass
   function surface() {
+    if (api.pierAt?.(man.x, man.y)) return 'wood'
     const r = api.pathAt(man.x, man.y)
     if (r && r.d < 1.8) return man.deck && !r.drv ? 'wood' : 'path'
     if (man.deck) return 'path'

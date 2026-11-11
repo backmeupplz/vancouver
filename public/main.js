@@ -97,7 +97,7 @@ status('Loading the map…', 0.05)
 const index = await tiles.init()
 const [LAT_O, LON_O] = index.origin, [KX, KY] = index.k
 const ll = (lat, lon) => [(lon - LON_O) * KX, (lat - LAT_O) * KY]
-const zAt = (x, n) => tiles.heightAt(x, n)
+const zAt = (x, n, raw) => tiles.heightAt(x, n, raw)
 
 // ---------- camera ----------
 const K = 6, BX = 23551.5, BY = 9727.5 // view hash: drawing px per metre and the drawing origin

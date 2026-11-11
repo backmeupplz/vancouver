@@ -206,7 +206,7 @@ function check(cell) {
       for (const [c, a, b, o] of cnt.values()) {
         if (c !== 1) continue
         const ax = P[a * 3], ay = -P[a * 3 + 2], bx = P[b * 3], by = -P[b * 3 + 2], L = Math.hypot(bx - ax, by - ay)
-        if (L < 0.02 || (rim(ax) && rim(bx) && Math.abs(ax - bx) < 0.1) || (rim(ay) && rim(by) && Math.abs(ay - by) < 0.1) || nearOpen((ax + bx) / 2, (ay + by) / 2) || nearWall((ax + bx) / 2, (ay + by) / 2)) continue
+        if (L < 0.02 || (gr.cls[a] === 20 && gr.cls[b] === 20) || (rim(ax) && rim(bx) && Math.abs(ax - bx) < 0.1) || (rim(ay) && rim(by) && Math.abs(ay - by) < 0.1) || nearOpen((ax + bx) / 2, (ay + by) / 2) || nearWall((ax + bx) / 2, (ay + by) / 2)) continue
         let nx = -(by - ay) / L, ny = (bx - ax) / L
         if (nx * (P[o * 3] - ax) + ny * (-P[o * 3 + 2] - ay) > 0) { nx = -nx; ny = -ny } // (out, away from its triangle)
         for (const f of [0.25, 0.5, 0.75]) {
