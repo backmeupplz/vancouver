@@ -40,16 +40,17 @@ export default function life(city) {
   const group = new THREE.Group(), glowGroup = new THREE.Group()
   city.scene.add(group); city.overlay.add(glowGroup)
   // instanced meshes whose per-instance data is an 8-float interleaved buffer filled from the worker
-  function instanced(geo, mat, cap, parent = group) {
-    const ib = new THREE.InstancedInterleavedBuffer(new Float32Array(cap * 8), 8).setUsage(THREE.DynamicDrawUsage)
+  function instanced(geo, mat, cap, parent = group, stride = 8) {
+    const ib = new THREE.InstancedInterleavedBuffer(new Float32Array(cap * stride), stride).setUsage(THREE.DynamicDrawUsage)
     const g = new THREE.InstancedBufferGeometry().copy(geo)
     g.instanceCount = 0
     g.setAttribute('iA', new THREE.InterleavedBufferAttribute(ib, 4, 0))
     g.setAttribute('iB', new THREE.InterleavedBufferAttribute(ib, 4, 4))
+    if (stride > 8) g.setAttribute('iC', new THREE.InterleavedBufferAttribute(ib, 2, 8)) // (a near car's wheels: distance driven, steer)
     const m = new THREE.Mesh(g, mat)
     m.frustumCulled = false; m.receiveShadow = true; m.matrixAutoUpdate = false
     parent.add(m)
-    return { m, ib, cap }
+    return { m, ib, cap, stride }
   }
   const carMat = material('car', nearCars), personMat = material('person', nearPeople), bikeMat = material('bike')
   const carNearMat = material('car'), personNearMat = material('person')
@@ -59,7 +60,7 @@ export default function life(city) {
   const DOTS = dotModels(THREE, MODELS)
   const carDots = DOTS.cars.map((g) => instanced(g, carMat, MAX_CARS)), peopleDots = instanced(DOTS.person, personMat, MAX_PEOPLE)
   // the detailed models near a perspective camera, filled from the same buffer (pickNear())
-  const carsNear = carModels(THREE).map((g) => instanced(g, carNearMat, MAX_NEAR))
+  const carsNear = carModels(THREE).map((g) => instanced(g, carNearMat, MAX_NEAR, group, 10))
   const peopleNear = peopleModels(THREE).map((g) => instanced(g.scale(H, H, H), personNearMat, MAX_NEAR))
   const allNear = [...carsNear, ...peopleNear]
   const pickCar = MODELS.map((_, k) => (buf, s) => carsNear[DETAIL(k, buf[s + 7] % 2)]) // by kind and seed
@@ -377,13 +378,15 @@ export default function life(city) {
     const P = snap.pos, Q = snap.pq
     sm.cars(P, t)
     for (const o of carsNear) o.n = 0
+    wNow.clear()
     for (let j = 0, off = 0; j < KINDS; j++) {
       const c = B.counts[j] || 0, m = Math.min(c, carMeshes[j].cap)
       put(carMeshes[j], P, off, m, SEE.car, carDots[j])
-      if (near) pickNear(P, off, m, Math.sqrt(nearCars.value), pickCar[j])
+      if (near) pickNear(P, off, m, Math.sqrt(nearCars.value), pickCar[j], true)
       off += c
     }
     for (const o of carsNear) show(o, o.n)
+    ;[wWas, wNow] = [wNow, wWas]; wT = t
     for (let i = 0; i < pools.length; i++) pools[i].geometry.instanceCount = carAll[i].m.geometry.instanceCount
     sm.people(Q, t)
     for (const o of peopleNear) o.n = 0
@@ -435,10 +438,24 @@ export default function life(city) {
     show(o, a)
     if (dots) show(dots, d)
   }
-  function show(o, n) { o.ib.clearUpdateRanges(); o.ib.addUpdateRange(0, n * 8); o.ib.needsUpdate = true; o.m.geometry.instanceCount = n }
+  function show(o, n) { o.ib.clearUpdateRanges(); o.ib.addUpdateRange(0, n * o.stride); o.ib.needsUpdate = true; o.m.geometry.instanceCount = n }
+  // a near car's wheels: how far it has driven (its speed, summed over the frames it is near) and how far its front
+  // wheels are turned (its bicycle model: atan(wheelbase × the yaw it turned per metre), eased), by id
+  let wNow = new Map(), wWas = new Map(), wT = 0
+  function wheels(i, yaw, A, j) {
+    const B = sm.b, id = B.aux[i * 2], v = B.aux[i * 2 + 1], o = wWas.get(id) || { odo: 0, yaw, steer: 0 }, dt = Math.min(0.2, drawnT - wT)
+    if (dt > 0) {
+      o.odo += v * dt
+      const dy = yaw - o.yaw, turn = dy - Math.PI * 2 * Math.round(dy / (Math.PI * 2))
+      o.steer += (Math.max(-0.5, Math.min(0.5, v > 0.5 ? Math.atan((2.6 * turn) / (v * dt)) : 0)) - o.steer) * Math.min(1, dt * 8)
+      o.yaw = yaw
+    }
+    wNow.set(id, o); A[j] = o.odo; A[j + 1] = o.steer
+  }
   // the n things in buf at off within r of the camera (the same test as the boxes' shader) into the detailed model
   // pick(buf, s) chooses for each
-  function pickNear(buf, off, n, r, pick) {
+  // cars: the wheels' distance driven and steer go with them (wheels(), keyed by id)
+  function pickNear(buf, off, n, r, pick, cars = false) {
     const c = uni.uCam.value, r2 = r * r
     for (let i = 0; i < n; i++) {
       const s = (off + i) * 8, dx = buf[s] - c.x, dz = buf[s + 2] - c.z
@@ -446,7 +463,10 @@ export default function life(city) {
       ball.center.set(buf[s], buf[s + 1], buf[s + 2]); ball.radius = 12 + 0.06 * Math.sqrt(dx * dx + dz * dz)
       if (!frustum.intersectsSphere(ball)) continue // (not in view)
       const d = pick(buf, s)
-      if (d.n < d.cap) { const A = d.ib.array, j = d.n++ * 8; for (let k = 0; k < 8; k++) A[j + k] = buf[s + k] }
+      if (d.n < d.cap) {
+        const A = d.ib.array, j = d.n++ * d.stride; for (let k = 0; k < 8; k++) A[j + k] = buf[s + k]
+        if (cars) wheels(off + i, buf[s + 3], A, j + 8)
+      }
     }
   }
 

@@ -7,7 +7,7 @@
 // Routes and berths: tools/ships_data.py → data.json, from OpenStreetMap (© OpenStreetMap contributors, ODbL).
 // The SeaBus belongs to the transit plugin.
 import { mulberry32, vancouver, getJSON } from '../../core/util.js'
-import { shipModels } from './models.js'
+import { shipModels, shipMaterial } from './models.js'
 
 // ---- LIVE AIS: the one switch -------------------------------------------------------------------------------
 // A same-origin URL returning the vessels in the area as JSON, polled every 15 s while the page is visible:
@@ -198,7 +198,7 @@ export default async function ships(city) {
   // ---------- one batched mesh: every variant's geometry once, an instance per vessel, drawn in one call ----------
   const usedBy = (list) => [...new Set(list.map((v) => v.m))]
   const all = [...dyn, ...stat], used = usedBy(all)
-  const mat = new THREE.MeshLambertMaterial({ vertexColors: true })
+  const night = { value: 0 }, mat = shipMaterial(THREE, night, dyn.length), matMoor = shipMaterial(THREE, night, 0); night.value = city.light.night
   const mesh = new THREE.BatchedMesh(all.length, used.reduce((n, m) => n + m.geo.attributes.position.count, 0), 0, mat)
   mesh.name = 'ships'
   mesh.castShadow = mesh.receiveShadow = true
@@ -208,7 +208,7 @@ export default async function ships(city) {
   for (const v of all) { v.id = mesh.addInstance(v.m.id); v.s = new THREE.Vector3(v.L / v.m.L, v.B / v.m.B, v.B / v.m.B) }
   city.scene.add(mesh)
   // the moored boats: a batch of their own that never moves, shown from SMALL_ZOOM in
-  const moor = new THREE.BatchedMesh(Math.max(1, moored.length), usedBy(moored).reduce((n, m) => n + m.geo.attributes.position.count, 0) || 3, 0, mat)
+  const moor = new THREE.BatchedMesh(Math.max(1, moored.length), usedBy(moored).reduce((n, m) => n + m.geo.attributes.position.count, 0) || 3, 0, matMoor)
   moor.name = 'ships-moored'
   moor.castShadow = moor.receiveShadow = true
   moor.sortObjects = false
@@ -302,7 +302,7 @@ export default async function ships(city) {
     else if (want < 2 && stop) { stop(); stop = null; update() }
     else if (want === 1) { update(); city.requestRender() }
   }
-  const offFrame = city.on('frame', () => { if (stop) update() })
+  const offFrame = city.on('frame', () => { night.value = city.light.night; if (stop) update() })
   let viewT = 0
   const offView = city.on('view', () => { if (!viewT) viewT = setTimeout(() => { viewT = 0; check() }, 200) })
   const tick = setInterval(check, 2000)

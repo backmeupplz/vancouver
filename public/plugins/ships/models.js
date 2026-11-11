@@ -12,6 +12,64 @@ const HULLS = [0x1d3a5f, 0x7a1f1f, 0x23262b, 0x1f5f4a, 0x2b4a7a, 0x3a3f47]
 const RAINBOW = [0xe74c3c, 0xf39c12, 0xf1c40f, 0x27ae60, 0x2980b9, 0x8e44ad]
 const pick = (r, a) => a[Math.floor(r() * a.length)]
 
+// Lights are tagged on the vertices (the kit's part: 2 white, 3 red, 4 green, 5 window, 6 floodlight, 7 anchor) and
+// lit by shipMaterial() at night: navigation lights on the vessels that move, floodlights and anchor lights on the
+// ones that lie still, windows on both
+const LAMPS = { 2: 0xf4f1e6, 3: 0xd02020, 4: 0x20c050, 6: 0xf4f1e6, 7: 0xf4f1e6 }
+// (a tetrahedron: four triangles, the fleet has a triangle budget)
+function lamp(k, part, x, y, z, s) {
+  s *= 1.4
+  const V = [[1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]].map(([a, b, c]) => [x + a * s, y + b * s, z + c * s]), sub = (p, q) => [p[0] - q[0], p[1] - q[1], p[2] - q[2]]
+  k.c(LAMPS[part], part)
+  for (let i = 0; i < 4; i++) {
+    const [p, q, r] = V.filter((_, j) => j !== i), o = V[i], u = sub(q, p), w = sub(r, p), n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]], d = sub(p, o)
+    if (n[0] * d[0] + n[1] * d[1] + n[2] * d[2] > 0) k.tri(p, q, r); else k.tri(p, r, q)
+  }
+}
+// side lights (red to port, green to starboard) at x sx, y sy, z ±sz; stern light (tx, ty); masthead (mx, my)
+function nav(k, s, o) {
+  lamp(k, 3, o.sx, o.sy, -o.sz, s); lamp(k, 4, o.sx, o.sy, o.sz, s)
+  lamp(k, 2, o.tx, o.ty, 0, s)
+  if (o.my) lamp(k, 2, o.mx, o.my, 0, s)
+}
+// the kit's geometry with its parts, as vertex colours + aPart
+function geo(k) {
+  const g = k.geometry()
+  g.setAttribute('color', g.getAttribute('aCol')); g.deleteAttribute('aCol'); g.deleteAttribute('aSwing')
+  return g
+}
+// The fleet's material: vertex colours, flat Lambert, with the lights. nDyn: instances below this id of a batched mesh
+// are the moving vessels (the ships plugin puts them first); outside a batch every model counts as instance uBid.
+export function shipMaterial(THREE, night = { value: 0 }, nDyn = 0, bid = 0) {
+  const m = new THREE.MeshLambertMaterial({ vertexColors: true })
+  m.onBeforeCompile = (s) => {
+    Object.assign(s.uniforms, { uNight: night, uDyn: { value: nDyn }, uBid: { value: bid } })
+    s.vertexShader = s.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float aPart; uniform float uNight, uDyn, uBid; varying vec3 vEmit;')
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        vEmit = vec3(0.0);
+        if (aPart > 1.5) {
+          float bid = uBid; vec2 bxz = vec2(0.0);
+          #ifdef USE_BATCHING
+          bid = float(getIndirectIndex(gl_DrawID)); bxz = batchingMatrix[3].xz;
+          #endif
+          bool moving = bid < uDyn - 0.5;
+          if (aPart < 2.5) vEmit = moving ? vec3(1.0, 0.95, 0.8) * 3.0 : vec3(0.0);
+          else if (aPart < 3.5) vEmit = moving ? vec3(1.0, 0.05, 0.03) * 3.0 : vec3(0.0);
+          else if (aPart < 4.5) vEmit = moving ? vec3(0.05, 1.0, 0.25) * 3.0 : vec3(0.0);
+          else if (aPart < 5.5) vEmit = vec3(1.0, 0.62, 0.25) * 0.75;
+          else if (aPart < 6.5) vEmit = moving ? vec3(0.0) : vec3(1.0, 0.95, 0.85) * 3.5;
+          else vEmit = (!moving && fract(sin(dot(floor(bxz), vec2(12.9898, 78.233))) * 43758.5453) < 0.3) ? vec3(1.0, 0.95, 0.8) * 3.0 : vec3(0.0);
+          vEmit *= uNight;
+        }`)
+    s.fragmentShader = s.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vEmit;')
+      .replace('#include <emissivemap_fragment>', 'totalEmissiveRadiance += vEmit;')
+  }
+  m.customProgramCacheKey = () => 'ships-lit'
+  return m
+}
+
 // a cargo ship's hull: a flared transom, parallel sides, a raised forecastle, a raked stem over a bulbous bow, the
 // antifouling showing up to `boot` above the water (how light she rides)
 function cargo(k, L, B, D, c, o = {}) {
@@ -24,11 +82,12 @@ function cargo(k, L, B, D, c, o = {}) {
   k.c(ANTI).cyl(2.4, 0.9, 9, 6, 1).rot(s, 'z', -Math.PI / 2).move(s, 0.5 * L - rake - 5, -0.9, 0) // the bulb
   block(k.c(STEEL), 0.44 * L, 0.455 * L, D + fc, D + fc + 2.2, -1.5, 1.5) // the windlass
   k.rod([0.47 * L, D + fc, 0], [0.47 * L, D + fc + 7, 0], 0.4, 0.2, 4) // the foremast
+  lamp(k, 2, -0.5 * L + 2.5, D + 1, 0, 0.8); lamp(k, 2, 0.47 * L, D + fc + 7.4, 0, 0.7) // stern and foremast lights
   return D
 }
 // the accommodation block on the deck at y between x0 and x1: decks w wide with bands of windows, the bridge with
 // its wings (bw wide) on top and a mast
-function house(k, x0, x1, y, w, floors, bw) {
+function house(k, x0, x1, y, w, floors, bw, lit = false) {
   const top = y + floors * 3, xm = (x0 + x1) / 2
   block(k.c(WHITE), x0, x1, y, top, -w / 2, w / 2)
   for (let f = 1; f < floors; f += 2) k.c(GLASS).box(x0 - 0.3, x1 + 0.3, y + f * 3 + 0.9, y + f * 3 + 2.1, -w / 2 - 0.3, w / 2 + 0.3)
@@ -36,6 +95,9 @@ function house(k, x0, x1, y, w, floors, bw) {
   k.c(GLASS).box(x0 - 0.8, x1 + 1.35, top + 1.5, top + 2.7, -bw / 2 - 0.3, bw / 2 + 0.3)
   k.c(STEEL).rod([xm, top + 3.2, 0], [xm, top + 9.5, 0], 0.45, 0.2, 4)
   k.box(xm - 0.4, xm + 0.4, top + 6, top + 6.5, -2.6, 2.6)
+  const sz = bw / 2 + 0.6
+  lamp(k, 3, x1 + 0.4, top + 2.2, -sz, 0.8); lamp(k, 4, x1 + 0.4, top + 2.2, sz, 0.8); lamp(k, 2, xm, top + 9.9, 0, 0.8) // wing and masthead lights
+  if (lit) for (const z of [-2.6, 2.6]) lamp(k, 6, xm, top + 6.9, z, 0.8) // deck floodlights on the mast's crossbar, lit at the berth
 }
 // a funnel raked aft, with a black top
 function funnel(k, x, y0, y1, len, w, c, z = 0) {
@@ -91,17 +153,21 @@ export function seabusGeo(THREE) {
 export function shipModels(THREE, seed = 20261106) {
   const r = mulberry32(seed), out = {}
   const make = (kind, n, L, B, build, extra) => {
-    out[kind] = Array.from({ length: n }, (_, i) => { const k = kit(THREE); build(k, i); return { kind, L, B, geo: k.geometry(true), ...extra } })
+    out[kind] = Array.from({ length: n }, (_, i) => { const k = kit(THREE); build(k, i); return { kind, L, B, geo: geo(k), ...extra } })
   }
   const small = { small: true }
 
   make('container', 4, 300, 42, (k) => {
     const L = 300, B = 42, D = cargo(k, L, B, 13, pick(r, HULLS), { boot: 0.8 + r() * 2 }), w = (B * 0.92) / 4
-    house(k, -0.42 * L, -0.42 * L + 14, D, B * 0.86, 6, B * 1.04)
+    house(k, -0.42 * L, -0.42 * L + 14, D, B * 0.86, 6, B * 1.04, true)
     funnel(k, -0.455 * L, D, D + 25, 8, 8, pick(r, [0x23262b, 0xc0392b, 0x2b6cb0, 0xe0b830]))
     for (let x = -0.36 * L; x < 0.33 * L; x += 14.4) for (let c = 0; c < 4; c++) { // the stacks: four blocks across a bay
       const tiers = Math.max(1, Math.round((2 + r() * 5) * (x > 0.22 * L ? 0.6 : 1)))
       block(k.c(pick(r, BOXES)), x, x + 12.6, D, D + tiers * 2.6, (c - 2) * w, (c - 1) * w)
+    }
+    for (const x of [0.12]) for (const z of [-20.4, 20.4]) { // floodlight poles along the rails, lit at the berth
+      k.c(STEEL).rod([x * L, D, z], [x * L, D + 22, z], 0.3, 0.2, 3)
+      lamp(k, 6, x * L, D + 22.6, z, 0.9)
     }
   })
   const bulk = (k, L, B, cranes, n) => {
@@ -135,6 +201,7 @@ export function shipModels(THREE, seed = 20261106) {
     block(k.c(WHITE), 0.33 * L, 0.33 * L + 8, T, T + 3.4, -h * 0.96, h * 0.96)
     k.c(GLASS).box(0.33 * L - 0.3, 0.33 * L + 8.3, T + 1.5, T + 2.7, -h * 0.96 - 0.3, h * 0.96 + 0.3)
     funnel(k, -0.4 * L, T, T + 7, 7, 6, lo)
+    nav(k, 0.8, { sx: 0.33 * L + 8, sy: T + 2.8, sz: h * 0.96 + 0.6, tx: -0.5 * L + 3, ty: T + 0.8, mx: 0.33 * L + 4, my: T + 4.4 })
     k.c(0x3a3f47).box(-0.5 * L - 0.5, -0.5 * L + 1, 2, 21, h * 0.12, h * 0.78) // the stern quarter ramp, stowed
     for (let x = -0.4; x < 0.25; x += 0.11) for (const s of [-1, 1]) k.box(x * L, x * L + 9, 24.5, 26.5, s * h - 0.3, s * h + 0.3) // vents
   })
@@ -147,29 +214,30 @@ export function shipModels(THREE, seed = 20261106) {
     const plan = (P, g) => sym(P.map(([x, z]) => [x * L, z * h]), g)
     const lo = [[-0.47, 0.92], [0.2, 0.95], [0.3, 0.66], [0.335, 0.3]], hi = [[-0.42, 0.88], [0.15, 0.9], [0.24, 0.6], [0.27, 0.3]]
     slab(k.c(WHITE), plan(lo), D, 28)
-    for (const y of [15.5, 19.5, 23.5]) slab(k.c(0x3b4a58), plan(lo, 0.4), y, y + 1.4)
+    for (const y of [15.5, 19.5, 23.5]) slab(k.c(0x3b4a58, 5), plan(lo, 0.4), y, y + 1.4)
     slab(k.c(WHITE), plan(hi), 28, 38)
-    for (const y of [30, 34]) slab(k.c(0x3b4a58), plan(hi, 0.4), y, y + 1.4)
+    for (const y of [30, 34]) slab(k.c(0x3b4a58, 5), plan(hi, 0.4), y, y + 1.4)
     for (let x = -0.3; x < 0.16; x += 0.09) for (const s of [-1, 1]) k.c(0xee8a1c).box(x * L, x * L + 10, 12, 14.8, s * h * 0.9, s * h * 1.04) // lifeboats
     block(k.c(WHITE), -0.36 * L, -0.14 * L, 38, 42, -h * 0.75, h * 0.75)
     block(k.c(0x46aee0), -0.1 * L, 0.02 * L, 38, 38.4, -h * 0.34, h * 0.34) // the pool
     block(k.c(WHITE), 0.06 * L, 0.2 * L, 38, 41.5, -h * 0.7, h * 0.7)
     k.box(0.232 * L, 0.262 * L, 30.6, 33.8, -h * 1.08, h * 1.08) // the bridge and its wings
-    k.c(GLASS).box(0.232 * L - 0.3, 0.262 * L + 0.4, 31.9, 33.2, -h * 1.08 - 0.3, h * 1.08 + 0.3)
+    k.c(GLASS, 5).box(0.232 * L - 0.3, 0.262 * L + 0.4, 31.9, 33.2, -h * 1.08 - 0.3, h * 1.08 + 0.3)
     funnel(k, -0.25 * L, 42, 54, 17, 11, fc)
     k.c(STEEL).rod([0.14 * L, 41.5, 0], [0.14 * L, 50, 0], 0.6, 0.25, 4)
+    nav(k, 0.8, { sx: 0.262 * L + 0.4, sy: 34.3, sz: h * 1.08 + 0.8, tx: -0.5 * L + 3, ty: D + 2, mx: 0.14 * L, my: 50.6 })
   })
   make('bcf', 1, 160, 27, (k) => { // a double-ended car ferry: the car deck open at both ends, a bridge at each, the funnel amidships
     const L = 160, h = 13.5, D = 9
     const S = [[-0.5, 0.52, 0.3], [-0.44, 0.84, 0.62], [-0.34, 1, 0.95], [0.34, 1, 0.95], [0.44, 0.84, 0.62], [0.5, 0.52, 0.3]]
     loft(k, S.map(([x, bd, bw]) => [x * L, [[bw * h, -1.5], [((bw + bd) / 2) * h, 3.4], [bd * h, D]]]), { paint: (j, i) => k.c(j === 0 ? NAVY : i < 0 ? 0x2a2f36 : WHITE), deck: 0x70767c })
     const P = (a, b, g) => sym([[-a * L, 0.45 * h], [-(a - 0.07) * L, b * h], [(a - 0.07) * L, b * h], [a * L, 0.45 * h]], g)
-    slab(k.c(WHITE), P(0.46, 0.96), D, 14.6); slab(k.c(GLASS), P(0.46, 0.96, 0.35), 11.4, 12.8)
-    slab(k.c(WHITE), P(0.4, 0.9), 14.6, 19.4); slab(k.c(GLASS), P(0.4, 0.9, 0.35), 16.2, 17.7)
+    slab(k.c(WHITE), P(0.46, 0.96), D, 14.6); slab(k.c(GLASS, 5), P(0.46, 0.96, 0.35), 11.4, 12.8)
+    slab(k.c(WHITE), P(0.4, 0.9), 14.6, 19.4); slab(k.c(GLASS, 5), P(0.4, 0.9, 0.35), 16.2, 17.7)
     for (const s of [-1, 1]) {
       const x = s * 0.33 * L
       block(k.c(WHITE), x - 4, x + 4, 19.4, 22.8, -h * 0.62, h * 0.62)
-      k.c(GLASS).box(x - 4.3, x + 4.3, 20.7, 22, -h * 0.62 - 0.3, h * 0.62 + 0.3)
+      k.c(GLASS, 5).box(x - 4.3, x + 4.3, 20.7, 22, -h * 0.62 - 0.3, h * 0.62 + 0.3)
       k.c(STEEL).rod([x, 22.8, 0], [x, 28, 0], 0.3, 0.15, 4)
       for (const z of [-1, 1]) k.c(0xee8a1c).box(s * 0.16 * L - 4, s * 0.16 * L + 4, 19.4, 21.4, z * h * 0.9 - 1.3, z * h * 0.9 + 1.3) // lifeboats
     }
@@ -177,6 +245,8 @@ export function shipModels(THREE, seed = 20261106) {
     k.c(0xc0392b).box(-5.8, 5.8, 23.4, 24.3, -3.9, 3.9)
     k.c(NAVY).box(-5.8, 5.8, 24.9, 27.2, -3.9, 3.9)
     block(k.c(BLACK), -4.8, 4.8, 28, 28.8, -2.9, 2.9)
+    nav(k, 0.7, { sx: 0.33 * L + 4.4, sy: 22, sz: h * 0.62 + 0.6, tx: -0.33 * L - 4.4, ty: 22, mx: 0.33 * L, my: 28.5 })
+    lamp(k, 2, -0.33 * L, 28.5, 0, 0.7)
   })
   // the False Creek mini ferries: a tubby hull, a cabin of windows under an overhanging roof
   const mini = (k, hull, body, roof, stripes) => {
@@ -187,9 +257,10 @@ export function shipModels(THREE, seed = 20261106) {
     const plan = (g) => sym([[-3.5, 1.1], [-3.1, 1.5], [2.6, 1.5], [3.2, 1]], g)
     slab(k.c(body), plan(0), 0.7, 1.5)
     stripes?.forEach((c, i) => k.c(c).box(-3.1 + i * 0.95, -3.1 + (i + 1) * 0.95, 0.98, 1.26, -1.56, 1.56))
-    slab(k.c(GLASS), plan(-0.06), 1.5, 2.45)
+    slab(k.c(GLASS, 5), plan(-0.06), 1.5, 2.45)
     slab(k.c(roof), plan(0.3), 2.45, 2.68, { bevel: 0.06 })
     block(k.c(WHITE), 1.4, 1.7, 2.68, 3.1, -0.15, 0.15)
+    nav(k, 0.1, { sx: 3.2, sy: 1.3, sz: 0.95, tx: -4.8, ty: 1.2, mx: 1.55, my: 3.2 })
   }
   make('aquabus', 3, 10, 3.6, (k, i) => mini(k, WHITE, [0x2980b9, 0x27ae60, 0xe67e22][i], WHITE, RAINBOW), small)
   make('fcf', 1, 10, 3.6, (k) => mini(k, 0x2a6fb5, 0xeef2f5, 0x2a6fb5), small)
@@ -201,11 +272,12 @@ export function shipModels(THREE, seed = 20261106) {
     loft(k, st, { paint: (j) => k.c(j ? BLACK : ANTI), deck: 0x6b3a2e })
     slab(k.c(WHITE), sym([[-3.5, 2.6], [-2.8, 3.1], [5.5, 3.1], [7, 2.2]]), 1.6, 4.4)
     const wh = (g) => sym([[1, 2], [1.4, 2.4], [5.2, 2.4], [6, 1.8]], g)
-    slab(k, wh(0), 4.4, 5.5); slab(k.c(GLASS), wh(0.1), 5.5, 6.5); slab(k.c(c), wh(0.4), 6.5, 6.75)
+    slab(k, wh(0), 4.4, 5.5); slab(k.c(GLASS, 5), wh(0.1), 5.5, 6.5); slab(k.c(c), wh(0.4), 6.5, 6.75)
     for (const z of [-1.7, 1.7]) funnel(k, -1.2, 4.4, 7.6, 1.8, 1.3, c, z)
     k.c(STEEL).rod([3, 6.75, 0], [3, 10.5, 0], 0.15, 0.08, 4)
     block(k.c(0x3a3f47), -7, -4.8, 1.6, 2.9, -1.3, 1.3) // the towing winch and its post
     block(k, -8.8, -8.4, 1.6, 3, -0.2, 0.2)
+    nav(k, 0.25, { sx: 5.4, sy: 6.9, sz: 2.2, tx: -11, ty: 2.3, mx: 3, my: 10.7 })
   })
   make('boom', 1, 70, 20, (k) => { // a raft of logs in three sections, boomsticks round it
     const browns = [0x8a6a46, 0x7c5d3c, 0x96744e, 0x6f5234]
@@ -219,12 +291,14 @@ export function shipModels(THREE, seed = 20261106) {
   make('sail', 4, SLOOP.L, SLOOP.B, (k, i) => { // under sail, on either tack
     sloop(k, [WHITE, WHITE, NAVY, 0x8e2a2a][i], { far: true })
     rig(k, i % 2 ? 0.5 : -0.5, [0xfbfbf5, 0xfbfbf5, 0xfbfbf5, 0xf0d9a8][i])
+    nav(k, 0.1, { sx: 2.9, sy: 0.75, sz: 0.5, tx: -3.1, ty: 0.7, mx: SLOOP.boom[0], my: SLOOP.mast + 0.15 })
     k.move(0, -SLOOP.mid, 0, 0)
   }, small)
   make('moored', 3, SLOOP.L, SLOOP.B, (k, i) => { // at her berth: the sail furled on the boom under its cover
     sloop(k, [WHITE, NAVY, WHITE][i], { far: true })
     k.c(SPAR).rod(SLOOP.boom, [SLOOP.boom[0] - 3, 1.5, 0], 0.05, 0.04, 4)
     k.c([0x2b4a7a, 0xb5651d, 0x1f5f4a][i]).box(SLOOP.boom[0] - 2.8, SLOOP.boom[0] - 0.1, 1.52, 1.76, -0.1, 0.1)
+    lamp(k, 7, SLOOP.boom[0], SLOOP.mast + 0.15, 0, 0.1) // the anchor light
     k.move(0, -SLOOP.mid, 0, 0)
   }, small)
   make('motor', 4, 8, 2.6, (k, i) => {
@@ -242,6 +316,10 @@ export function shipModels(THREE, seed = 20261106) {
       for (const z of [-0.5, 0.5]) block(k.c(WHITE), -1.3, -0.8, 0.25, 0.95, z - 0.28, z + 0.28)
       block(k.c(0x23262b), -4.4, -3.95, 0.1, 1.15, -0.22, 0.22)
     }
+    const my = cabin ? 2.5 : 1.9
+    k.c(STEEL).rod([-0.4, cabin ? 1.93 : 1.45, 0], [-0.4, my, 0], 0.03, 0.03, 4)
+    nav(k, 0.07, { sx: 2.6, sy: 1.05, sz: 0.45, tx: -4.2, ty: 1.3, mx: -0.4, my: my + 0.07 })
+    lamp(k, 7, -0.4, my + 0.07, 0, 0.07) // (the anchor light, when she lies still)
   }, small)
   make('kayak', 3, 5.2, 0.62, (k, i) => {
     const c = [0xe74c3c, 0xf1c40f, 0x2980b9][i], S = [[-1.7, 0.7, 0.2], [-0.3, 1, 0.2], [0.6, 1, 0.2], [1.8, 0.6, 0.24]]

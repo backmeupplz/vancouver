@@ -1338,7 +1338,9 @@ function makeStatics() {
   if (statics.length > opts.maxPeople / 3) statics.length = Math.floor(opts.maxPeople / 3)
 }
 function person(x, y, h, ang, pose, r = Math.random) {
-  return { id: nextPid++, x, y, h, ang, pose, shirt: SHIRT[(r() * SHIRT.length) | 0], pants: PANTS[(r() * PANTS.length) | 0], seed: r(), phase: r() * 6.28, v: 1.05 + r() * 0.5, life: 60 + r() * 300 }
+  const shirt = SHIRT[(r() * SHIRT.length) | 0], pants = PANTS[(r() * PANTS.length) | 0], seed = r(), phase = r() * 6.28, v = 1.05 + r() * 0.5
+  const jog = pose === 0 && seed >= 0.58 && seed < 0.7 // the jogger outfit (models.js WEARS): three times the walking pace, a longer stride per metre
+  return { id: nextPid++, x, y, h, ang, pose, shirt, pants, seed, phase, v: jog ? v * 3 : v, pk: jog ? 2.2 : 4.2, life: 60 + r() * 300 }
 }
 
 // where a person stands at the end of a leg: the corner of the sidewalk (side +1 left of the leg looking out)
@@ -1530,7 +1532,7 @@ function stepPeople(dt) {
     if (p.xcw && simT - p.xT > 30) hold(p, null) // (never hold the cars up for long)
     if (p.mode === 'walk') {
       const u0 = p.u
-      p.u += p.dir * p.v * dt; p.phase += p.v * dt * 4.2
+      p.u += p.dir * p.v * dt; p.phase += p.v * dt * p.pk
       const xs = xsOf(p.wp, p.side)
       let I = null
       if (xs) for (const q of xs) if (p.u > q.u0 && p.u < q.u1) { I = q; break }
@@ -1558,7 +1560,7 @@ function stepPeople(dt) {
         }
       }
     } else if (p.mode === 'hop') {
-      p.ht += p.v * dt; p.phase += p.v * dt * 4.2
+      p.ht += p.v * dt; p.phase += p.v * dt * p.pk
       if (obstacles.size && p.hlen > 0.01) { // wait while something is in the way
         const f = Math.min(1, p.ht / p.hlen)
         if (inObstacle(p.hx0 + (p.hx1 - p.hx0) * f, p.hy0 + (p.hy1 - p.hy0) * f, p.hh0 + (p.hh1 - p.hh0) * f, 0.5)) p.ht -= p.v * dt

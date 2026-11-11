@@ -19,7 +19,7 @@ import { makeWalker, poseWalker, sitWalker } from '/plugins/drive/walker.js'
 import { makeBus } from '/plugins/drive/bus.js'
 import { CABS, makeCab } from '/plugins/drive/cabs.js'
 import { makeBoat } from '/plugins/sail/boat.js'
-import { shipModels, seabusGeo } from '/plugins/ships/models.js'
+import { shipModels, shipMaterial, seabusGeo } from '/plugins/ships/models.js'
 
 const uni = { uNight: { value: 0 }, uTime: { value: 0.4 }, uRain: { value: 0 }, uCam: { value: new THREE.Vector3() } }
 const mats = {}
@@ -54,7 +54,7 @@ const GROUPS = {
     ['sitting', person(peopleModels(THREE)[0].scale(H, H, H), 2, 0.6, 5)],
     ...(bikeModels ? bikeModels(THREE).map((g, i) => [g.name || 'bike ' + i, person(g, 3, 0.2 + i * 0.3, i, 0.6)]) : []),
   ],
-  boats: () => { const m = new THREE.MeshLambertMaterial({ vertexColors: true }), mesh = (g) => new THREE.Mesh(g, m), b = makeBoat(THREE); b.userData.boom.rotation.y = b.userData.jib.rotation.y = 0.5; return [['player sloop', b], ...Object.values(shipModels(THREE)).flatMap((v) => [...new Set([v[0], v[v.length - 1]])].map((x) => [x.kind + ' ' + v.indexOf(x), mesh(x.geo)])), ['seabus', mesh(seabusGeo(THREE))]] },
+  boats: () => { const m = shipMaterial(THREE, uni.uNight, 1), still = shipMaterial(THREE, uni.uNight, 0, 5), mesh = (g, st) => new THREE.Mesh(g, st ? still : m), b = makeBoat(THREE); b.userData.boom.rotation.y = b.userData.jib.rotation.y = 0.5; return [['player sloop', b], ...Object.values(shipModels(THREE)).flatMap((v) => [...new Set([v[0], v[v.length - 1]])].flatMap((x) => [[x.kind + ' ' + v.indexOf(x), mesh(x.geo)], ...(['container', 'moored', 'motor'].includes(x.kind) ? [[x.kind + ' ' + v.indexOf(x) + ' at rest', mesh(x.geo, true)]] : [])])), ['seabus', new THREE.Mesh(seabusGeo(THREE), new THREE.MeshLambertMaterial({ vertexColors: true }))]] },
 }
 
 const q = new URLSearchParams(location.search), [CW, CH] = q.get('cell').split('x').map(Number), night = +q.get('night')

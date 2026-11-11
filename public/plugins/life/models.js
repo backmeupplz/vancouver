@@ -44,9 +44,10 @@ const pair = (k, x0, x1, y0, y1, z0, z1) => { k.box(x0, x1, y0, y1, z0, z1); k.b
 function axle(k, x, r, track, lod, dual = false) {
   const w = dual ? 0.44 : 0.22
   if (lod) return k.c(TYRE).box(x - r * 0.9, x + r * 0.9, 0, r * 1.9, -track, track)
+  const sw = 1 + Math.round((x + 6) / 0.02) * 100 + Math.round(r * 100) // the wheel's centre and radius, for the shader to turn it (life shader: aSwing > 0.5 on a car)
   for (const s of [-1, 1]) {
-    k.c(TYRE).wheel(x, r, s * (track - w / 2), r, w, 10)
-    k.c(HUB).wheel(x, r, s * (track + 0.004), r * 0.6, 0.02, 8).c(TRIM).wheel(x, r, s * (track + 0.016), r * 0.2, 0.02, 5)
+    k.c(TYRE, 1, sw).wheel(x, r, s * (track - w / 2), r, w, 10)
+    k.c(HUB, 1, sw).wheel(x, r, s * (track + 0.004), r * 0.6, 0.02, 8).c(TRIM, 1, sw).wheel(x, r, s * (track + 0.016), r * 0.2, 0.02, 5)
   }
 }
 // lamps: head (part 2) and tail (part 3) as [y0, y1, z0, z1], blinkers (parts 7 left / 8 right: drawn only while
@@ -391,7 +392,7 @@ export function lifeMaterial(THREE, uni, kind, hide = null) {
     Object.assign(s.uniforms, uni, hide ? { uNear: hide } : {})
     s.vertexShader = s.vertexShader
       .replace('#include <common>', `#include <common>
-        attribute vec4 iA, iB; attribute vec3 aCol; attribute float aPart, aSwing; uniform float uNight, uTime, uRain${hide ? ', uNear' : ''}; uniform vec3 uCam;
+        attribute vec4 iA, iB; ${kind === 'car' && !hide ? 'attribute vec2 iC;' : ''} attribute vec3 aCol; attribute float aPart, aSwing; uniform float uNight, uTime, uRain${hide ? ', uNear' : ''}; uniform vec3 uCam;
         varying vec3 vCol, vEmit; ${SHADE.vars}
         vec3 unpack(float c) { float r = floor(c / 65536.0), g = floor((c - r * 65536.0) / 256.0), b = c - r * 65536.0 - g * 256.0; return pow(vec3(r, g, b) / 255.0, vec3(2.2)); }
         vec3 orient(vec3 p, float yaw, float pitch) {
@@ -403,6 +404,11 @@ export function lifeMaterial(THREE, uni, kind, hide = null) {
         ${kind === 'car' ? `pitch = iB.x;
           vec3 col = aPart < 0.5 ? unpack(iB.y) : aCol;
           vec3 em = vec3(0.0);
+          ${hide ? '' : `if (aSwing > 0.5) { // a wheel of a near car: turning by the distance driven (iC.x), the front ones steering (iC.y)
+            float pk = aSwing - 1.0, ri = mod(pk, 100.0), cx = (pk - ri) / 100.0 * 0.02 - 6.0, wr = ri * 0.01, sp = -iC.x / wr;
+            P0.xy = rot(P0.xy, vec2(cx, wr), sp); N0.xy = rot(N0.xy, vec2(0.0), sp);
+            if (cx > 0.0) { P0.xz = rot(P0.xz, vec2(cx, sign(P0.z) * 0.78), -iC.y); N0.xz = rot(N0.xz, vec2(0.0), -iC.y); }
+          }`}
           if (aPart > 1.5 && aPart < 2.5) em = vec3(1.0, 0.85, 0.6) * uNight * 3.0;
           else if (aPart > 2.5 && aPart < 3.5) em = vec3(1.0, 0.04, 0.02) * (uNight * 1.5 + mod(iB.z, 2.0) * 1.2);
           else if (aPart > 6.5) {
@@ -434,11 +440,14 @@ export function lifeMaterial(THREE, uni, kind, hide = null) {
             if (P0.y < ${BIKE.knee}) { P0.xy = rot(P0.xy, vec2(0.0, ${BIKE.knee}), b); N0.xy = rot(N0.xy, vec2(0.0), b); }
             P0.xy = rot(P0.xy, hip, a); N0.xy = rot(N0.xy, vec2(0.0), a);
           }` : `
+          bool jog = pose < 0.5 && seed >= 0.58 && seed < 0.7; // the jogger outfit (OUTFIT(): WEARS)
+          if (jog) { float js = sin(iB.x); pitch = -0.2; P0.y += 0.07 * js * js; } // leaning into it, both feet in the air at full stride
           bool umb = uRain > 0.5 && fract(seed * 7.31) < 0.6 && pose < 1.5; // an umbrella up, walking or waiting
           if (aPart > 5.5 && aPart < 6.5 && !umb) P0 = vec3(0.0);
           if (sw > 0.5 && sw < 2.5) { // a limb: a about the hip or shoulder, b at the knee or elbow (what is below it)
             bool leg = sw < 1.5; float a = 0.0, b = 0.0, s = sin(iB.x) * sd, c = cos(iB.x) * sd;
-            if (pose < 0.5) { a = s * (leg ? 0.5 : -0.45); b = leg ? -0.95 * max(0.0, c) : 0.15 + 0.4 * max(0.0, -s); } // the swinging leg's knee bends
+            if (pose < 0.5 && jog) { a = s * (leg ? 0.95 : -1.0); b = leg ? -1.9 * max(0.0, c) : 1.25 + 0.3 * c; } // a run: long strides, the back knee kicked up, arms bent and pumping
+            else if (pose < 0.5) { a = s * (leg ? 0.5 : -0.45); b = leg ? -0.95 * max(0.0, c) : 0.15 + 0.4 * max(0.0, -s); } // the swinging leg's knee bends
             else if (pose < 1.5) b = leg ? 0.0 : 0.12;
             else if (pose < 2.5) { a = leg ? 1.5708 : 0.3; b = leg ? -1.5708 : 0.6; } // sitting
             else if (pose > 4.5) b = leg ? 0.0 : 0.12; // stopped for someone petting their dog
