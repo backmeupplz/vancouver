@@ -681,6 +681,7 @@ def road_ground(dtm, pieces, X0, Y0, decks=()):
     if not len(S): return G, np.zeros((L1 // FINE + 1,) * 2, np.float32)
     S, ab = S[:, :4], S[:, 4:].astype(np.int64)  # (each sample's piece's end nodes)
     want = S[:, 3].copy()
+    held = np.zeros(len(S), bool)  # the samples a deck holds (its end's top, the cut under it): the fine lattice takes them to the centimetre
     # the decks' ends at the street's level (an abutment, a ramp's foot: the ground 15 m on past the end is near it;
     # not where the deck goes on: a joint, the cut at a tile's edge): the streets going on from them meet the deck's top
     use = {}
@@ -700,6 +701,7 @@ def road_ground(dtm, pieces, X0, Y0, decks=()):
         f = np.hypot(S[near, 0] - x, S[near, 1] - y) / 12
         want[near] = top * (1 - f) + want[near] * f
         S[near, 2] *= 3  # held to it harder than the LiDAR elsewhere
+        held |= near
     # under a deck: the street 3 m under its underside (tools/audit_elev.py 'under'; the LiDAR has no ground under a
     # bridge, its ground there is filled in from round it): a street drawn up into the deck is cut down, up to CUT
     dk = [(shapely.LineString(L['pts']), L) for L in decks if L['z'] and not L.get('tube') and len(L['pts']) > 1]
@@ -711,7 +713,7 @@ def road_ground(dtm, pieces, X0, Y0, decks=()):
             if min(f, g.length - f) < 12: continue  # (at its ends it comes down to the street)
             P_ = np.array(L['pts'], float); s_ = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P_, axis=0).T))])
             under = float(np.interp(f, s_, L['z'])) - (1.6 if KI[L['kind']] <= KI['tertiary'] else 0.9) - 3.0
-            if under < want[si] < under + CUT: want[si] = under; S[si, 2] *= 3
+            if under < want[si] < under + CUT: want[si] = under - UNDER_AIM; S[si, 2] *= 3; held[si] = True
     k = S[:, 2:3]  # how much each counts: the streets, rail a little (a cut's floor where it shares a cell with the street above)
     fx, fy = (S[:, 0] - X0) / 8, (Y0 + L1 - S[:, 1]) / 8
     i, j = np.clip(np.floor(fx).astype(int), 0, 511), np.clip(np.floor(fy).astype(int), 0, 511)
@@ -728,10 +730,12 @@ def road_ground(dtm, pieces, X0, Y0, decks=()):
         num = np.zeros(g.size); np.add.at(num, idx.ravel(), (w2 * e[:, None]).ravel())
         g += np.where(free, DAMP * (num - HOLD * (g - g0)) / (den + HOLD), 0.0)
     G = g.reshape(513, 513).astype(np.float32)
-    return G, road_fine(S[:, :2], k[:, 0], want - bilinear(np.round(G * 10) / 10, S[:, 0], S[:, 1], X0, Y0, 8), X0, Y0)
+    return G, road_fine(S[:, :2], k[:, 0], want - bilinear(np.round(G * 10) / 10, S[:, 0], S[:, 1], X0, Y0, 8), X0, Y0, held)
 
 
 FINE_MIN = 0.6  # metres: a street this far off the 8 m grid gets the fine lattice under it (nearer, it holds it level)
+UNDER_AIM = 0.3  # metres the cut under a deck aims past the rule's 3 m (the lattice drops offsets under FINE_DROP = 0.25, the grid is in decimetres)
+FINE_HELD = 0.1  # a held sample (under a deck, at its end) this far off the 8 m grid gets the lattice
 SMOOTH = 0.05  # how hard a fine node holds to its neighbours' mean, against a street sample's 1
 FINE_DROP = 0.25  # metres: smaller offsets are left out
 FINE_EDGE = 16.0  # metres: none of it this near a detail tile's edge (paint reaching past it lies on the next tile's 8 m grid, TERM)
@@ -742,7 +746,7 @@ def bilinear(G, x, y, X0, Y0, c):
     return ndimage.map_coordinates(G, [(Y0 + (G.shape[0] - 1) * c - np.asarray(y)) / c, (np.asarray(x) - X0) / c], order=1, mode='nearest')
 
 
-def road_fine(P, k, r, X0, Y0):
+def road_fine(P, k, r, X0, Y0, held=None):
     """the 2 m offsets over the 8 m grid (2049 x 2049 nodes over the 4 km tile, row 0 north) that take the streets the rest
     of the way to their ground: P, k, r the street samples, their weights, how far the 8 m grid leaves them off. Fitted
     as road_ground's grid is (held to nothing where the streets are near it), then eased out 6 m round them so the
@@ -750,11 +754,12 @@ def road_fine(P, k, r, X0, Y0):
     n = L1 // FINE + 1
     F = np.zeros(n * n)
     on = np.abs(r) > FINE_MIN
+    if held is not None: on |= held & (np.abs(r) > FINE_HELD)
     if not on.any(): return F.reshape(n, n).astype(np.float32)
     near = np.zeros(len(r), bool)  # (the samples round the ones off: held level, so the fix stays on the street that needs it)
     from scipy.spatial import cKDTree
     near[np.unique(np.concatenate([np.asarray(q, int) for q in cKDTree(P).query_ball_point(P[on], 6.0)]))] = True
-    P, k, r = P[near], k[near], np.where(np.abs(r[near]) > FINE_MIN, r[near], 0.0)
+    P, k, r = P[near], k[near], np.where(on[near], r[near], 0.0)
     d = np.minimum(np.abs((P - [X0, Y0] + L0 / 2) % L0 - L0 / 2), L0).min(1)  # (metres to the nearest detail tile edge)
     r = r * np.clip((d - FINE_EDGE) / FINE_EDGE, 0, 1)  # none within FINE_EDGE of it, eased in over as much again
     fx, fy = (P[:, 0] - X0) / FINE, (Y0 + L1 - P[:, 1]) / FINE
@@ -3422,6 +3427,12 @@ def selftest():
     T = G[3 * 128:4 * 128 + 1, 1 * 128:1 * 128 + 129]; Ft = F[3 * 512:4 * 512 + 1, 1 * 512:1 * 512 + 513]
     D = fine_grid(np.round(T * 10) / 10, fine_section(Ft))
     assert np.abs(D - (ndimage.zoom(np.round(T * 10) / 10, 4, order=1, grid_mode=False)[:513, :513] + Ft)).max() < 0.02
+    # under a deck the ground aims 0.3 m past the rule's 3 m, on the lattice: a level street at 30 under a primary deck at 34.2 (0.4 m short of 3 m)
+    dtm = np.full((2048, 2048), 30.0, np.float32)
+    deck = dict(z=[34.2] * 51, kind='primary', w=12.0, band=None, tube=None, a=1, b=2, pts=[(1500.0 + 2 * i, -2000.0) for i in range(51)])
+    street = [dict(z=None, kind='primary', w=12.0, pts=[(1400.0, -2000.0), (1700.0, -2000.0)], a=3, b=4)]
+    G, F = road_ground(dtm, street, 0, -L1, [deck])
+    assert all(gx(x, -2000) <= 29.6 for x in range(1514, 1587, 2)), [gx(x, -2000) for x in range(1514, 1587, 12)]
     # pct is np.percentile to the bit; a CPU slot is held while its job runs and given back after
     rng = np.random.default_rng(2)
     for n in (1, 2, 7, 100, 1001):

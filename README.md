@@ -59,7 +59,7 @@ isoworld's [Isometric Vancouver](https://vancouver.isoworld.xyz/).
    is an 8 m grid in detail tiles (plus, under the streets where it can't follow them, 2 m offsets: section TFIN), so
    streets sit on their embankments and in their cuts, fitted to the streets and
    rail lines (where an 8 m point lands in the cut, ravine or yard beside a street, the grid round it moves so the
-   drawn ground under the street is the LiDAR's); piers and seawalls in the sea keep their height. SkyTrain guideways
+   drawn ground under the street is the LiDAR's; under a deck the street is cut to 3.3 m under its underside and a deck's end meets the street's ground to the decimetre, both on the 2 m lattice); piers and seawalls in the sea keep their height. SkyTrain guideways
    take the structure the LiDAR sees beside their line where OpenStreetMap draws it a few metres off (at stations),
    long pieces (a bridge's span, one 1.5 km way on the Lions Gate) are cut at the detail tiles' edges so each tile has
    the part over it (the next tiles' decks reaching over a tile come with it, XDCK: the page leaves out what of its own
