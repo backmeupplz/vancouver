@@ -1617,15 +1617,15 @@ function fences(t, terr, carriage, inAny, B, sol) {
         const x0 = ax + (dx * k) / m, y0 = ay + (dy * k) / m, x1 = ax + (dx * (k + 1)) / m, y1 = ay + (dy * (k + 1)) / m, l = L / m, mx = (x0 + x1) / 2, my = (y0 + y1) / 2
         const u0 = u; u += l
         if (!free(mx, my) || !free(x0, y0) || !free(x1, y1)) continue
-        const g0 = groundOut(terr, x0, y0), g1 = groundOut(terr, x1, y1), a = Math.atan2(dy, dx), nx = dy / L, nz = dx / L
+        const g0 = groundOut(terr, x0, y0), g1 = groundOut(terr, x1, y1), a = Math.atan2(dy, dx), nx = dy / L, nz = dx / L, hw = kind === 0 ? 0.08 : kind === 1 ? 0.1 : 0.45
         if (kind === 0) {
           const rw = (uu, hh) => [12, uu, hh, 0.5]
           for (const q of [1, -1]) quad(B, [x0, g0 - 0.05, -y0], [x1, g1 - 0.05, -y1], [x1, g1 + h, -y1], [x0, g0 + h, -y0], FENCE_C, [nx * q, 0, nz * q], rw(u0, 0.06), rw(u, 0.06), rw(u, 1.16), rw(u0, 1.16))
         } else {
-          const g = Math.min(g0, g1) - 0.1, hw = kind === 1 ? 0.1 : 0.45
+          const g = Math.min(g0, g1) - 0.1
           box3(B, mx, my, g, l + (kind === 2 ? 0.3 : 0.02), hw * 2, h + 0.1, a, kind === 1 ? WALL_C : HEDGE_C[(i + k) % 3])
         }
-        sol.push([mx, my, a, l / 2, kind === 0 ? 0.08 : hw])
+        sol.push([mx, my, a, l / 2, hw])
       }
     }
   }
