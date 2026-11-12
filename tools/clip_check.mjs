@@ -175,7 +175,7 @@ const init = () => {
     return F
   }
 }
-const { browser, page, errs } = await open({ ...o, port: srv.port, query: '?drivedebug', hash: '#13645,11243,0.1295', init })
+const { browser, page, errs } = await open({ ...o, port: srv.port, query: '?drivedebug&lifedebug', hash: '#13645,11243,0.1295', init })
 await settle(page, 500)
 await page.waitForFunction(() => window.driveDebug, null, { timeout: 30000 })
 const goto = (la, lo) => page.evaluate(([la, lo]) => { const c = city, d = c.world.fromLatLon(la, lo).sub(c.controls.target); c.camera.position.add(d); c.controls.target.add(d); c.camera.zoom = 0.12; c.camera.updateProjectionMatrix(); c.controls.update(); c.requestRender() }, [la, lo])

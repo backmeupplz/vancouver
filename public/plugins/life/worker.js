@@ -1042,6 +1042,14 @@ function stepCars(dt) {
     }
     if (gone) continue
   }
+  // a leader that stopped dead (a red line, a hold) can leave the car behind it overlapping with no room to brake, and
+  // IDM then waits for a gap that never opens: back the follower off to a bumper's gap
+  for (const car of cars) {
+    const o = car.seg.cars[car.seg.cars.indexOf(car) + 1]
+    if (!o || car.lc || o.lc || o.s - o.L - car.s > -0.2) continue
+    const s = o.s - o.L - 0.3
+    if (s >= 0) { car.s = s; car.v = Math.min(car.v, o.v) }
+  }
   if (net) {
     const want = carTarget
     if (cars.length < want * 0.85) for (let k = 0; k < 40 && cars.length < want; k++) spawnCar(false, cars.length < want * 0.5)
