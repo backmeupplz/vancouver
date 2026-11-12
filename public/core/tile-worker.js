@@ -260,11 +260,13 @@ function ground(t, terr, level) {
   let o = s.off
   const runs = dv.getUint16(o, true); o += 2
   const pos = [], cls = [], idx = Object.assign([], { rim: [] }), coarse = level === 0 ? Object.assign([], { rim: [] }) : null
+  const decks = level === 0 ? readDecks(t) : [] // fixed piers: drawn after the ground (class code 256 + k while triangulating)
+  for (const d of decks) d.cls = d.flags & 4 ? 15 : PIER // (a paved deck: plaza pavers)
   const seen = new Map() // shared vertices: one per (point, class), so each tile uploads about a third as much
   const vert = (x, y, c, lift) => {
     const key = (Math.round(x * 1000) + 3e6) * 1e7 + Math.round(y * 1000) + 3e6 + c * 1e14 // (to the mm: two points of a sliver 2 cm across stay two)
     let i = seen.get(key)
-    if (i === undefined) { i = pos.length / 3; seen.set(key, i); pos.push(x, hz(x, y, c) + lift, -y); cls.push(c) }
+    if (i === undefined) { i = pos.length / 3; seen.set(key, i); pos.push(x, hz(x, y, c) + lift, -y); cls.push(c >= 256 ? decks[c - 256].cls : c) }
     return i
   }
   let hmin = Infinity, hmax = -Infinity
@@ -275,7 +277,7 @@ function ground(t, terr, level) {
   // looks at the edge alone, so both triangles that share an edge split it alike (no cracks; where polygons meet, a gap
   // is under tol); slopes and flat ground keep big triangles (an 8 m grid split everywhere was ~3x the triangles for the same picture).
   const cell = t.size / (terr.n - 1), cap = hmax - hmin < 2 ? Infinity : cell * 4
-  const hz = (x, y, c) => heightAt(terr, x, y, c === WATER || c === SAND) // (a float's rise is added below, once its water is known)
+  const hz = (x, y, c) => c >= 256 ? Math.max(heightAt(terr, x, y, true) + PIER_LAY, decks[c - 256].z) : heightAt(terr, x, y, c === WATER || c === SAND) // (a float's rise is added below, once its water is known)
   const bends = (ax, ay, bx, by, c, tol) => {
     if (ax > bx || (ax === bx && ay > by)) return bends(bx, by, ax, ay, c, tol) // one way along an edge, whichever side asks
     const L = Math.hypot(bx - ax, by - ay)
@@ -289,8 +291,9 @@ function ground(t, terr, level) {
     else if (cap === Infinity || L < 1.5) return false
     const fine = wall || fineOn(terr, ax, ay, bx, by)
     if (fine && !wall && L < 2) return false // (the offsets have nothing finer than their 2 m)
-    const ha = heightAt(terr, ax, ay), hb = heightAt(terr, bx, by), k = Math.ceil(L / (wall ? 0.25 : fine ? 1 : cell / 2)) // (the terrain, also under a pier: its border with the water is split alike on both sides; every metre over the 2 m offsets)
-    for (let i = 1; i < k; i++) { const f = i / k; if (Math.abs(heightAt(terr, ax + (bx - ax) * f, ay + (by - ay) * f) - ha - (hb - ha) * f) > tol) return true }
+    const H = c >= 256 ? (x, y) => hz(x, y, c) : (x, y) => heightAt(terr, x, y) // (a deck: where it is drawn, flat at its z over the water, on the bank where that stands higher)
+    const ha = H(ax, ay), hb = H(bx, by), k = Math.ceil(L / (wall ? 0.25 : fine ? 1 : cell / 2)) // (the terrain, also under a pier: its border with the water is split alike on both sides; every metre over the 2 m offsets)
+    for (let i = 1; i < k; i++) { const f = i / k; if (Math.abs(H(ax + (bx - ax) * f, ay + (by - ay) * f) - ha - (hb - ha) * f) > tol) return true }
     return false
   }
   // one triangle into `out`, split at the middle of every edge that bends, all at once, so each split halves them: 12
@@ -472,6 +475,31 @@ function ground(t, terr, level) {
       if (facing > 0) idx.push(v[0], v[1], v[2], v[0], v[2], v[3]); else idx.push(v[0], v[2], v[1], v[0], v[3], v[2])
     }
   }
+  // fixed decks: after fixT (a deck is no part of the partition: no welding, no rim, T-junctions never reach it), triangulated
+  // like a ground polygon, flat at its z where the ground runs under it (hz: never under the bank it meets)
+  const deckFrom = idx.length, n0 = pos.length / 3, deckRuns = []
+  decks.forEach((d, k) => {
+    const flat = [], holes = []
+    for (let r = 0; r < d.rings.length; r++) {
+      const ring = d.rings[r]
+      if (ring.length < 6 || (r && !flat.length)) continue
+      if (r) holes.push(flat.length / 2)
+      for (let i = 0; i < ring.length; i += 2) {
+        const j = (i + 2) % ring.length
+        flat.push(ring[i], ring[i + 1]); halve(flat, ring[i], ring[i + 1], ring[j], ring[j + 1])
+      }
+    }
+    if (flat.length < 6) return
+    const tri = earcut(flat, holes)
+    delaunay(tri, flat)
+    const tris = conform(tri, flat), lift = d.cls * GROUND_LIFT + 0.02, from = idx.length
+    for (let i = 0; i < tris.length; i += 3) {
+      const a = tris[i] * 2, b = tris[i + 1] * 2, c = tris[i + 2] * 2
+      emit(idx, GROUND_TOL[level], 256 + k, lift, flat[a], flat[a + 1], flat[b], flat[b + 1], flat[c], flat[c + 1], 0, 0)
+      if (coarse) emit(coarse, GROUND_COARSE, 256 + k, lift, flat[a], flat[a + 1], flat[b], flat[b + 1], flat[c], flat[c + 1], 0, 0)
+    }
+    deckRuns.push([from, idx.length, d.flags])
+  })
   const nv = pos.length / 3
   if (!nv) return null
   const P = new Float32Array(pos), I = nv > 65535 ? Uint32Array : Uint16Array
@@ -525,10 +553,16 @@ function ground(t, terr, level) {
   for (const [i, v] of ptid) tidal[i] = v
   const normal = normals(terr, P)
   for (const [i, n] of pnorm) { normal[i * 3] = n[0] * 127; normal[i * 3 + 1] = 0; normal[i * 3 + 2] = n[2] * 127 }
+  for (let i = n0 * 3; i < normal.length; i += 3) { normal[i] = 0; normal[i + 1] = 127; normal[i + 2] = 0 } // (a deck: straight up)
   let pier = null
   if (level === 0) { // the pier index: the drawn class 20 triangles (not the skirt), so what stands on a pier reads what is drawn
     const T = [], Y = [], F = []
-    for (let q = 0; q < idx.length; q += 3) {
+    const add = (q, f) => {
+      for (const v of [idx[q], idx[q + 1], idx[q + 2]]) T.push(P[v * 3], -P[v * 3 + 2]), Y.push(P[v * 3 + 1])
+      F.push(f)
+    }
+    for (const [a, b, f] of deckRuns) for (let q = a; q < b; q += 3) add(q, (f & 1 ? 8 : 0) | 16)
+    for (let q = 0; q < deckFrom; q += 3) {
       const a = idx[q], b = idx[q + 1], c = idx[q + 2]
       if (cls[a] !== PIER || pnorm.has(a)) continue
       for (const v of [a, b, c]) T.push(P[v * 3], -P[v * 3 + 2]), Y.push(P[v * 3 + 1])
@@ -633,6 +667,24 @@ function weld(rings, size, tol) {
 
 // detail tiles: a WATER_N x WATER_N mask (1 = water), cell (i east, j north) from the tile's SW corner
 const FLOAT_SKIRT = 0.6
+// fixed piers (section PIER, optional: a tile without it has only floats): a level timber deck on piles, drawn from the
+// bake's z (u16 count; per deck u8 flags 1 road 2 railing 4 paved, i16 z in dm, u16 rings as GRND). Constants: tools/tiles.py pier_decks
+const PIER_THICK = 0.35, PIER_LAY = 0.06, PILE = 0.3, PILE_STEP = 5, PILE_IN = 0.25, PILE_DEEP = 1.6
+function readDecks(t) {
+  if (t.decks) return t.decks
+  const s = t.sections.PIER, out = []
+  t.decks = out
+  if (!s) return out
+  const dv = t.dv, n = dv.getUint16(s.off, true)
+  let o = s.off + 2
+  for (let i = 0; i < n; i++) {
+    const flags = dv.getUint8(o), z = dv.getInt16(o + 1, true) / 10, nr = dv.getUint16(o + 3, true), rings = []
+    o += 5
+    for (let k = 0; k < nr; k++) { const [pts, o2] = readRing(t, o); o = o2; rings.push(pts) }
+    out.push({ flags, z, rings })
+  }
+  return out
+}
 const WATER_N = 256, WATER = 19, PIER = 20, SAND = 10 // GROUND class indices of water, piers and sand (tools/tiles.py)
 function water(t) { const m = raster(t, new Set([WATER]), WATER_N); return m && { n: WATER_N, mask: m } }
 // and a 1 m mask of the carriageways and cycle tracks as drawn (bits, row-major from the SW corner): street furniture
@@ -1291,6 +1343,7 @@ function buildings(t, terr, level, lines, carriage, lot) {
   if (level === 0) tubes(W, lines)
   if (level === 0) railings(W, Bal, lines, terr) // (a road on a roof has the building's parapet)
   if (level === 0 && terr.wall) seawalls(W, Bal, terr.wall, terr)
+  if (level === 0) piers(W, Bal, readDecks(t), terr, lines, t.size)
   const dv = t.dv
   let o = s.off
   const n = dv.getUint32(o, true); o += 4
@@ -1776,6 +1829,17 @@ function sides(P) {
 // a band), where the drive plugin's van and walker stop (railAt there)
 const PARAPET = lin(0xbcb8ae), RAILING = lin(0x8a9096)
 const railAt = (L) => L.w / 2 + (L.band ? 2 : 0) // metres from the centre line (the drive plugin's railAt)
+// one stretch i to j of a kerb with a railing over it (at(i, off, y): the point `off` out from the edge at i, T thick, R from the
+// centre): the kerb from y0 to y0 + ph (its outer face down to yb), and, when `fence`, the railing (materials.js pattern 12) to 1.2 m
+function rail(W, Bal, at, i, j, R, T, y0i, y0j, ybi, ybj, ph, out, inw, ua, ub, fence) {
+  const pw = ROOFW(0.5)
+  quad(W, at(i, R + T, ybi), at(j, R + T, ybj), at(j, R + T, y0j + ph), at(i, R + T, y0i + ph), PARAPET, out, pw) // outer face, over the deck's edge
+  quad(W, at(i, R, y0i), at(j, R, y0j), at(j, R, y0j + ph), at(i, R, y0i + ph), PARAPET, inw, pw)
+  quad(W, at(i, R, y0i + ph), at(j, R, y0j + ph), at(j, R + T, y0j + ph), at(i, R + T, y0i + ph), shade(PARAPET, 1.06), [0, 1, 0], pw)
+  if (!fence) return
+  const rw = (uu, h) => [12, uu, h, 0.5] // along, height over the deck
+  for (const want of [out, inw]) quad(Bal, at(i, R + T / 2, y0i + ph), at(j, R + T / 2, y0j + ph), at(j, R + T / 2, y0j + 1.2), at(i, R + T / 2, y0i + 1.2), RAILING, want, rw(ua, ph), rw(ub, ph), rw(ub, 1.2), rw(ua, 1.2))
+}
 function railings(W, Bal, lines, terr) {
   const decks = lines.filter((L) => L.z && !L.tunnel && !L.roof && (L.kind <= K.track || L.kind === K.rail || L.kind === K.lightrail))
   if (!decks.length) return
@@ -1811,15 +1875,64 @@ function railings(W, Bal, lines, terr) {
         u += len
         if (!ok[i] || !ok[j]) continue
         const nx = (side[i][0] + side[j][0]) * sg, nn = (side[i][1] + side[j][1]) * sg, l = Math.hypot(nx, nn) || 1, out = [nx / l, 0, -nn / l], inw = [-nx / l, 0, nn / l]
-        const y0 = z[i] + top, y1 = z[j] + top, pw = ROOFW(0.5)
-        quad(W, at(i, R + T, z[i] - 0.5), at(j, R + T, z[j] - 0.5), at(j, R + T, y1 + ph), at(i, R + T, y0 + ph), PARAPET, out, pw) // outer face, over the deck's edge
-        quad(W, at(i, R, y0), at(j, R, y1), at(j, R, y1 + ph), at(i, R, y0 + ph), PARAPET, inw, pw)
-        quad(W, at(i, R, y0 + ph), at(j, R, y1 + ph), at(j, R + T, y1 + ph), at(i, R + T, y0 + ph), shade(PARAPET, 1.06), [0, 1, 0], pw)
-        if (!foot) continue
-        const rw = (uu, h) => [12, uu, h, 0.5] // materials.js pattern 12: along, height over the deck
-        for (const want of [out, inw]) quad(Bal, at(i, R + T / 2, y0 + ph), at(j, R + T / 2, y1 + ph), at(j, R + T / 2, y1 + 1.2), at(i, R + T / 2, y0 + 1.2), RAILING, want, rw(u - len, ph), rw(u, ph), rw(u, 1.2), rw(u - len, 1.2))
+        rail(W, Bal, at, i, j, R, T, z[i] + top, z[j] + top, z[i] - 0.5, z[j] - 0.5, ph, out, inw, u - len, u, foot)
       }
     }
+  }
+}
+// fixed piers: timber fascia under the deck's edge, square piles every PILE_STEP m down to under the lowest tide, and a railing
+// (flag 2) with gaps where a stair, ramp or gangway (a deck line or steps) meets the edge. Per 2 m of every ring edge off the tile's edge
+const TIMBER = lin(0x7a6248), DECK_RAIL_GAP = 2.5
+function piers(W, Bal, decks, terr, lines, size) {
+  if (!decks.length) return
+  const opens = lines.filter((L) => L.kind === K.steps || (L.z && !L.tunnel)) // where the rail stops
+  const gap = (x, y) => opens.some((L) => {
+    for (let i = 0; i < L.pts.length / 2 - 1; i++) {
+      const ax = L.pts[i * 2], ay = L.pts[i * 2 + 1], dx = L.pts[i * 2 + 2] - ax, dy = L.pts[i * 2 + 3] - ay, f = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy || 1)))
+      if (Math.hypot(x - ax - dx * f, y - ay - dy * f) < DECK_RAIL_GAP) return true
+    }
+    return false
+  })
+  const edge = (u) => Math.abs(u) < 1e-3 || Math.abs(u - size) < 1e-3
+  const top = (d, x, y) => Math.max(heightAt(terr, x, y, true) + PIER_LAY, d.z)
+  for (const d of decks) {
+    d.rings.forEach((ring, r) => {
+      const n = ring.length / 2
+      if (n < 3) return
+      let area = 0
+      for (let i = 0; i < n; i++) { const j = (i + 1) % n; area += ring[i * 2] * ring[j * 2 + 1] - ring[j * 2] * ring[i * 2 + 1] }
+      const sg = (area > 0 ? 1 : -1) * (r ? -1 : 1) // outward (away from the deck): right of a counter-clockwise outer ring
+      let s0 = 0, nextPile = 0
+      for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n, ax = ring[i * 2], ay = ring[i * 2 + 1], bx = ring[j * 2], by = ring[j * 2 + 1], L = Math.hypot(bx - ax, by - ay)
+        if (L < 1e-3) continue
+        const ex = (by - ay) / L * sg, ey = -(bx - ax) / L * sg // outward normal (x east, y north)
+        if (!((edge(ax) && edge(bx) && Math.abs(ax - bx) < 1e-3) || (edge(ay) && edge(by) && Math.abs(ay - by) < 1e-3))) {
+          const k = Math.max(1, Math.ceil(L / 2)), out = [ex, 0, -ey], inw = [-ex, 0, ey]
+          let prev = null
+          for (let m = 0; m <= k; m++) {
+            const f = m / k, x = ax + (bx - ax) * f, y = ay + (by - ay) * f, g = heightAt(terr, x, y, true), zt = top(d, x, y), air = zt - g
+            if (prev && prev.air > 0.3 && air > 0.3) {
+              const P0 = [prev.x, prev.zt, -prev.y], P1 = [x, zt, -y]
+              quad(W, [P0[0], P0[1] - PIER_THICK, P0[2]], [P1[0], P1[1] - PIER_THICK, P1[2]], P1, P0, TIMBER, out, ROOFW(0.5))
+            }
+            if (d.flags & 2 && prev && prev.air > 0.6 && air > 0.6 && !gap((x + prev.x) / 2, (y + prev.y) / 2)) {
+              const ps = [prev, { x, y, zt }]
+              const atI = (i2, off, yy) => { const q = ps[i2]; return [q.x + ex * (off - 0.25), yy, -(q.y + ey * (off - 0.25))] } // (the rail's outer face on the edge, 0.25 m thick inward)
+              rail(W, Bal, atI, 0, 1, 0, 0.25, prev.zt, zt, prev.zt - 0.2, zt - 0.2, 0.15, out, inw, s0 + L * (m - 1) / k, s0 + L * m / k, true)
+            }
+            prev = { x, y, zt, air }
+          }
+          // piles: every PILE_STEP m along the ring (from its first point), PILE_IN inside the edge
+          for (; nextPile < s0 + L; nextPile += PILE_STEP) {
+            if (nextPile < s0) continue
+            const f = (nextPile - s0) / L, x = ax + (bx - ax) * f - ex * PILE_IN, y = ay + (by - ay) * f - ey * PILE_IN, g = heightAt(terr, x, y, true), zt = top(d, x, y)
+            if (zt - g > 0.6) box3(W, x, y, Math.min(g, SEA0) - PILE_DEEP, PILE, PILE, zt - PIER_THICK - (Math.min(g, SEA0) - PILE_DEEP), 0, shade(TIMBER, 0.8))
+          }
+        } else while (nextPile < s0 + L) nextPile += PILE_STEP
+        s0 += L
+      }
+    })
   }
 }
 // the seawalls (tools/seawall.py, terrain()'s wall): a stone face from the walk's edge (the drawn ground on top) down
