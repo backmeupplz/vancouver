@@ -1508,7 +1508,7 @@ function buildings(t, terr, level, lines, carriage, lot) {
       if (i === door && !party && (arch === 1 || arch === 2) && streetSide(a, p, carriage, 27) >= 9) { // a stoop: a landing and three steps at the door bay (materials.js lifts the door 0.5 m)
         const f = ((nb >> 1) + 0.5) / nb, ex = (p[0] - a[0]) / len, ey = (p[1] - a[1]) / len, cx = a[0] + (p[0] - a[0]) * f, cy = a[1] + (p[1] - a[1]) * f
         const clear = (d) => ![-0.7, 0.7].some((s) => grid.get(gk(Math.floor((cx + ex * s + ey * d) / G), Math.floor((cy + ey * s - ex * d) / G)))?.some((b) => inPoly(cx + ex * s + ey * d, cy + ey * s - ex * d, b.pts)))
-        if (clear(1.7) && clear(1.0)) stoop(Bal, cx, cy, ex, ey, foot, terr, wall)
+        if (clear(1.7) && clear(1.0)) stoop(Bal, cx, cy, ex, ey, foot, terr, solidsOut)
       }
       if (arch === 14 && !party && mn < 0.5 && len >= 6 && shopEdges?.[i] && lot && streetSide(a, p, lot, 12) && !streetSide(a, p, carriage, 9) && h >= 3.2) canopy(Bal, a, p, len, foot, terr, solidsOut, seed, (x, y) => grid.get(gk(Math.floor(x / G), Math.floor(y / G)))?.some((b) => b !== rec && inPoly(x, y, b.pts))) // a strip mall's walk over the car park side
       if (shopEdges?.[i] && mn < 2.5 && h >= 4) {
@@ -1576,11 +1576,12 @@ function buildings(t, terr, level, lines, carriage, lot) {
     ao: AO.P.length ? { position: new Float32Array(AO.P), t: new Float32Array(AO.T), index: AO.P.length / 3 > 65535 ? new Uint32Array(AO.I) : new Uint16Array(AO.I) } : null }
 }
 // a front stoop at tile-local (cx, cy) on a wall running (ex, ey): 1.4 m wide, a 0.5 m landing and two lower steps, 1.5 m out
-function stoop(B, cx, cy, ex, ey, foot, terr, wall) {
+function stoop(B, cx, cy, ex, ey, foot, terr, sol) {
   const a = Math.atan2(ey, ex), nx = ey, ny = -ex, c = lin(0xb7b2a8)
   let g = foot
   for (const [d, q] of [[0.2, 0], [1.5, 0.7], [1.5, -0.7]]) g = Math.min(g, groundOut(terr, cx + nx * d + ex * q, cy + ny * d + ey * q))
   g -= 0.05
+  sol.push([cx + nx * 0.75, cy + ny * 0.75, a, 0.7, 0.75]) // (people and the walker stop at it)
   for (const [d0, d1, top] of [[0, 0.9, 0.5], [0.9, 1.2, 0.33], [1.2, 1.5, 0.17]]) box3(B, cx + nx * (d0 + d1) / 2, cy + ny * (d0 + d1) / 2, g, 1.4, d1 - d0, foot + top - g, a, c)
 }
 const CANOPY = [0x7a2f2a, 0x3a4a5c, 0x4a4f50, 0x2f4a3a, 0x8a6a2a]
