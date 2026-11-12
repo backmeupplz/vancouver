@@ -134,8 +134,9 @@ function build(t, level) {
     const S = solids(t, b.footprints, tr) // what stands on the ground: nothing placed inside another
     out.water = water(t); out.carriage = carriage; out.boats = boats(t, terr); out.lights = lights(t, terr, lines, ps, b, carriage, S)
     out.signs = mergeSigns(signs(t, b.fronts), b.extraSigns)
+    for (const [x, y, a, l, w] of b.solid) S.addBox(x, y, a, l, w) // (posts, pylons, stoops, fences: after the lamps, so those stand where they did; the cars keep clear of them)
     out.parked = parked(t, terr, lines, ps, b.footprints, S)
-    out.footprints = withCars(b.footprints, out.parked.lot, t); out.overhangs = b.overhangs
+    out.footprints = withCars(withBoxes(b.footprints, b.solid, t), out.parked.lot, t); out.overhangs = b.overhangs
     out.beach = beach(t, terr)
     if (out.beach) out.footprints = withBoxes(out.footprints, out.beach.solid, t)
   }
@@ -1565,12 +1566,7 @@ function buildings(t, terr, level, lines, carriage, lot) {
   // strip malls' pylon signs where a service drive meets the lot (BUILDINGS.md step 3)
   if (detail && strips.length && lot && carriage) pylons(t, terr, lines, carriage, lot, strips, (x, y) => grid.get(gk(Math.floor(x / G), Math.floor(y / G)))?.some((b) => inPoly(x, y, b.pts)), Bal, solidsOut, extraSigns)
   if (detail && t.sections.FNCE) fences(t, terr, carriage, (x, y) => grid.get(gk(Math.floor(x / G), Math.floor(y / G)))?.some((b) => inPoly(x, y, b.pts)), Bal, solidsOut)
-  for (const [x, y, a, l, w] of solidsOut) { // (before the parked cars: they keep clear of them)
-    const X = x + t.ox, Y = y + t.oy, fx = Math.cos(a), fy = Math.sin(a)
-    for (const [pp, q] of [[1, 1], [-1, 1], [-1, -1], [1, -1]]) fp.push(X + fx * pp * l + fy * q * w, Y + fy * pp * l - fx * q * w)
-    fpStart.push(fp.length)
-  }
-  return { extraSigns, fronts, walls: pack(W), balconies: Bal.pos.length ? pack(Bal) : null,
+  return { extraSigns, solid: solidsOut, fronts, walls: pack(W), balconies: Bal.pos.length ? pack(Bal) : null,
     footprints: fpStart.length > 1 ? { pts: new Float32Array(fp), start: new Uint32Array(fpStart) } : null, spill,
     overhangs: ohLo.length ? { pts: new Float32Array(oh), start: new Uint32Array(ohStart), lo: new Float32Array(ohLo) } : null,
     ao: AO.P.length ? { position: new Float32Array(AO.P), t: new Float32Array(AO.T), index: AO.P.length / 3 > 65535 ? new Uint32Array(AO.I) : new Uint16Array(AO.I) } : null }
