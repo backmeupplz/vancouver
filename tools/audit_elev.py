@@ -173,6 +173,16 @@ def audit(ij):
             res.append((zz + 0.35, zz - th, L))
         return res
 
+    bpolys = [Polygon(B['ring']).buffer(0) for B in blds]
+    btree = STRtree(bpolys) if bpolys else None
+
+    def over(q, g):
+        """a deck, or a building the tile draws, more than 2 m over the ground g at q"""
+        if any(top > g + 2 for top, _, _ in deck_at(*q)): return True
+        if btree is None: return False
+        pt = shapely.points(*q)
+        return any(blds[i]['top'] > g + 2 for i in btree.query(pt, predicate='intersects'))  # (a part drawn over it, or the building it is inside)
+
     for L in mine:
         P = L['pts']
         if len(P) < 2: continue
@@ -207,7 +217,9 @@ def audit(ij):
                 cov = np.isfinite(surf) & (surf - drawn > 4)
                 if cov.mean() > 0.7 and len(Q) * 4 > 40:
                     m = len(Q) // 2
-                    add('tunnel', len(Q) * 4, *Q[m], drawn[m], L, w, note='layer<0 under a structure, drawn at grade', lidar_above=float(np.nanmedian((surf - drawn)[cov])))
+                    cover = float(np.mean([over(q, g) for q, g in zip(Q, drawn)]))
+                    if cover >= 0.6: continue  # on the ground under what the tile draws: right as drawn
+                    add('tunnel', len(Q) * 4, *Q[m], drawn[m], L, w, note='layer<0 under a structure, drawn at grade', lidar_above=float(np.nanmedian((surf - drawn)[cov])), cover=cover)
             # under decks (only those of a higher layer, or any deck if this piece is at layer 0 or below)
             if seg_tree is not None:
                 worst = None

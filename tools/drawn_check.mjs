@@ -331,7 +331,7 @@ function check(cell) {
       if (!hs.length) continue
       const near = hs.reduce((b, q) => (Math.abs(o.h - 0.2 - q) < Math.abs(o.h - 0.2 - b) ? q : b))
       const off = o.h - 0.2 - near
-      if (Math.abs(off) > TOL.lane && (!worst || Math.abs(off) > worst[4])) worst = [o.x, o.y, o.h, off]
+      if (Math.abs(off) > TOL.lane && (!worst || Math.abs(off) > Math.abs(worst[3]))) worst = [o.x, o.y, o.h, off]
     }
     if (worst) { const p = g.conn ? g.from.p : g.p; add('lane-surface', worst[0], worst[1], worst[2], Math.abs(worst[3]), `${g.conn ? 'junction path after' : 'lane on'} ${p.z ? 'deck' : 'ground'} piece ${p.a}-${p.b} kind ${p.kind} ${worst[3].toFixed(2)} m off`) }
   }
