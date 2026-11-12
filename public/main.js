@@ -536,10 +536,14 @@ let aaMode = quality.tier.aa
 function setAA(mode) { aaMode = mode; dirty = true } // the quality tier's aa
 // MSAA samples for camera C: 'auto' skips them for the map on a screen of 1.75+ device px per CSS px, where its
 // pixels are finer than the ink lines that draw the edges anyway (4x MSAA was ~40% of the map's frame at 2x).
-// A change reallocates rt: only when a plugin's camera comes or goes or the tier changes.
-// Where FXAA runs too (smooth, in draw) the MSAA is paid twice for the same edges: samples 0 then. The change reallocates rt:
-// at most once a second (res steps near the 1.5 line must not thrash it), so a plugin's camera or the tier may wait a second.
-const msaa = (C, pr, smooth) => aaMode === 'off' || aaMode === 'fxaa' || smooth || (aaMode === 'auto' && !C.isPerspectiveCamera && pr >= 1.75) ? 0 : 4
+// The change reallocates rt: at most once a second (res and zoom steps near the lines must not thrash it), so a
+// plugin's camera or the tier may wait a second.
+// Where FXAA runs too (smooth, in draw) the MSAA is paid twice for the same edges: samples 0 then, but for the map
+// zoomed out (under 0.09) on coarse texels: the far city's houses and trees are a pixel or two there, and only
+// coverage samples average them (without, salt and pepper that crawls while zooming, #604); the ink is mostly faded
+// out by then (its edges come out weaker from a multisampled depth), and the pixels are few, so it costs little.
+const msaa = (C, pr, smooth, scale, zoom) => aaMode === 'off' || aaMode === 'fxaa' || (aaMode === 'auto' && !C.isPerspectiveCamera && pr * scale >= 1.75) ? 0
+  : smooth && (C.isPerspectiveCamera || zoom >= 0.09) ? 0 : 4
 let msaaAt = -1e9
 // the scene is drawn into the corner `scale` of rt (adaptive resolution, below), the ink pass stretches it over the
 // canvas; the trees and the overlay are drawn at full resolution
@@ -550,7 +554,7 @@ function draw(scale = res) {
   rt.viewport.set(0, 0, rw, rh); rt.scissor.set(0, 0, rw, rh); rt.scissorTest = rw < w
   const C = own ? own.camera : cam, zoom = own ? ownCamera.zoom : cam.zoom, u = ink.uniforms
   const smooth = (aaMode === 'fxaa' || aaMode === 'auto') && pr * scale < 1.5 // (scene texels bigger than 2/3 CSS px: their steps show)
-  const want = msaa(C, pr, smooth), nowMs = performance.now()
+  const want = msaa(C, pr, smooth, scale, zoom), nowMs = performance.now()
   if (rt.samples !== want && nowMs - msaaAt > 1000) { rt.samples = want; rt.dispose(); msaaAt = nowMs }
   // the outline's width: a CSS px, in whole texels (else slopes read as edges); below full resolution half a CSS px
   // between bilinear taps (LOWRES)
