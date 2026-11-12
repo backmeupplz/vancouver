@@ -100,6 +100,9 @@ export function makeFoot(THREE, city, api) {
     for (const L of shots) {
       const d = Math.hypot(L.x - man.x, L.y - man.y)
       if (d > L.r) continue
+      if (d < L.r * 0.25) continue // too close is a wall
+      v.set(L.x, ground(L.x, L.y, man.h) + L.h, -L.y).project(cam)
+      if (v.z > 1 || Math.abs(v.x) > 1 || Math.abs(v.y) > 1) continue // its top has to be in the frame
       v.set(L.x, ground(L.x, L.y, man.h) + L.h * 0.55, -L.y).project(cam)
       if (v.z > 1 || Math.abs(v.x) > 0.8 || Math.abs(v.y) > 0.85) continue
       // hidden behind a building on the way (not its own walls; a tower shows over the roofs)
@@ -112,8 +115,10 @@ export function makeFoot(THREE, city, api) {
     api.sfx.shutter(); api.flash()
     const got = inFrame(S.cam)
     if (!got.length) { api.popup('Nothing famous in frame', S.near ? `${S.near.name} is ${Math.round(S.near.d / 10) * 10} m away: follow the arrow` : 'Walk on and look around'); return }
-    const [L, pts] = got[0], prev = saved.shots[L.name] || 0, n = Object.keys(saved.shots).length + (prev ? 0 : 1)
-    if (pts > prev) { saved.shots[L.name] = pts; save(); award('photo', pts - prev, { label: `Photo: ${L.name}` }) }
+    // the landmark on the job card, unless another is centred 20 points better
+    const card = got.find((g) => g[0].name === S.near?.name), [L, pts] = card && got[0][1] < card[1] + 20 ? card : got[0], prev = saved.shots[L.name] || 0, n = Object.keys(saved.shots).length + (prev ? 0 : 1)
+    if (pts > prev) { saved.shots[L.name] = pts; save(); award('photo', Math.min(60, pts - prev), // (a photo paid 7 delivered parcels)
+         { label: `Photo: ${L.name}` }) }
     api.popup(`${L.name} · ${pts} pts`, !prev ? `New! ${n} of ${shots.length} landmarks` : pts > prev ? `Your best shot of it (was ${prev})` : `Best ${prev}: get closer, centre it`)
   }
   // what is underfoot: a path or a street, a wooden deck (a pier, a boardwalk: a footway on a deck), sand, else grass
@@ -391,6 +396,8 @@ export function makeFoot(THREE, city, api) {
     },
     stages: (id) => (canStage(id) ? { reach: saved.reach[id] || 0, bests: saved.stages[id] || [0, 0, 0, 0], medals: (saved.stages[id] || []).map((b) => { const m = medalOf(b, stagePar(id)); return m >= 0 ? MEDALS[m][0] : '' }) } : null),
     medal: (id) => { const p = par(id), b = saved.best[id], m = p && b ? MEDALS.findIndex((q) => b <= p * q[1]) : -1; return m >= 0 ? MEDALS[m][0] : '' },
+    get paved() { return surface() === 'path' },
+    get framed() { return inFrame(S.cam) },
     dispose() { heart.material.map.dispose(); heart.material.dispose(); css.remove(); btns.remove(); frameEl.remove(); mat.dispose(); for (const m of Object.values(models)) m.geometry.dispose() },
   }
 }

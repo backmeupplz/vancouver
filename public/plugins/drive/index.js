@@ -984,7 +984,7 @@ export default function drive(city) {
   function taxiCtx() {
     return { THREE, city, car, cab: vehicle, pcam, el: ui.el, sheet: ui.sheet, touchy, audio, out: () => master, tone: (...a) => tone(...a), bell: (...a) => bell(...a), sfx, buzz,
       setGoal, hideMarkers, icon: icons.summit, segsNear, stopFor, insideBuilding, isWater, others, placesNear,
-      reset: () => resetToRoad(), exit: (f) => exit(f), toGarage: () => { toGarage = true; exit(true) }, shake: (v) => { shake = Math.max(shake, v) } }
+      howHidden: () => ui.how.hidden, reset: () => resetToRoad(), exit: (f) => exit(f), toGarage: () => { toGarage = true; exit(true) }, shake: (v) => { shake = Math.max(shake, v) } }
   }
   function exit(force) {
     hornOff()
@@ -1037,7 +1037,7 @@ export default function drive(city) {
     const g = game.summary()
     game.S.summary = true
     ui.sheet.innerHTML = `<h3>${g.title} · shift summary</h3><div class="rank r${g.rank}">${g.rank}</div><div class="big">${g.big}</div><div class="stars">${'★'.repeat(g.stars)}${'☆'.repeat(5 - g.stars)}</div>
-      <dl>${g.rows}</dl><div class="line">${g.line}</div><div class="row"><button data-k>Keep driving</button><button class="main" data-end>End shift</button></div>`
+      <dl>${g.rows}</dl><div class="line">${g.line}</div>${city.progress?.nextHtml?.() || ''}<div class="row"><button data-k>Keep driving</button><button class="main" data-end>End shift</button></div>`
     ui.sheet.hidden = false
     keys.clear()
     ui.sheet.querySelector('[data-k]').onclick = () => { ui.sheet.hidden = true; if (game) game.S.summary = false }
@@ -1405,6 +1405,7 @@ export default function drive(city) {
     vin.up = I.up; vin.down = I.down; vin.steer = steer; vin.hand = I.hand
     car.boost = !!taxi && taxi.boost(I.boost, dt); car.air = car.lift > 0.3
     grip = gripNow()
+    car.vk += ((car.vkT || 1) - car.vk) * Math.min(1, dt / 3) // (over ~3 s)
     stepVan(car, dt, vin, grip)
     // move, then resolve: water stops the van softly, bridge railings and buildings bounce it
     // (a bus turns about its rear axle, `pivot` behind the middle: the middle swings in, the tail out)
@@ -1611,7 +1612,7 @@ export default function drive(city) {
     const mv = I.up ? 1 : I.down ? -1 : 0, going = mv || I.steer ? 1 : 0, yaw0 = man.yaw
     if (going) man.yaw += wrap(chase.yaw + Math.atan2(I.steer, mv) - man.yaw) * (1 - Math.exp(-12 * dt))
     const faced = going ? clamp(Math.cos(wrap(chase.yaw + Math.atan2(I.steer, mv) - man.yaw)) * 1.5, 0, 1) : 0
-    const target = (hike ? hikeSpeed(dt, { up: !!going, down: false }, onTrail) : going ? (I.run ? RUN : WALK) : 0) * faced
+    const target = (hike ? hikeSpeed(dt, { up: !!going, down: false }, onTrail) : going ? (I.run ? RUN * (paved ? 1.25 : 1) : WALK) : 0) * faced
     man.speed += (target - man.speed) * (1 - Math.exp(-(target ? 9 : 13) * dt))
     if (Math.abs(man.speed) < 0.02 && !target) man.speed = 0
     const turned = wrap(man.yaw - yaw0), h0 = man.h, k5 = 1 - Math.exp(-5 * dt)
@@ -1620,7 +1621,13 @@ export default function drive(city) {
     if (man.air) { man.air += dt / 0.42; if (man.air >= 1) man.air = 0 } // a hop (foot.js: Space)
     // the trail leads: walking on with nothing steered, turn towards the trail a few metres ahead (round switchbacks)
     if (hike && onTrail && !I.steer && man.speed > 0.3) {
-      const a = nearestRoad(man.x + fwdX(man.yaw) * 2.6, man.y + fwdY(man.yaw) * 2.6, 4, false, true)
+      // the trail ahead that gets closest to where the hike is going (not just any path: they led out of Lynn Canyon onto a street)
+      let a = null, best = 1e9
+      for (const dh of [0, 0.5, -0.5, 1, -1]) {
+        const c = nearestRoad(man.x + fwdX(man.yaw + dh) * 2.6, man.y + fwdY(man.yaw + dh) * 2.6, 4, false, true)
+        const e = c && Math.hypot(hike.gx - c.px, hike.gy - c.py)
+        if (c && e < best) { best = e; a = c }
+      }
       if (a && a.dist > 0.3) {
         const d = wrap(yawFromDir(Math.atan2(a.py - man.y, a.px - man.x)) - man.yaw)
         if (Math.abs(d) < 1.4 && orbit.idle > 1.2) { man.yaw += d * Math.min(1, 3 * dt); chase.yaw += d * Math.min(1, 3 * dt) }
@@ -1697,6 +1704,13 @@ export default function drive(city) {
       const rx = Math.cos(car.yaw), ry = Math.sin(car.yaw)
       const tx = car.x - rx * 1.25 + fwdX(car.yaw) * 0.9, ty = car.y - ry * 1.25 + fwdY(car.yaw) * 0.9
       man.board = { t0: performance.now(), x: man.x, y: man.y, tx, ty, yaw: car.yaw, ms: clamp(Math.hypot(tx - man.x, ty - man.y) / 3.2, 0.3, 2) * 1000 }
+      return
+    }
+    if (onFoot && hasVan && !man.board && !hike) { // E far from the van, within 30 m of a street: it pulls up beside you
+      const r = nearestRoad(man.x, man.y, 30)
+      if (!r) { city.ui.toast('Walk to a street to call the van', 2000); return }
+      Object.assign(car, { x: r.px, y: r.py, yaw: yawFromDir(r.dir), h: city.world.heightAt(r.px, -r.py), speed: 0, lat: 0, deck: false, roof: undefined }); resetTrailer()
+      city.ui.toast('Hop in', 1500)
       return
     }
     if (!canGetOut()) { if (!onFoot) city.ui.toast('Stop the van to get out', 1500); return }
@@ -2004,6 +2018,8 @@ export default function drive(city) {
     }
     if (now - readAt > 400) {
       readAt = now; street = nearestStreet(P.x, P.y, 30); cellsNear(P.x, P.y, 800)
+      paved = onFoot && !hike && foot.paved
+      if (!onFoot && !game && !taxi) { const r = nearestRoad(car.x, car.y, 6, car.deck, false, false, car.deck ? car.h - 0.58 : null); car.vkT = r && r.s.p.kind <= 1 ? 31 / 21 : 1 } // motorways and trunks: up to 112 km/h
       if (goal.icon?.visible) groundGoal()
       if (hike && !hike.goalOn && Math.hypot(hike.gx - P.x, hike.gy - P.y) < 800) { // the goal onto its trail, once that's loaded
         const r = nearestPiece(hike.gx, hike.gy, (p) => trail(p) && !p.z, () => 0, 40)
@@ -2055,6 +2071,7 @@ export default function drive(city) {
     const pay = airPay(secs)
     if (pay) { awards.air++; stuntPay(pay, 'airtime', `Air ${secs.toFixed(1)} s`) }
   }
+  let leafTick = 0, paved = false // paved: on a path or street on foot (a quarter faster running between sights)
   function hud(t) {
     if (taxi) { ui.tact.hidden = ui.act.hidden = ui.job.hidden = ui.hrn.hidden = true; ui.hb.hidden = ui.assist.hidden = false; ui.brk.textContent = 'Brake'; return } // the rest is taxi.js's
     if (game) { // E: the doors (or the trolley poles); the bus's own cards are route.js's
@@ -2078,7 +2095,9 @@ export default function drive(city) {
     if (!deliver && !hike) {
       const sp = Math.abs(P.speed) * 3.6, gear = onFoot ? '' : ` · ${car.gear < 0 ? 'R' : `D${car.gear}`}`
       const dr = onFoot ? '' : drift.m > 4 ? ` <span class="gain">· Drift ${Math.round(drift.m)} m</span>` : performance.now() < drift.show ? ` <span class="gain">· ${drift.text}</span>` : performance.now() < stunt.show ? ` <span class="gain">· ${stunt.text}</span>` : ''
-      ui.read.innerHTML = `<b>${Math.round(sp)}</b> km/h${gear}${dr}${name ? ` <span class="st">· ${esc(name)}</span>` : ''}`
+      const lf = city.progress?.leafNear?.(P.x, -P.y), ld = lf && lf.d < 500 ? lf.d : 0 // the nearest maple leaf: a distance under 500 m, a soft tick under 150 m
+      if (ld && ld < 150 && performance.now() > leafTick) { leafTick = performance.now() + clamp(ld / 80, 0.25, 3) * 1000; const ac = muted ? null : audio(); if (ac) tone(1760, ac.currentTime + 0.01, 0.07, 0.025, 'sine') }
+      ui.read.innerHTML = `<b>${Math.round(sp)}</b> km/h${gear}${dr}${ld ? ` <span class="gain">· 🍁 ${Math.max(20, Math.round(ld / 20) * 20)} m</span>` : ''}${name ? ` <span class="st">· ${esc(name)}</span>` : ''}`
       const c = onFoot && !man.board && !city.fishing?.active && foot.card() // a free walk: the photo walk’s card (not over a rod in hand)
       ui.job.hidden = !c
       if (c) { ui.w.textContent = c.title; ui.p.textContent = c.line; ui.s.textContent = c.sub; ui.d.textContent = ui.t.textContent = ''; compass(c.target) }
@@ -2117,7 +2136,7 @@ export default function drive(city) {
     if (state !== 'play') return
     if (CONTROL.has(e.code)) { keys.add(e.code); e.preventDefault() }
     if (e.repeat) return
-    if (onFoot && !errand && !man.board && foot.key(e.code)) { e.preventDefault(); return }
+    if (onFoot && !errand && !man.board && foot.key(e.code)) { e.preventDefault(); e.stopImmediatePropagation(); return }
     if (e.code === 'KeyE') { if (taxi) return; if (game) game.action(); else if (errand) hurry(); else toggleFoot() }
     else if (e.code === 'KeyR' && !onFoot) resetToRoad()
     else if (e.code === 'KeyH' && !onFoot) hornOn()

@@ -5,14 +5,11 @@
 // username prompt came up over the game twice) and no two pieces of the HUD overlap; while fishing the photo walk's
 // card is away. Run it at each size: (default desktop) | --size phone | --embed 1 (the 360 px X embed).
 import { mkdirSync } from 'node:fs'
-import { args, server, open, settle } from './pw.mjs'
+import { args, server, open, settle, live } from './pw.mjs'
 const [o] = args(process.argv.slice(2), { size: '', embed: '', only: '', shots: '', tiles: '' })
 o.size ||= o.embed ? '640x360' : '1400x900'
 if (o.shots) mkdirSync(o.shots, { recursive: true })
 const MODES = ['van', 'deliveries', 'bus', 'taxi', 'walk', 'hike', 'sail', 'fishing'].filter((m) => !o.only || o.only.split(',').includes(m))
-const live = () => { // the live server (plugins/multiplayer): connected, under a generated name
-  window.WebSocket = class { constructor() { this.readyState = 0; setTimeout(() => { this.readyState = 1; this.onopen?.(); this.onmessage?.({ data: JSON.stringify({ t: 'welcome', s: 1, id: '4e4619ea-3074-497f-adbe-b4d00871a70b', token: 't', name: 'Loon 14', chosen: false, colour: '#f08a6b', blocks: [], players: [], chat: [], stats: { now: 1, day: 1, week: 1 } }) }) }, 50) } send() {} close() { this.readyState = 3; this.onclose?.() } }
-}
 const starts = {
   async van(page) { // the real way in
     await page.click('button[title^="Explore"]'); await page.click('[data-m="car"]')

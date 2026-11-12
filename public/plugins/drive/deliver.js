@@ -149,7 +149,7 @@ export function deliveryGame(ctx) {
       <dl>${row('Parcels delivered', S.n)}${row('Tips', `$${S.tips.toFixed(2)}`)}${row('Best streak', S.top > 1 ? `${S.top} in a row (×${Math.min(3, 1 + 0.25 * (S.top - 1))})` : 'none yet')}
       ${row('Knocks', S.bumps + S.kerbs ? `${S.bumps} bump${S.bumps === 1 ? '' : 's'}, ${S.kerbs} kerb${S.kerbs === 1 ? '' : 's'}` : 'none')}${S.people ? row('People startled', S.people) : ''}
       ${S.best ? row('Best drop', `$${S.best.pay.toFixed(2)} from ${esc(S.best.who.split(' ')[0])}`) : ''}${row(record ? 'New best shift!' : 'Best shift', `$${Math.max(best, cash).toFixed(2)}`)}${row('All time', `${all.n + (S.saved ? 0 : S.n)} parcels, $${(all.money + (S.saved ? 0 : S.money)).toFixed(2)}`)}</dl>
-      <div class="line">${r[2]}</div><div class="row">${final ? '' : '<button data-k>Keep driving</button>'}<button data-end>Back to map</button><button class="main" data-again>Another shift</button></div>`
+      <div class="line">${r[2]}</div>${ctx.city.progress?.nextHtml?.() || ''}<div class="row">${final ? '' : '<button data-k>Keep driving</button>'}<button data-end>Back to map</button><button class="main" data-again>Another shift</button></div>`
     ui.sheet.hidden = false
     const q = (s) => ui.sheet.querySelector(s)
     if (!final) q('[data-k]').onclick = () => { ui.sheet.hidden = true; S.over = false }

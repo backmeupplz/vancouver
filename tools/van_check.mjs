@@ -112,3 +112,19 @@ import { boxGap, makeBonus, airPay } from '../public/plugins/drive/bonus.js'
   assert(airPay(0.3) === 0 && airPay(1) === 6 && airPay(2) === 12, 'air pays by the second, from 0.4 s')
   console.log('ok: near-miss and airtime bonuses')
 }
+// Rush Fare's clock (drive/fares.js): the first two fares leave time to drive 1.1 km at 20 m/s (road = 1.3 × the line), the seventh does not
+import { pickupSeconds, START_TIME } from '../public/plugins/drive/fares.js'
+{
+  const need = (1.3 * 1100) / 20
+  assert(START_TIME >= 60, 'shift starts on 60 s')
+  for (const n of [0, 1]) assert(pickupSeconds(9, 1100, n) > need, `fare ${n} fits: ${pickupSeconds(9, 1100, n)} s vs ${need}`)
+  assert(pickupSeconds(9, 1100, 6) < need, `fare 6 is tight: ${pickupSeconds(9, 1100, 6)} s vs ${need}`)
+  console.log(`ok: pickup seconds for 1.1 km: fare 0 ${pickupSeconds(9, 1100, 0).toFixed(0)}, fare 6 ${pickupSeconds(9, 1100, 6).toFixed(0)} (drive ${need.toFixed(0)})`)
+}
+// the free-roam van's top speed on motorways and trunks (c.vk = 31/21): 112 km/h, a street's 76 stays
+{
+  const top = (vk) => { const c = newVan(); c.vk = vk; run(c, go, 1, 90); return c.speed }
+  const s = top(1), m = top(31 / 21)
+  assert(m > 29 && m < 32.5 && s < 22, `motorway ${(m * 3.6).toFixed(0)} km/h, street ${(s * 3.6).toFixed(0)} km/h`)
+  console.log(`ok: top speed street ${(s * 3.6).toFixed(0)} km/h, motorway ${(m * 3.6).toFixed(0)} km/h`)
+}

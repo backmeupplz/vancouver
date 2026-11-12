@@ -81,9 +81,11 @@ export const CSS = `
     .compact .dlv-bus { max-width: calc(30% - var(--sl) - 8px) } } /* clear of the centred GPS card (at most 40% wide) */`
 
 // the route list for the Drive menu: search, a route, then which way and where to start
+// routes with a stop every 250-400 m: a first shift is a series of stops, not 2.6 km of holding W (the 99 B-Line's second leg)
+const FIRST = ['5', '6', '14']
 export function picker(el, data, onPick, onBack) {
   const { man, index } = data
-  const rank = (r) => (r.name === '99' ? 0 : /^R\d/.test(r.name) ? 1 : r.kind === 'trolley' ? 2 : 3)
+  const rank = (r) => (FIRST.includes(r.name) ? -1 : r.name === '99' ? 0 : /^R\d/.test(r.name) ? 1 : r.kind === 'trolley' ? 2 : 3)
   const all = Object.keys(index).map((k) => ({ ri: +k, r: man.routes[+k], dirs: index[k] })).sort((a, b) => rank(a.r) - rank(b.r) || num(a.r.name) - num(b.r.name) || a.r.name.localeCompare(b.r.name))
   const kind = (r) => [brand(r), r.artic ? 'articulated' : ''].filter(Boolean).join(' · ')
   function list(q = '') {
@@ -586,7 +588,8 @@ export function busGame(ctx, pick, d0) {
     if (s.alight > 0 && !s.req && (s.d - d < 220 || (leftAt && now - leftAt > ringAt))) { s.req = true; snd.ding(); ctx.buzz(20) }
     // passed it: served, skipped (nobody there, nobody for it) or missed
     if (!serving && d > s.d + 14) {
-      if (!s.done && (s.wait > 0 || s.alight > 0)) {
+      // (the first stop is free until the doors have opened once or 20 s have passed: the how-to card is up, and driving off is not a miss yet)
+      if (!s.done && (s.wait > 0 || s.alight > 0) && !(s.i === S.i0 && !S.opened && now - S.t0 < 20000)) {
         s.missed = true; S.missed++
         const who = s.alight, left = Math.max(0, s.wait)
         S.mood -= 4 + who * 1.5 + left * 0.8
@@ -629,7 +632,7 @@ export function busGame(ctx, pick, d0) {
     doors = true; car.parked = true; snd.doors(true); snd.kneel()
     const s = first ? stops[next] : inBay()
     if (!s) { ctx.toast('The doors are open, but there’s no stop here', 2000); return }
-    serving = s; s.at = vancouver(Date.now()).sec
+    serving = s; S.opened = true; s.at = vancouver(Date.now()).sec
     alightQ = next === N - 1 ? S.aboard : s.alight; boardQ = Math.max(0, s.wait); s.wait = Math.max(0, s.wait)
     serveT = 0.6; alightT = 0.4
     // on time? (the first stop: leaving early is what counts, see closeDoors)

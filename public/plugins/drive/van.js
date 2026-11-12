@@ -156,7 +156,7 @@ export const TAXI = {
 export const taxiSpec = (s) => ({ ...TAXI, ...s, length: s.hl * 2, width: s.hw * 2 })
 const G = 9.8
 export function newVan(V = VAN) {
-  return { V, speed: 0, lat: 0, yaw: 0, steer: 0, kick: 0, yawRate: 0, gear: 1, rpm: V.idle, thr: 0, brk: 0, shiftT: 0, revT: 0, ax: 0,
+  return { V, vk: 1, speed: 0, lat: 0, yaw: 0, steer: 0, kick: 0, yawRate: 0, gear: 1, rpm: V.idle, thr: 0, brk: 0, shiftT: 0, revT: 0, ax: 0,
     pitch: 0, parked: false, nopower: false, bp: 0, bpv: 0, br: 0, brv: 0, hz: 0, hv: 0, slip: 0, boost: false, air: false } // pitch: the ground's; bp / br / hz: the body on its springs; boost / air: set by the caller
 }
 export function stepVan(c, dt, I, grip) {
@@ -179,9 +179,9 @@ export function stepVan(c, dt, I, grip) {
   // pushing: torque (a flat curve, a little peak mid-range) through the gear, not past the tyres' grip; the limiter
   const tq = 0.78 + 0.22 * Math.sin(Math.PI * clamp((c.rpm - V.band[0]) / V.band[1], 0, 1))
   let push = c.shiftT > 0 ? 0 : c.thr * V.push * (ratio / GEARS[0]) ** V.flat * tq
-  push = Math.min(push * clamp(((fwd ? V.vmax : V.vrev) - sp) / 1.5, 0, 1), mu * G * V.tract)
+  push = Math.min(push * clamp(((fwd ? V.vmax * c.vk : V.vrev) - sp) / 1.5, 0, 1), mu * G * V.tract)
   // nitro: a push of its own, past the top speed (forward only, not when held)
-  if (c.boost && fwd && V.nitro && !c.parked) push += V.nitro * clamp((V.vmax * V.nvmax - c.speed) / 3, 0, 1)
+  if (c.boost && fwd && V.nitro && !c.parked) push += V.nitro * clamp((V.vmax * c.vk * V.nvmax - c.speed) / 3, 0, 1)
   if (c.air) push = 0 // the wheels spin in the air: only the boost pushes
   if (c.air && c.boost && fwd && V.nitro) push = V.nitro * 0.5
   c.speed += ((fwd ? push : -push) - (c.air ? 0 : G * Math.sin(clamp(c.pitch, -0.2, 0.2)) * (c.parked ? 0 : 0.8))) * dt // (no street is steeper than 20%)

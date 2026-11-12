@@ -277,7 +277,7 @@ export default function multiplayer(city) {
   // keys typed here are for the chat, not for the van
   for (const el of [input, nameIn]) el.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') { el === input ? toggleChat(false) : prompt ? endPrompt() : showView('chat') } })
   const onKey = (e) => {
-    if (e.key !== 'Enter' || e.repeat || !connected || /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(e.target?.tagName) || e.target?.isContentEditable) return
+    if (e.key !== 'Enter' || e.defaultPrevented || e.repeat || !connected || /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(e.target?.tagName) || e.target?.isContentEditable) return
     e.preventDefault(); if (panel.hidden) toggleChat(true); else input.focus()
   }
   addEventListener('keydown', onKey)

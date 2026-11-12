@@ -493,6 +493,15 @@ export default function progress(city) {
     choice(slot) { const it = items.get(S.pick[slot]); return it && it.lv !== 1 && unlocked(it.id) ? { id: it.id, name: it.name, value: it.value } : null },
     get level() { return levelOf(S.xp) }, get xp() { return S.xp }, get cash() { return S.cash }, get stats() { return { ...S.stats } },
     get leaves() { return LEAVES }, // (for tools and the console)
+    // the nearest leaf not yet found whose tile has settled it, from a world point: { d } in metres, or null
+    leafNear(x, z) { let d = Infinity; for (const l of LEAVES) if (l.set && !S.found[l.id]) d = Math.min(d, Math.hypot(l.x - x, l.z - z)); return d < Infinity ? { d } : null },
+    // a results card's line under the rank: the level bar and what is next (inline styles: it lands in other plugins' cards)
+    nextHtml() {
+      const lv = levelOf(S.xp), a = XP_AT(lv), b = XP_AT(lv + 1), n = this.next(), pct = Math.round((100 * (S.xp - a)) / (b - a))
+      return `<div class="pg-next" style="margin:8px 0;font-size:12px;opacity:.9"><div style="height:6px;border-radius:3px;background:rgba(255,255,255,.18);overflow:hidden"><i style="display:block;height:100%;width:${pct}%;background:#ffb43a"></i></div>Level ${n.level} in ${n.xpToGo.toLocaleString('en-CA')} XP${n.unlock ? `: ${esc(n.unlock)}` : ''}</div>`
+    },
+    // what the next level brings: { level, xpToGo, unlock (name of the first thing it opens) }
+    next() { const lv = levelOf(S.xp) + 1, it = ITEMS.find((i) => i.lv === lv); return { level: lv, xpToGo: XP_AT(lv) - S.xp, unlock: it ? `${it.name} (${(SLOTS.find((q) => q[0] === it.slot)?.[1] || it.slot).toLowerCase()})` : '' } },
   }
   dailies(); label(); show()
   city.ui.addStart?.({ icon: '🍁', label: 'Today', sub: `🔥 ${S.streak} · 🍁 ${leafCount()}/${LEAVES.length}`, order: 4, onClick: () => { tab = 'today'; tool.button.click() } })

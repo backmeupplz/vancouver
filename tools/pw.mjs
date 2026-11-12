@@ -60,3 +60,7 @@ export const settle = async (page, ms = 1500) => { // tiles asked for, built + w
   await idle(90000); await page.waitForTimeout(500); await idle(30000) // a camera just moved asks for its tiles a frame or two later
   await page.waitForTimeout(ms)
 }
+
+export const live = () => { // the live server (plugins/multiplayer): connected, under a generated name
+  window.WebSocket = class { constructor() { this.readyState = 0; setTimeout(() => { this.readyState = 1; this.onopen?.(); this.onmessage?.({ data: JSON.stringify({ t: 'welcome', s: 1, id: '4e4619ea-3074-497f-adbe-b4d00871a70b', token: 't', name: 'Loon 14', chosen: false, colour: '#f08a6b', blocks: [], players: [], chat: [], stats: { now: 1, day: 1, week: 1 } }) }) }, 50) } send() {} close() { this.readyState = 3; this.onclose?.() } }
+}

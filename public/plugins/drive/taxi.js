@@ -15,9 +15,9 @@ import { kit, kitMaterial } from '../../core/kit.js'
 import { clamp, wrap, esc } from '../../core/util.js'
 import { noise } from '../../core/play.js'
 import { speedLines } from './feel.js'
+import { START_TIME, pickupSeconds } from './fares.js'
 
 export const NAME = 'Rush Fare'
-const START_TIME = 50 // s on the clock
 // who gets in: most just want to get there; some change the ride (pay: times the fare; limit: times their patience;
 // stunt: times the stunt tips; clean: times the fare again if nothing was hit on the way)
 const RIDERS = [
@@ -240,7 +240,7 @@ export function openGarage(THREE, onStart, onBack) {
   canvas.addEventListener('pointermove', (e) => { if (drag) table.rotation.y = drag.r + (e.clientX - drag.x) * 0.012 })
   const up = () => { drag = null }
   canvas.addEventListener('pointerup', up); canvas.addEventListener('pointercancel', up)
-  const onKey = (e) => { if (e.code === 'Escape') { e.stopPropagation(); close(); onBack?.() } else if (e.code === 'ArrowLeft') setCab(-1); else if (e.code === 'ArrowRight') setCab(1); else if (e.code === 'Enter') q('[data-go]').click() }
+  const onKey = (e) => { if (e.code === 'Escape') { e.stopPropagation(); close(); onBack?.() } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'Enter') { e.stopImmediatePropagation(); e.preventDefault(); e.code === 'Enter' ? q('[data-go]').click() : setCab(e.code === 'ArrowLeft' ? -1 : 1) } }
   addEventListener('keydown', onKey, true)
   function loop(now) {
     raf = requestAnimationFrame(loop)
@@ -400,13 +400,13 @@ export function taxiGame(ctx, choice) {
   let rampAt0 = 0
   const S = {} // the shift's numbers (reset by restart())
   const UP = new THREE.Vector3(0, 1, 0), AX = new THREE.Vector3(), TILT = new THREE.Quaternion()
-  let fare = null, state = 'count', countT = 0, spawnAt = 0, hudAt = 0, refineAt = 0, sayT = 0, endT = 0
+  let fare = null, first = true, moving = false, x0 = 0, y0 = 0, state = 'count', countT = 0, spawnAt = 0, hudAt = 0, refineAt = 0, sayT = 0, endT = 0
   let nitro = 0.6, boosting = false, boostAmt = 0, streakT = 0, streakDone = false, driftT = 0, driftOff = 0, comboN = 0, comboT = 0, stuckT = 0
   const nearSeen = new Map() // car id -> when last counted (a near miss, or a hit)
   const tank = cabDef.stats.tank
 
   // ---------------------------------------------------------------- HUD
-  const clockEl = ctx.el('dlv tx-clock card', '<div class="t" data-t>0:50</div><div class="m" data-m>$0.00</div><div class="tx-nos" data-n><i></i></div><div class="tx-nosl">Nitro · Shift</div><div class="tx-combo" data-c></div>')
+  const clockEl = ctx.el('dlv tx-clock card', '<div class="t" data-t>1:00</div><div class="m" data-m>$0.00</div><div class="tx-nos" data-n><i></i></div><div class="tx-nosl">Nitro · Shift</div><div class="tx-combo" data-c></div>')
   const fareEl = ctx.el('dlv tx-fare card', '<div class="k" data-k></div><div class="d" data-d></div><div class="s" data-s></div><div class="bar" data-b><i></i></div>')
   const feed = ctx.el('dlv tx-feed', '<div></div><div></div><div></div><div></div>')
   const big = ctx.el('dlv tx-big', '')
@@ -471,13 +471,13 @@ export function taxiGame(ctx, choice) {
   }
   // a spot on a kerb 60-320 m from the cab, on a city street with sidewalks, not right behind it
   const SEGS = []
-  function spawnSpot() {
+  function spawnSpot(lo = 60, hi = 320, ahead = -0.3) {
     SEGS.length = 0
     const fwx = -Math.sin(car.yaw), fwy = Math.cos(car.yaw)
     ctx.segsNear(car.x, car.y, 320, (s) => {
       if (!s.drv || s.z0 != null || s.p.kind < 2 || s.p.kind > 6 || s.p.w < 5) return
       const mx = (s.x0 + s.x1) / 2 - car.x, my = (s.y0 + s.y1) / 2 - car.y, l = Math.hypot(mx, my)
-      if (l < 60 || l > 320 || (mx * fwx + my * fwy) / l < -0.3) return
+      if (l < lo || l > hi || (mx * fwx + my * fwy) / l < ahead) return
       SEGS.push(s)
     })
     for (let k = 0; k < 8 && SEGS.length; k++) {
@@ -491,10 +491,12 @@ export function taxiGame(ctx, choice) {
   }
   const yawTo = (dx, dy) => Math.atan2(-dx, dy) // the drive plugin's yaw facing (dx, dy) in (x, north)
   function spawn(f) {
-    const sp = spawnSpot()
+    // the shift's first ring is a short fare 80-200 m dead ahead, so the first minute teaches and pays
+    const sp = (first && spawnSpot(80, 200, 0.5)) || spawnSpot()
     if (!sp) return false
-    const want = Math.random() < 0.45 ? 0 : Math.random() < 0.6 ? 1 : 2, d = destFor(sp.x, sp.y, want)
+    const want = first || Math.random() < 0.45 ? 0 : Math.random() < 0.6 ? 1 : 2, d = destFor(sp.x, sp.y, want)
     if (!d) return false
+    first = false
     Object.assign(f, { mode: 'wait', x: sp.x, y: sp.y, rx: sp.rx, ry: sp.ry, yaw: sp.yaw, cls: CLASS[d.cls], dest: d, t: 0 })
     const g = city.world.heightAt(f.x, -f.y)
     f.w.position.set(f.x, g + 0.1, -f.y); f.w.rotation.set(0, f.yaw, 0); f.w.visible = true
@@ -506,11 +508,12 @@ export function taxiGame(ctx, choice) {
   function board(f) { // stopped in the ring: they hop in
     f.mode = 'board'; f.t = 0; f.ring.visible = f.gem.visible = false
     const d = f.dest, l = Math.hypot(d.x - f.x, d.y - f.y)
-    const who = rider()
+    const who = S.fares < 2 ? RIDERS[0] : rider() // (the first two ride plain: no hurry, no fuss)
     fare = { f, who, hits: 0, dest: d, dist: l, pay: Math.round((3.5 + 2.4 * (l / 1000)) * (who.pay || 1) * 100) / 100, tips: 0, limit: (10 + l / 15) * (who.limit || 1), t0: performance.now(), refined: false, gx: d.x, gy: d.y, r: d.shop ? 14 : 26 }
-    S.time += f.cls.add
+    fare.add = Math.round(pickupSeconds(f.cls.add, l, S.fares)); S.time += fare.add
+    fare.limit = Math.max(fare.limit, fare.add * (who.limit || 1)) // (their patience is never shorter than the time the clock gave)
     ctx.sfx.pickup(); ctx.buzz(30)
-    banner(`+${f.cls.add} s`, who.name ? `${who.name} · ${f.cls.name} fare` : `${f.cls.name} fare`)
+    banner(`+${fare.add} s`, who.name ? `${who.name} · ${f.cls.name} fare` : `${f.cls.name} fare`)
     speak(`<b>“${esc(pick(HAIL).replace('{d}', d.name))}${who.say ? ` ${esc(who.say)}` : ''}”</b>`, who.say ? 4500 : 3500)
     nitro = Math.min(1, nitro + 0.15)
     ctx.setGoal(fare.gx, fare.gy, f.cls.col, ctx.icon)
@@ -583,14 +586,20 @@ export function taxiGame(ctx, choice) {
   // ---------------------------------------------------------------- the clock
   function restart() {
     Object.assign(S, { n: 4, shown: false, time: START_TIME, cash: 0, fareCash: 0, tips: 0, fares: 0, km: 0, near: 0, drift: 0, air: 0, bestCombo: 0, top: 0, over: false })
+    first = true; moving = false
     for (const f of folk) despawn(f)
     fare = null; nitro = 0.6; comboN = 0; state = 'count'; countT = 0; spawnAt = 0; stuckT = 0
     car.speed = car.lat = 0; car.parked = true
     ctx.hideMarkers(); ctx.sheet.hidden = true
     speak(`<b>${esc(drv.name)}</b> “${esc(drv.line)}”`, 3800)
   }
-  function timeUp() {
+  function timeUp(natural) {
     state = 'over'; endT = performance.now(); S.over = true
+    if (natural && fare && fare.f.mode === 'aboard' && Math.hypot(fare.gx - car.x, fare.gy - car.y) < 150) { // so close: tips and half the fare
+      const v = Math.round(fare.pay * 50) / 100 + fare.tips
+      city.progress?.award('fare', v, { quiet: true }); S.cash += v; S.fareCash += fare.pay / 2; S.tips += fare.tips
+      speak(`<b>“So close!”</b> half the fare and tips: ${money(v)}`, 4000)
+    }
     if (fare) { const f = fare.f; despawn(f); fare = null; ctx.hideMarkers() }
     banner('Time’s up!'); buzzer(); roarOff()
   }
@@ -605,7 +614,7 @@ export function taxiGame(ctx, choice) {
       <dl>${row('Fares', `${S.fares} (${money(S.fareCash)})`)}${row('Tips from stunts', money(S.tips))}${row('Best combo', S.bestCombo > 1 ? `×${S.bestCombo}` : '—')}
       ${row('Near misses', S.near)}${row('Biggest air', S.air ? `${S.air.toFixed(1)} s` : '—')}${row('Drifting', `${S.drift.toFixed(1)} s`)}${row('Top speed', `${Math.round(S.top * 3.6)} km/h`)}
       ${row('Cab', `${esc(cabDef.name)} · ${esc(drv.name)}`)}</dl>
-      <div class="row"><button data-x>Map</button><button data-g>Garage</button><button class="main tx-again" data-a>Another shift</button></div>`
+      ${city.progress?.nextHtml?.() || ''}<div class="row"><button data-x>Map</button><button data-g>Garage</button><button class="main tx-again" data-a>Another shift</button></div>`
     ctx.sheet.hidden = false
     ctx.sheet.querySelector('[data-x]').onclick = () => ctx.exit(true)
     ctx.sheet.querySelector('[data-g]').onclick = () => ctx.toGarage()
@@ -628,10 +637,11 @@ export function taxiGame(ctx, choice) {
       car.parked = true
       const n = 3 - Math.floor(countT / 0.8)
       if (n !== S.n) { S.n = n; if (n > 0) { banner(String(n)); beep(440) } else { banner('Go!'); beep(880, 0.4); city.progress?.run('taxi') } }
-      if (countT > 2.4) { state = 'play'; car.parked = false }
+      if (countT > 2.4) { state = 'play'; car.parked = false; x0 = 0 }
     } else if (state === 'play') {
-      S.time -= dt
-      if (S.time <= 0) { S.time = 0; timeUp() }
+      if (!moving) { if (!x0) { x0 = car.x; y0 = car.y } moving = ctx.howHidden() || Math.hypot(car.x - x0, car.y - y0) > 10 } // the clock waits while the how-to card covers the road
+      if (moving) S.time -= dt
+      if (S.time <= 0) { S.time = 0; timeUp(true) }
     } else if (state === 'over' && now - endT > 1600 && ctx.sheet.hidden && !S.shown) { S.shown = true; results() }
     const sp = Math.abs(car.speed)
     S.top = Math.max(S.top, sp)
@@ -768,7 +778,7 @@ export function taxiGame(ctx, choice) {
       if (deck && high > 1.2) stunt('Bridge leap!', 2.5 + 2 * secs, 0.25, ` ${secs.toFixed(1)} s`)
       else stunt(secs > 1.6 ? 'Huge air!' : 'Big air!', 1.2 * secs + 0.5, 0.1 + 0.15 * secs, ` ${secs.toFixed(1)} s`)
     },
-    endShift() { if (state === 'play' || state === 'count') { S.time = 0; timeUp() } else if (state === 'over' && ctx.sheet.hidden) results() },
+    endShift() { if (state === 'play' || state === 'count') { S.time = 0; timeUp(false) } else if (state === 'over' && ctx.sheet.hidden) results() },
     help: () => `W gas · S brake, hold to reverse · A D steer · Space drift · Shift nitro · R unstick · Esc end the shift`,
     dispose() {
       roarOff()
