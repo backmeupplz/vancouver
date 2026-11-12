@@ -732,6 +732,9 @@ def road_ground(dtm, pieces, X0, Y0, decks=()):
         want[near] = top * (1 - f) + want[near] * f
         S[near, 2] *= 3  # held to it harder than the LiDAR elsewhere
         held |= near
+    # (the cut under a deck near a deck's end stays at the rule's 3 m: the end's top and the cut meet there, 0.3 m deeper opens a step at the abutment, -3_2)
+    near_end = np.zeros(len(S), bool)
+    for x, y in dend if dk else (): near_end |= np.hypot(S[:, 0] - x, S[:, 1] - y) < 12
     # under a deck: the street 3 m under its underside (tools/audit_elev.py 'under'; the LiDAR has no ground under a
     # bridge, its ground there is filled in from round it): a street drawn up into the deck is cut down, up to CUT
     if dk:
@@ -741,7 +744,7 @@ def road_ground(dtm, pieces, X0, Y0, decks=()):
             if min(f, g.length - f) < 12: continue  # (at its ends it comes down to the street)
             P_ = np.array(L['pts'], float); s_ = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P_, axis=0).T))])
             under = float(np.interp(f, s_, L['z'])) - (1.6 if KI[L['kind']] <= KI['tertiary'] else 0.9) - 3.0
-            if under < want[si] < under + CUT: want[si] = under - UNDER_AIM; S[si, 2] *= 3; held[si] = True
+            if under < want[si] < under + CUT: want[si] = under - UNDER_AIM * (not near_end[si]); S[si, 2] *= 3; held[si] = True
     k = S[:, 2:3]  # how much each counts: the streets, rail a little (a cut's floor where it shares a cell with the street above)
     fx, fy = (S[:, 0] - X0) / 8, (Y0 + L1 - S[:, 1]) / 8
     i, j = np.clip(np.floor(fx).astype(int), 0, 511), np.clip(np.floor(fy).astype(int), 0, 511)
