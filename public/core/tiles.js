@@ -9,6 +9,7 @@ import { sampleGrid, sampleTerr, wallHeight, seaSurface, pierTop } from './util.
 
 const SIZES = [1024, 4096]
 const ij = (level, i, j) => (level * 4096 + i + 2048) * 4096 + j + 2048 // a tile's number (|i|, |j| < 2048)
+const DETAIL_NEAR = 320 // m from the player: the detail mesh's cells beyond it are not drawn
 const DETAIL_ZOOM = 0.11 // camera.zoom from which detail tiles load (a 1 km tile is ~700 px wide)
 // tiles kept off screen (detail, overview) for coming back, at most: a detail tile is ~4 MB of geometry, held twice
 // (JS and GPU), so phones keep fewer (a 3 GB iPhone's tab is killed somewhere past 1 GB); the quality tier may keep fewer
@@ -369,6 +370,22 @@ export class Tiles {
     for (const [t] of need) this.load(t)
     this.evict()
     this.updateHoles()
+    this.nearDetail(camera, target)
+  }
+
+  // the detail mesh (balconies, stoops, canopies, pylon signs, rooftop plant) draws only within DETAIL_NEAR of the player in the
+  // game modes (a cell by the nearest point of its box), re-tested after 40 m; the map views show it all (setDetail's zoom rule)
+  nearOf(t, m) {
+    const p = this.nearAt
+    if (!p) return true
+    const b = m.geometry.boundingBox, dx = Math.max(b.min.x + t.ox - p.x, 0, p.x - b.max.x - t.ox), dz = Math.max(-t.oy + b.min.z - p.z, 0, p.z + t.oy - b.max.z)
+    return dx * dx + dz * dz < DETAIL_NEAR * DETAIL_NEAR
+  }
+  nearDetail(camera, target) {
+    const p = camera.isPerspectiveCamera ? target : null, q = this.nearAt
+    if (!p ? !q : q && Math.hypot(p.x - q.x, p.z - q.z) < 40) return
+    this.nearAt = p ? { x: p.x, z: p.z } : null
+    if (this.balconies) for (const t of this.tiles.values()) if (t.balcs) for (const m of t.balcs) m.visible = this.nearOf(t, m)
   }
 
   // the hole map from the detail tiles that show now (uploaded when it changed)
@@ -562,7 +579,16 @@ export class Tiles {
         return ms
       })
     }
-    if (res.balconies) { t.balcony = add(bgeo(res.balconies), mt.building, { castShadow: true, receiveShadow: true }, res.balconies.box); t.balcony.visible = this.balconies }
+    if (res.balconies) { // balconies, stoops, canopies, pylons, rooftop plant: a mesh per cell, shown within DETAIL_NEAR of the player (nearDetail)
+      const B = res.balconies, nv = B.position.length / 3, arrays = Object.entries(B).filter(([k, a]) => k !== 'box' && k !== 'cells' && ArrayBuffer.isView(a))
+      t.balcs = []
+      const one = (first, count, b) => {
+        const part = Object.fromEntries(arrays.map(([k, a]) => [k, a.subarray(first * a.length / nv, (first + count) * a.length / nv)]))
+        const m = add(bgeo(part), mt.building, { castShadow: true, receiveShadow: true }, b); t.balcs.push(m); return m
+      }
+      if (B.cells) cellMeshes(B.cells, one); else one(0, nv, B.box) // (tiles from an older worker: one mesh)
+      for (const m of t.balcs) m.visible = this.balconies && this.nearOf(t, m)
+    }
     if (res.ao) { // after the paint
       const geo = new THREE.BufferGeometry()
       geo.setAttribute('position', new THREE.BufferAttribute(res.ao.position, 3)); geo.setAttribute('t', new THREE.BufferAttribute(res.ao.t, 1)); geo.setIndex(new THREE.BufferAttribute(res.ao.index, 1))
@@ -728,7 +754,7 @@ export class Tiles {
     if (balconies === this.balconies && fine === this.fine && cars === this.cars) return
     this.balconies = balconies; this.fine = fine; this.cars = cars
     for (const t of this.tiles.values()) {
-      if (t.balcony) t.balcony.visible = balconies
+      if (t.balcs) for (const m of t.balcs) m.visible = balconies && this.nearOf(t, m)
       if (t.poles) t.poles.visible = balconies
       if (t.lot) t.lot.visible = cars > 0
       if (t.kerb) t.kerb.visible = cars > 1

@@ -478,6 +478,30 @@ def build(ij):
         k = 1 if am == 'cafe' or t.get('shop') in ('coffee', 'bakery', 'tea') else 2 if am in ('restaurant', 'fast_food', 'ice_cream', 'food_court') else 3 if am in ('bar', 'pub', 'nightclub') else 0 if t.get('shop') else 4 if am in SHOP_AMENITY else 5 if 'office' in t or 'craft' in t else None
         if nm and k is not None and X0 <= x < X0 + L1 and Y0 <= y < Y0 + L1: shopn.append((k, x, y, nm))
 
+    # ---- mapped fences, walls and hedges (OSM barrier=fence|wall|hedge, drawn by the page near the player): (kind 0 fence, 1 wall, 2 hedge, height dm, points)
+    FENCE = {'fence': 0, 'wall': 1, 'hedge': 2}
+    fences = []
+    for _, c, _, t in feat.get('lines', []):
+        k = FENCE.get(t.get('barrier'))
+        if k is None or len(c) < 2: continue
+        h = hnum(t.get('height'))
+        fences.append((k, int(round(min(25, h) * 10)) if h else 0, [(float(x), float(y)) for x, y in c]))
+
+    # a named tower of 30 m or more with no shop: its name on the wall that looks onto the nearest street (a SHOP record of kind 6 at the wall's
+    # middle; the page puts the board there. An old page treats it as a shop name)
+    if sl:
+        strt = STRtree(sl)
+        for b in builds:
+            nm = (b.get('tname') or '').encode()[:40].decode(errors='ignore').encode()
+            if not nm or not (X0 <= b['ring'][0][0] < X0 + L1 and Y0 <= b['ring'][0][1] < Y0 + L1): continue
+            r = b['ring']; best = None
+            for k in range(len(r)):
+                (ax, ay), (bx, by) = r[k], r[(k + 1) % len(r)]
+                if math.hypot(bx - ax, by - ay) < 6: continue
+                m = shapely.geometry.Point((ax + bx) / 2, (ay + by) / 2); d = m.distance(sl[int(strt.nearest(m))])
+                if best is None or d < best[0]: best = (d, m.x, m.y)
+            if best and best[0] < 40: shopn.append((6, best[1], best[2], nm))
+
     beach = beach_bits(X0, Y0, polys, builds)
 
     # ---- write the 16 detail tiles and the medium tile
@@ -497,7 +521,7 @@ def build(ij):
             ti_, tj_ = i * 4 + a, j * 4 + b
             terr = ground8[(3 - b) * 128:(4 - b) * 128 + 1, a * 128:a * 128 + 129]  # 8 m: embankments, cuts and seawalls under the roads
             path = f'{OUT}/0/{ti_}_{tj_}.bin'
-            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, shops=shopn, boats=boats, beach=beach, piers=decks, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes, foreign=xdecks, hand=hand):
+            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, shops=shopn, fences=fences, boats=boats, beach=beach, piers=decks, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes, foreign=xdecks, hand=hand):
                 if os.path.exists(path): os.remove(path)  # an earlier bake's, now empty
                 continue
             tf = fine_section(fine[(3 - b) * 512:(4 - b) * 512 + 1, a * 512:a * 512 + 513])
@@ -1371,6 +1395,7 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
                 roofc = rc_ | 0x1000000 if rc_ else 0
             p['fd'] = edge_looks(p['ring'], p['mn'] or 0, p['h'], walls_near(p['ring']), fac.get('pattern'))  # each wall's look (tools/lidar_walls.py)
             p.update(arch=arch, era=era, atrim=atrim, aflags=aflags, style=style, wall=wall, roofc=roofc, fh=fh, shop=shop, res=res, gh=gh, fx=fx, rb=roof_bits(p, t, *tops), ring=inset(p['ring'], d), h=p['h'] + rnd.random() * 0.1)
+            if p is main and gh >= 30 and not shop and (t.get('name') or '').strip(): p['tname'] = t['name'].strip()  # a named tower: its name goes over the door (tower_names)
             del p['info']
     return out
 
@@ -2874,7 +2899,7 @@ def line_bytes(out, sel, detail):
     return bytes(lb)
 
 
-def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None, shops=(), beach=(), foreign=(), hand=None, piers=()):
+def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None, shops=(), beach=(), foreign=(), hand=None, piers=(), fences=()):
     tb = box(tx, ty, tx + size, ty + size)
     n = terr.shape[0]
     out.section('TERR', struct.pack('<H', n) + np.clip(np.round(terr * 10), -32768, 32767).astype('<i2').tobytes())
@@ -3013,6 +3038,16 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     out.section('POIS', struct.pack('<I', npo) + bytes(pb))
     sb = [struct.pack('<BhhB', k, *out.q(x, y), len(nm)) + nm for k, x, y, nm in shops if tx <= x < tx + size and ty <= y < ty + size]
     if sb: out.section('SHOP', struct.pack('<I', len(sb)) + b''.join(sb))  # the page ignores tiles without it
+    if detail:  # mapped fences, walls and hedges, section FNCE (old pages skip it): kind, height in dm (0 default), then the points as a ring; each tile has the parts of a way inside it
+        fb_ = []
+        for k, h, c in fences:
+            xs, ys = zip(*c)
+            if max(xs) < tx or min(xs) > tx + size or max(ys) < ty or min(ys) > ty + size: continue
+            g = LineString(c).intersection(tb)  # (the part inside this tile: the points stay in its int16 range)
+            for q in (g.geoms if hasattr(g, 'geoms') else [g]):
+                if q.geom_type == 'LineString' and len(q.coords) >= 2 and q.length >= 1.5:
+                    fb_.append(struct.pack('<BB', k, h) + pack_ring(out, list(q.coords)))
+        if fb_: out.section('FNCE', struct.pack('<I', len(fb_)) + b''.join(fb_))
     # beach things (beach_bits): centre, angle (1/256 turn), length (1/10 m), diameter (1/100 m), kind; old pages skip it
     lb = [struct.pack('<hhBBBB', *out.q(x, y), int(round(a / (2 * math.pi) * 256)) & 255, int(min(255, round(ln * 10))), int(min(255, round(d * 100))), k)
           for x, y, a, ln, d, k in beach if tx <= x < tx + size and ty <= y < ty + size]

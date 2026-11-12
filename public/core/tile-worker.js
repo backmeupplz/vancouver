@@ -24,6 +24,7 @@ globalThis.onmessage = async ({ data }) => { // (globalThis: tools/crosswalk_che
     const size = level ? 4096 : 1024
     if (out.ground?.index) { out.ground.cells = cells(out.ground, 'index', size); if (out.ground.coarse) out.ground.coarseCells = cells(out.ground, 'coarse', size) }
     if (out.buildings?.position.length) out.buildings.cells = cells(out.buildings, null, size)
+    if (out.balconies?.position.length) out.balconies.cells = cells(out.balconies, null, size) // (near-only: tiles.js nearDetail)
     if (out.lights) out.lights.box = box(out.lights.pos, 4)
     postMessage({ id, ...out }, transferables(out))
   } catch (e) { postMessage({ id, error: String(e) }) }
@@ -132,7 +133,7 @@ function build(t, level) {
   if (level === 0) {
     const S = solids(t, b.footprints, tr) // what stands on the ground: nothing placed inside another
     out.water = water(t); out.carriage = carriage; out.boats = boats(t, terr); out.lights = lights(t, terr, lines, ps, b, carriage, S)
-    out.signs = signs(t, b.fronts)
+    out.signs = mergeSigns(signs(t, b.fronts), b.extraSigns)
     out.parked = parked(t, terr, lines, ps, b.footprints, S)
     out.footprints = withCars(b.footprints, out.parked.lot, t); out.overhangs = b.overhangs
     out.beach = beach(t, terr)
@@ -1338,6 +1339,10 @@ function buildings(t, terr, level, lines, carriage, lot) {
   const oh = [], ohStart = [0], ohLo = [] // the parts left out of them (you can drive under): the same, and the height of each one's underside (a chase camera is up there)
   const fronts = [] // storefront walls that face a street: ax, ay, px, py, ground height (for the shop signs)
   const spill = [] // tile-local x, north: where a lit shop window throws light on the sidewalk
+  const extraSigns = [] // boards the lot code adds to the shop signs: pylon boards, tower names (mergeSigns)
+  const towerNames = level === 0 ? shopNames(t).filter((q) => q.kind === 6) : [] // a named tower's name, at the middle of the wall that looks onto a street (tools/tiles.py)
+  const strips = [] // STRIP buildings (strip malls): their ring and which walls face a car park, for the pylon signs
+  const solidsOut = [] // posts and pylons: footprints (the walker and the van stop at them)
   const AO = { P: [], T: [], I: [] } // the shade on the ground round the walls' feet (skirt)
   if (!s) return {}
   if (level === 0) tubes(W, lines)
@@ -1482,6 +1487,14 @@ function buildings(t, terr, level, lines, carriage, lot) {
       else if (looks && !party) FAC = looks.subarray(i * 4, i * 4 + 4)
       quad(W, [a[0], foot, -a[1]], [p[0], foot, -p[1]], [p[0], y1, -p[1]], [a[0], y1, -a[1]], wall, [nx, 0, nz], w(0, foot), w(len, foot), w(len, y1), w(0, y1))
       FAC = NOFAC
+      if (towerNames.length && !party && len >= 6) { // a named tower's name over the door (the bake put its record on this wall)
+        const q = towerNames.find((r) => Math.hypot(r.x - mx, r.y - my) < 1.5)
+        if (q) {
+          const w = Math.min(len - 0.6, 2.2 + q.name.length * 0.28, 6.5)
+          let hh = 0; for (let c = 0; c < q.name.length; c++) hh = (hh * 31 + q.name.charCodeAt(c)) >>> 0
+          extraSigns.push({ x: mx, y: my, z: foot + SIGN_Z, nx, ny: -nz, w, kind: 5 | (2 << 3), name: q.name })
+        }
+      }
       if (ring && !party && len >= 3 && y1 - foot >= 5 && (arch === 13 ? shopEdges[i] : streetSide(a, p, carriage, 18))) { // a cornice box 0.4 m out and 0.6 m tall under the top (the ring is mitred, so corners meet)
         const A = ring[i], P = ring[(i + 1) % np], cc = shade(wall, 1.12), cw = ROOFW(seed), yb = y1 - 0.6
         quad(W, [A[0], yb, -A[1]], [P[0], yb, -P[1]], [P[0], y1, -P[1]], [A[0], y1, -A[1]], cc, [nx, 0, nz], cw)
@@ -1492,12 +1505,19 @@ function buildings(t, terr, level, lines, carriage, lot) {
         const f = ((nb >> 1) + 0.5) / nb, ex = (p[0] - a[0]) / len, ey = (p[1] - a[1]) / len
         box3(Bal, a[0] + (p[0] - a[0]) * f + ey * 0.6, a[1] + (p[1] - a[1]) * f - ex * 0.6, foot + 2.6, 2.6, 1.2, 0.12, Math.atan2(ey, ex), shade(wall, 0.9))
       }
+      if (i === door && !party && (arch === 1 || arch === 2) && streetSide(a, p, carriage, 27) >= 9) { // a stoop: a landing and three steps at the door bay (materials.js lifts the door 0.5 m)
+        const f = ((nb >> 1) + 0.5) / nb, ex = (p[0] - a[0]) / len, ey = (p[1] - a[1]) / len, cx = a[0] + (p[0] - a[0]) * f, cy = a[1] + (p[1] - a[1]) * f
+        const clear = (d) => ![-0.7, 0.7].some((s) => grid.get(gk(Math.floor((cx + ex * s + ey * d) / G), Math.floor((cy + ey * s - ex * d) / G)))?.some((b) => inPoly(cx + ex * s + ey * d, cy + ey * s - ex * d, b.pts)))
+        if (clear(1.7) && clear(1.0)) stoop(Bal, cx, cy, ex, ey, foot, terr, wall)
+      }
+      if (arch === 14 && !party && mn < 0.5 && len >= 6 && shopEdges?.[i] && lot && streetSide(a, p, lot, 12) && !streetSide(a, p, carriage, 9) && h >= 3.2) canopy(Bal, a, p, len, foot, terr, solidsOut, seed, (x, y) => grid.get(gk(Math.floor(x / G), Math.floor(y / G)))?.some((b) => b !== rec && inPoly(x, y, b.pts))) // a strip mall's walk over the car park side
       if (shopEdges?.[i] && mn < 2.5 && h >= 4) {
         fronts.push(a[0], a[1], p[0], p[1], foot) // (the shop signs, on the fascia over the glass)
         if (!party && len >= 3 && wk < 23 && ((seed * 7919) % 1) < 0.6) awnings(W, a, p, len, foot, nx, nz, seed)
       }
       if (plinth && foot === y0) quad(W, [a[0], lo, -a[1]], [p[0], lo, -p[1]], [p[0], y0, -p[1]], [a[0], y0, -a[1]], plC, [nx, 0, nz], [0, 0, 0, seed], [0, len, 0, seed], [0, len, 0, seed], [0, 0, 0, seed])
     }
+    if (detail && arch === 14 && mn < 0.5 && np <= 60) strips.push({ pts, h: y1 - y0, gid })
     if (detail && mn > 1.5) { // a raised part's underside (an overhang, a skybridge, a canopy): from under it you looked up into it
       const tris = earcut2(pts), c = shade(roofC, 0.62), w = ROOFW(seed)
       for (let i = 0; i < tris.length; i += 3) { const A = pts[tris[i]], B = pts[tris[i + 1]], C = pts[tris[i + 2]]; tri(W, [A[0], y0, -A[1]], [B[0], y0, -B[1]], [C[0], y0, -C[1]], c, [0, -1, 0], w) }
@@ -1542,10 +1562,136 @@ function buildings(t, terr, level, lines, carriage, lot) {
       }
     }
   }
-  return { fronts, walls: pack(W), balconies: Bal.pos.length ? pack(Bal) : null,
+  // strip malls' pylon signs where a service drive meets the lot (BUILDINGS.md step 3)
+  if (detail && strips.length && lot && carriage) pylons(t, terr, lines, carriage, lot, strips, (x, y) => grid.get(gk(Math.floor(x / G), Math.floor(y / G)))?.some((b) => inPoly(x, y, b.pts)), Bal, solidsOut, extraSigns)
+  if (detail && t.sections.FNCE) fences(t, terr, carriage, (x, y) => grid.get(gk(Math.floor(x / G), Math.floor(y / G)))?.some((b) => inPoly(x, y, b.pts)), Bal, solidsOut)
+  for (const [x, y, a, l, w] of solidsOut) { // (before the parked cars: they keep clear of them)
+    const X = x + t.ox, Y = y + t.oy, fx = Math.cos(a), fy = Math.sin(a)
+    for (const [pp, q] of [[1, 1], [-1, 1], [-1, -1], [1, -1]]) fp.push(X + fx * pp * l + fy * q * w, Y + fy * pp * l - fx * q * w)
+    fpStart.push(fp.length)
+  }
+  return { extraSigns, fronts, walls: pack(W), balconies: Bal.pos.length ? pack(Bal) : null,
     footprints: fpStart.length > 1 ? { pts: new Float32Array(fp), start: new Uint32Array(fpStart) } : null, spill,
     overhangs: ohLo.length ? { pts: new Float32Array(oh), start: new Uint32Array(ohStart), lo: new Float32Array(ohLo) } : null,
     ao: AO.P.length ? { position: new Float32Array(AO.P), t: new Float32Array(AO.T), index: AO.P.length / 3 > 65535 ? new Uint32Array(AO.I) : new Uint16Array(AO.I) } : null }
+}
+// a front stoop at tile-local (cx, cy) on a wall running (ex, ey): 1.4 m wide, a 0.5 m landing and two lower steps, 1.5 m out
+function stoop(B, cx, cy, ex, ey, foot, terr, wall) {
+  const a = Math.atan2(ey, ex), nx = ey, ny = -ex, c = lin(0xb7b2a8)
+  let g = foot
+  for (const [d, q] of [[0.2, 0], [1.5, 0.7], [1.5, -0.7]]) g = Math.min(g, groundOut(terr, cx + nx * d + ex * q, cy + ny * d + ey * q))
+  g -= 0.05
+  for (const [d0, d1, top] of [[0, 0.9, 0.5], [0.9, 1.2, 0.33], [1.2, 1.5, 0.17]]) box3(B, cx + nx * (d0 + d1) / 2, cy + ny * (d0 + d1) / 2, g, 1.4, d1 - d0, foot + top - g, a, c)
+}
+const CANOPY = [0x7a2f2a, 0x3a4a5c, 0x4a4f50, 0x2f4a3a, 0x8a6a2a]
+// a strip mall's canopy along a wall that looks onto its car park: a slab 2.4 m out at 3 m, a post every 6 m (footprints: sol)
+function canopy(B, a, p, len, foot, terr, sol, seed, blocked) {
+  const ex = (p[0] - a[0]) / len, ey = (p[1] - a[1]) / len, nx = ey, ny = -ex, D = 2.4, L = len - 0.6
+  const at = (s, d) => [a[0] + ex * (0.3 + s) + nx * d, a[1] + ey * (0.3 + s) + ny * d]
+  for (const s of [0, L / 2, L]) if (blocked(...at(s, D))) return
+  const [mx, my] = at(L / 2, D / 2)
+  box3(B, mx, my, foot + 3.0, L, D, 0.18, Math.atan2(ey, ex), lin(CANOPY[Math.floor(seed * 7919) % CANOPY.length]))
+  const n = Math.max(1, Math.ceil(L / 6))
+  for (let k = 0; k <= n; k++) {
+    const [x, y] = at(Math.min(L - 0.1, Math.max(0.1, (L * k) / n)), D - 0.15)
+    if (blocked(x, y)) continue
+    post(B, x, y, groundOut(terr, x, y), foot + 3.0)
+    sol.push([x, y, 0, 0.12, 0.12])
+  }
+}
+// the FNCE section (tools/tiles.py: kind 0 fence, 1 wall, 2 hedge, height dm, a ring of points a piece): a chain-link strip in the
+// railing pattern, a low wall, a hedge box, each in pieces of 4 m or less that follow the ground; none in a building or on a carriageway.
+// They stand in the footprints too (solid: 0.1 m half width, the hedge's 0.45). Near-only, in the detail mesh.
+const FENCE_C = lin(0x8a8d90), WALL_C = lin(0xbdb6a8), HEDGE_C = [lin(0x3f6b34), lin(0x4a7a3a), lin(0x365d30)]
+function fences(t, terr, carriage, inAny, B, sol) {
+  const s = t.sections.FNCE, dv = t.dv, n = dv.getUint32(s.off, true)
+  let o = s.off + 4
+  const free = (x, y) => !inAny(x, y) && !(carriage && [[0, 0], [1.5, 0], [-1.5, 0], [0, 1.5], [0, -1.5]].some(([dx, dy]) => onMask(carriage, x + dx, y + dy)))
+  for (let i = 0; i < n; i++) {
+    const kind = dv.getUint8(o), hd = dv.getUint8(o + 1); const [P, o2] = readRing(t, o + 2); o = o2
+    const h = kind === 0 ? 1.12 : kind === 1 ? Math.min(2.4, Math.max(0.5, hd / 10 || 1.1)) : Math.min(3, Math.max(0.8, hd / 10 || 1.4))
+    let u = 0
+    for (let j = 0; j < P.length / 2 - 1; j++) {
+      const ax = P[j * 2], ay = P[j * 2 + 1], dx = P[j * 2 + 2] - ax, dy = P[j * 2 + 3] - ay, L = Math.hypot(dx, dy), m = Math.max(1, Math.ceil(L / 4))
+      for (let k = 0; k < m; k++) {
+        const x0 = ax + (dx * k) / m, y0 = ay + (dy * k) / m, x1 = ax + (dx * (k + 1)) / m, y1 = ay + (dy * (k + 1)) / m, l = L / m, mx = (x0 + x1) / 2, my = (y0 + y1) / 2
+        const u0 = u; u += l
+        if (!free(mx, my) || !free(x0, y0) || !free(x1, y1)) continue
+        const g0 = groundOut(terr, x0, y0), g1 = groundOut(terr, x1, y1), a = Math.atan2(dy, dx), nx = dy / L, nz = dx / L
+        if (kind === 0) {
+          const rw = (uu, hh) => [12, uu, hh, 0.5]
+          for (const q of [1, -1]) quad(B, [x0, g0 - 0.05, -y0], [x1, g1 - 0.05, -y1], [x1, g1 + h, -y1], [x0, g0 + h, -y0], FENCE_C, [nx * q, 0, nz * q], rw(u0, 0.06), rw(u, 0.06), rw(u, 1.16), rw(u0, 1.16))
+        } else {
+          const g = Math.min(g0, g1) - 0.1, hw = kind === 1 ? 0.1 : 0.45
+          box3(B, mx, my, g, l + (kind === 2 ? 0.3 : 0.02), hw * 2, h + 0.1, a, kind === 1 ? WALL_C : HEDGE_C[(i + k) % 3])
+        }
+        sol.push([mx, my, a, l / 2, kind === 0 ? 0.08 : hw])
+      }
+    }
+  }
+}
+// the SHOP section's names, tile-local: [{ x, y, name }]
+function shopNames(t) {
+  const s = t.sections.SHOP, out = []
+  if (!s) return out
+  const dv = t.dv, n = dv.getUint32(s.off, true)
+  for (let i = 0, o = s.off + 4; i < n; i++) {
+    const ln = dv.getUint8(o + 5)
+    out.push({ kind: dv.getUint8(o), x: dv.getInt16(o + 1, true) * t.k, y: dv.getInt16(o + 3, true) * t.k, name: new TextDecoder().decode(new Uint8Array(t.buf, o + 6, ln)) }); o += 6 + ln
+  }
+  return out
+}
+// a pylon sign for each strip mall: where an OSM service way enters the mall's car park off a street (a carriageway within 14 m of
+// where it crosses the lot's edge), 2 m inside the lot and 4.2 m off the drive; three boards in the shops' own names (shop signs
+// plugin: two entries a board, one a side). No SHOP names near, no entry, or no clear spot: none.
+function pylons(t, terr, lines, carriage, lot, strips, inAny, B, sol, out) {
+  const names = shopNames(t)
+  if (!names.length) return
+  const ent = []
+  const nearLot = (x, y) => [[0, 0], [3.5, 0], [-3.5, 0], [0, 3.5], [0, -3.5]].some(([dx, dy]) => onMask(lot, x + dx, y + dy)) // (the drive is road ground: the lot's cells begin beside it)
+  for (const L of lines) {
+    if (L.kind !== K.service || L.z || L.tunnel) continue
+    const P = L.pts, pts = []
+    for (let i = 0; i < P.length / 2 - 1; i++) {
+      const dx = P[i * 2 + 2] - P[i * 2], dy = P[i * 2 + 3] - P[i * 2 + 1], n = Math.max(1, Math.ceil(Math.hypot(dx, dy)))
+      for (let k = 0; k < n; k++) pts.push([P[i * 2] + (dx * k) / n, P[i * 2 + 1] + (dy * k) / n])
+    }
+    pts.push([P[P.length - 2], P[P.length - 1]])
+    for (let i = 1; i < pts.length; i++) {
+      const [x0, y0] = pts[i - 1], [x1, y1] = pts[i], in0 = nearLot(x0, y0), in1 = nearLot(x1, y1)
+      if (in0 === in1) continue
+      const [ex, ey] = in1 ? [x1, y1] : [x0, y0], d = Math.hypot(x1 - x0, y1 - y0) || 1, sg = in1 ? 1 : -1
+      ent.push({ x: ex, y: ey, ux: ((x1 - x0) / d) * sg, uy: ((y1 - y0) / d) * sg })
+    }
+  }
+  const nearStreet = (x, y) => { for (const r of [4, 8, 12, 14]) for (let k = 0; k < 8; k++) if (onMask(carriage, x + r * Math.cos(k * Math.PI / 4), y + r * Math.sin(k * Math.PI / 4))) return true; return false }
+  const made = []
+  for (const sp of strips) {
+    let cx = 0, cy = 0
+    for (const [x, y] of sp.pts) { cx += x / sp.pts.length; cy += y / sp.pts.length }
+    let best = 100 * 100, e = null
+    for (const c of ent) { const q = (c.x - cx) ** 2 + (c.y - cy) ** 2; if (q < best && nearStreet(c.x, c.y)) { best = q; e = c } }
+    if (!e || made.some((m) => (m.x - e.x) ** 2 + (m.y - e.y) ** 2 < 100)) continue
+    const nm = []
+    for (const q of names) if ((q.x - cx) ** 2 + (q.y - cy) ** 2 < 80 * 80 && !nm.includes(q.name)) nm.push(q.name)
+    if (!nm.length) continue
+    for (const sd of [1, -1]) {
+      const px = e.x + e.ux * 2 - e.uy * sd * 4.2, py = e.y + e.uy * 2 + e.ux * sd * 4.2
+      const ok = [[0.9, 0.4], [-0.9, 0.4], [0.9, -0.4], [-0.9, -0.4]].every(([u, v]) => { const x = px + e.ux * u - e.uy * v, y = py + e.uy * u + e.ux * v; return onMask(lot, x, y) && !onMask(carriage, x, y) && !inAny(x, y) })
+      if (!ok) continue
+      made.push({ x: e.x, y: e.y })
+      const a = Math.atan2(e.uy, e.ux), g = groundOut(terr, px, py)
+      box3(B, px, py, g, 1.6, 0.5, 6.5, a, lin(0x4a4d52))
+      sol.push([px, py, a, 0.8, 0.25])
+      nm.slice(0, 3).forEach((name, j) => {
+        for (const f of [1, -1]) {
+          let h = 0; for (let c = 0; c < name.length; c++) h = (h * 31 + name.charCodeAt(c)) >>> 0
+          out.push({ x: px - e.uy * f * 0.27, y: py + e.ux * f * 0.27, z: g + 5.9 - j * 0.55, nx: -e.uy * f, ny: e.ux * f, w: 1.5, kind: h % 3 << 3, name })
+        }
+      })
+      break
+    }
+  }
 }
 // ambient occlusion where the walls meet the ground: a strip 3 m out from the foot of every wall, darkest at the wall
 // (materials.js aoMaterial multiplies the ground under it); courtyards and the gaps between buildings get it twice
@@ -2231,6 +2377,13 @@ function pois(t) {
 // each put on the nearest street-facing storefront wall within 10 m, no two within 3 m of each other
 // -> { d: 8 floats a sign (tile-local x, north, height above ground, outward x, outward north, width, kind | style << 3, name index), names } or null
 const SIGN_Z = 3.4
+// the signs the lot code adds (pylon boards, tower names) after the SHOP ones, in the same d / names shape
+function mergeSigns(sg, extra) {
+  if (!extra?.length) return sg
+  const d = sg ? [...sg.d] : [], names = sg ? [...sg.names] : []
+  for (const e of extra) { let i = names.indexOf(e.name); if (i < 0) { i = names.length; names.push(e.name) } d.push(e.x, e.y, e.z, e.nx, e.ny, e.w, e.kind, i) }
+  return { d: new Float32Array(d), names }
+}
 function signs(t, fronts) {
   const s = t.sections.SHOP
   if (!s || !fronts.length) return null
@@ -2239,6 +2392,7 @@ function signs(t, fronts) {
   for (let i = 0; i < n; i++) {
     const kind = dv.getUint8(o), x = dv.getInt16(o + 1, true) * t.k, y = dv.getInt16(o + 3, true) * t.k, ln = dv.getUint8(o + 5)
     const name = new TextDecoder().decode(new Uint8Array(t.buf, o + 6, ln)); o += 6 + ln
+    if (kind === 6) continue // a tower's name: buildings() puts it on its own wall
     let best = 100, e = -1, f = 0
     for (let j = 0; j < fronts.length; j += 5) {
       const ax = fronts[j], ay = fronts[j + 1], dx = fronts[j + 2] - ax, dy = fronts[j + 3] - ay, l2 = dx * dx + dy * dy
