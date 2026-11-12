@@ -12,6 +12,8 @@ KX = 111320 * math.cos(math.radians(49.2845)) / SC  # metres per degree of longi
 KY = 110574 / SC                                     # metres per degree of latitude
 BBOX = (48.99, -123.33, 49.48, -122.40)              # S, W, N, E: the Lower Mainland and the North Shore mountains
 L0, L1, L2 = 1024, 4096, 16384                       # tile sizes per level of detail, metres
+SEA0, SEA_RISE = 0.02, 0.7  # the level sea (core/util.js): the lowest tide's surface and how far the highest rises over it
+SEA_HIGH = SEA0 + SEA_RISE  # high water
 HR = 2.0                                             # HRDEM cell (data/hr), metres
 
 

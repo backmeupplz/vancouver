@@ -13,7 +13,7 @@ from shapely.ops import unary_union
 from PIL import Image, ImageDraw
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(__file__))
-from common import digest, file_digest, files_digest, code_key, code_data, cpu_slot, write_if_changed, manifest, save_manifest, write_index, VERSION, GROUND, GI, xy, extent, L0, L1, KX, KY, LAT_O, LON_O, HR, KINDS, KI, DRIVE, SHOP_AMENITY, line_kind, hnum, densify, all_tiles, HR_CACHE, hr_lookup, tile_args, load_feat, tube_h, SLAB, FINE, FB, fine_grid, under_reach
+from common import digest, file_digest, files_digest, code_key, code_data, cpu_slot, write_if_changed, manifest, save_manifest, write_index, VERSION, GROUND, GI, xy, extent, L0, L1, KX, KY, LAT_O, LON_O, HR, SEA0, SEA_HIGH, KINDS, KI, DRIVE, SHOP_AMENITY, line_kind, hnum, densify, all_tiles, HR_CACHE, hr_lookup, tile_args, load_feat, tube_h, SLAB, FINE, FB, fine_grid, under_reach
 from roofs import roof_lookup, valid_poly
 from facades import facade_lookup, NONE as B_NONE, GLASS as B_GLASS, SOLID as B_SOLID
 from lidar_massing import massing_lookup, walls_near
@@ -228,6 +228,7 @@ def build(ij):
     # ---- water polygons (OSM lakes, rivers) to flatten the terrain and to draw
     areas = feat.get('areas', [])
     polys = {}  # class -> list of shapely polygons (world metres)
+    piers = []  # (polygon, tags) of every man_made=pier: a line's buffer, or an area
     for oid, prs, t in areas:
         k = ground_class(t)
         if not k: continue
@@ -238,6 +239,7 @@ def build(ij):
                 if not pg.is_valid: pg = pg.buffer(0)
             except Exception: continue
             if pg.is_empty: continue
+            if t.get('man_made') == 'pier': piers.append((pg, t)); continue  # (floats or fixed decks: pier_decks())
             polys.setdefault(k, []).append(pg)
     # sea polygons from the mask (vectorized at 4 m inside this tile, smoothed)
     import rasterio.features as rf
@@ -422,10 +424,18 @@ def build(ij):
         ls = LineString(c)
         w = hnum(t.get('width')) or (3.0 if ls.length > 60 else 2.0)
         docks.append((ls, w))
-        polys.setdefault('pier', []).append(ls.buffer(w / 2, quad_segs=2, cap_style='flat', join_style='mitre'))
+        piers.append((ls.buffer(w / 2, quad_segs=2, cap_style='flat', join_style='mitre'), dict(t, _line=1)))
     for _, prs, t in areas:  # docks mapped as areas (a walkway and its fingers, the water between them holes): their edges
         if t.get('man_made') == 'pier':
             docks += [(LineString(r), 0.0) for o, ins in prs for r in [o, *ins] if len(r) >= 4]
+    floats, decks = pier_decks(piers, dtm, dsm, feat.get('lines', []), X0, Y0)
+    polys['pier'] = polys.get('pier', []) + floats  # (breakwaters and groynes, as before, and the floats)
+    polys1 = dict(polys, pier=polys['pier'] + [d for d, _, _ in decks])  # the overview draws a fixed pier as a ground polygon
+    if decks:
+        for b in builds:  # a building on a deck stands on it
+            c = Point(*Polygon(b['ring']).representative_point().coords[0])
+            for d, z, _ in decks:
+                if d.contains(c) and b['base'] < z - 0.5: b['base'] = z; break
     boats = berths(docks, polys, areas, X0, Y0, rnd) if docks else []
 
     # ---- where no trunk may stand: carriageways and paths (as drawn), rail, pitches, tracks, courts, car parks, beaches, pools
@@ -474,7 +484,7 @@ def build(ij):
     # the pieces of the next cells that meet this cell's at its seams (a deck ending at the seam, the street going on)
     seam = {n for L in lines for n in (L['a'], L['b'])}
     nxt = [L for L in nbr if L['a'] in seam or L['b'] in seam]
-    rules = apply_rules(dict(cell=(X0, Y0), next=nxt, over=over, builds=builds, lines=lines, ground=g8, trees=trees, beach=beach, carr=polys.get('road', []) + polys.get('arterial', []) + polys.get('cycle', []), decks=[(np.asarray(L['pts'], float), np.asarray(L['z']), L['w']) for L in lines if L['z'] and not L.get('tube')]))
+    rules = apply_rules(dict(cell=(X0, Y0), next=nxt, over=over, builds=builds, lines=lines, ground=deck_ground(g8, decks), trees=trees, beach=beach, carr=polys.get('road', []) + polys.get('arterial', []) + polys.get('cycle', []), decks=[(np.asarray(L['pts'], float), np.asarray(L['z']), L['w']) for L in lines if L['z'] and not L.get('tube')]))
     rules = {k: dict(fixed=n, **summary(left)) for k, (n, left) in rules.items()}
     xdecks = [L for L in lines + over if L['z'] and not L.get('tube')]  # (every detail tile's neighbours' decks: XDCK)
     for a in range(4):
@@ -484,7 +494,7 @@ def build(ij):
             ti_, tj_ = i * 4 + a, j * 4 + b
             terr = ground8[(3 - b) * 128:(4 - b) * 128 + 1, a * 128:a * 128 + 129]  # 8 m: embankments, cuts and seawalls under the roads
             path = f'{OUT}/0/{ti_}_{tj_}.bin'
-            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, shops=shopn, boats=boats, beach=beach, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes, foreign=xdecks, hand=hand):
+            if not write_tile(out, tx, ty, L0, terr, polys, lines, builds, trees, detail=True, pois=pois, shops=shopn, boats=boats, beach=beach, piers=decks, water_only=sea[(3 - b) * 512:(4 - b) * 512, a * 512:(a + 1) * 512].all(), holes=holes, foreign=xdecks, hand=hand):
                 if os.path.exists(path): os.remove(path)  # an earlier bake's, now empty
                 continue
             tf = fine_section(fine[(3 - b) * 512:(4 - b) * 512 + 1, a * 512:a * 512 + 513])
@@ -493,7 +503,7 @@ def build(ij):
             write_if_changed(path, out.bytes()); n += 1
     out = Out(X0, Y0, L1)
     terr = terrain_grid(dtm, 0, 0, L1, 65)
-    write_tile(out, X0, Y0, L1, terr, polys, lines, builds, trees, detail=False, water_only=sea.all(), pois=[])
+    write_tile(out, X0, Y0, L1, terr, polys1, lines, builds, trees, detail=False, water_only=sea.all(), pois=[])
     os.makedirs(f'{OUT}/1', exist_ok=True)
     write_if_changed(f'{OUT}/1/{i}_{j}.bin', out.bytes())
     return ij, 'ok', round(time.time() - t0, 1), n, len(builds), len(trees), f'trunks off streets: {moved} moved, {dropped} dropped', rules
@@ -547,6 +557,93 @@ def flat_water(dtm, sea, water):
         low &= ~ndimage.binary_opening(dtm > lvl[lab] + 2.5, iterations=2)
         dtm = np.where(low, np.minimum(dtm, lvl[lab]), dtm)
     return dtm
+
+
+PIER_CLEAR, PIER_DEF, LID_FIXED = 1.0, 1.5, 1.2  # a deck's least height over high water, its default, the LiDAR's rise that marks a fixed pier
+PIER_OVER = ('trail', 'walk', 'cycle', 'ballast', 'sidewalk', 'blvd', 'road', 'arterial', 'plaza', 'parking')  # paving the water under a deck does not get
+RAIL_NOT = ('private', 'no')  # access: no railing on a private wharf
+
+
+def pier_decks(piers, dtm, dsm, lines, X0, Y0):
+    """-> (floats [polygon], decks [(polygon, z, flags)]): tools/geom_rules.py pier-air, pier-land.
+    A pier (man_made=pier: an area, or a line buffered to its width) is FIXED when it is an area or a floating=no line, at least half
+    of it lies over water, and floating=no, or (untagged) its LiDAR surface stands LID_FIXED over the water under it; else it is a
+    float (a dock that rides its water: ground class 20, as before; mostly on land, class 20 on the ground). Fixed piers that touch
+    are one deck, level at z: the terrain at its landward rim when that stands PIER_CLEAR over high water, else the LiDAR surface
+    on it (75th percentile, in PIER_CLEAR..8 m over high water), else high water + PIER_DEF; to 0.1 m. flags: 1 a street drives over
+    it, 2 railing (every public one: no access=private|no, no mooring), 4 paved (concrete, asphalt, paved, or a street)"""
+    if not piers: return [], []
+    def at(a, x, y): return ndimage.map_coordinates(a, [(Y0 + L1 - y) / HR - 0.5, (x - X0) / HR - 0.5], order=1, mode='nearest')
+    def over(p):  # the heights (dtm, dsm) on a 1 m grid inside p
+        x0, y0, x1, y1 = p.bounds
+        gx, gy = np.meshgrid(np.arange(x0 + 0.5, x1, 1.0), np.arange(y0 + 0.5, y1, 1.0))
+        gx, gy = gx.ravel(), gy.ravel()
+        if len(gx) > 400000: return None  # (not a pier)
+        m = shapely.contains_xy(p, gx, gy)
+        if not m.any(): c = p.representative_point(); gx, gy = np.array([c.x]), np.array([c.y])
+        else: gx, gy = gx[m], gy[m]
+        return at(dtm, gx, gy), at(dsm if dsm is not None else dtm, gx, gy)
+    floats, fixed = [], []  # fixed: (polygon, tags, dtm points, dsm points)
+    for pg, t in piers:
+        h = over(pg) if pg.area > 0.5 else None
+        if h is None: floats.append(pg); continue
+        d, s = h
+        sea = float(np.percentile(d, 5)); wet = d <= sea + 0.3
+        tag = t.get('floating')
+        if tag == 'yes' or (t.get('_line') and tag != 'no') or wet.mean() < 0.5: floats.append(pg); continue  # (a line is a float unless tagged floating=no: boats alongside read as raised in the LiDAR)
+        if tag != 'no' and float(np.percentile(s[wet], 25)) - sea < LID_FIXED: floats.append(pg); continue
+        fixed.append((pg, t, d, s))
+    if not fixed: return floats, []
+    # fixed piers that touch are one deck
+    comps = []
+    for it in sorted(fixed, key=lambda f: (f[0].bounds, f[0].area)):
+        hit = [c for c in comps if c['g'].intersects(it[0].buffer(0.05))]
+        for c in hit: comps.remove(c)
+        g = unary_union([it[0]] + [c['g'] for c in hit])
+        comps.append(dict(g=g, items=[it] + [i for c in hit for i in c['items']]))
+    decks = []
+    for c in sorted(comps, key=lambda c: c['g'].bounds):
+        g = c['g']; items = c['items']
+        d = np.concatenate([i[2] for i in items]); s = np.concatenate([i[3] for i in items])
+        sea = float(np.percentile(d, 5)); hi = max(sea, SEA_HIGH); wet = d <= sea + 0.3
+        z = None
+        for poly in (g.geoms if hasattr(g, 'geoms') else [g]):
+            if poly.geom_type != 'Polygon': continue
+            n = max(8, int(poly.exterior.length // 2))
+            rim = [poly.exterior.interpolate(k / n, normalized=True) for k in range(n)]
+            out = poly.buffer(1.0, join_style='mitre').exterior
+            ro = [out.interpolate(out.project(r)) for r in rim]
+            rx, ry = np.array([r.x for r in rim]), np.array([r.y for r in rim]); ox, oy = np.array([r.x for r in ro]), np.array([r.y for r in ro])
+            hr_, ho = at(dtm, rx, ry), at(dtm, ox, oy)
+            ok = (hr_ > sea + 0.3) & (ho > sea + 0.3)
+            if ok.any(): z = float(np.median(hr_[ok])) if z is None else max(z, float(np.median(hr_[ok])))
+        root = z
+        if root is not None and root >= hi + PIER_CLEAR: z = root
+        else:
+            lid = float(np.percentile(s[wet], 75)) if wet.any() else -99.0
+            z = lid if hi + PIER_CLEAR <= lid <= hi + 8 else hi + PIER_DEF
+        z = round(z, 1)
+        tags = [i[1] for i in items]
+        paved = any(t.get('surface') in ('concrete', 'asphalt', 'paved') for t in tags)
+        fl = 0
+        for _, ln, _, t in lines:
+            if t.get('highway') in DRIVE and len(ln) > 1 and LineString(ln).intersection(g).length >= 10: fl |= 1
+        if not any(t.get('access') in RAIL_NOT or t.get('mooring') for t in tags): fl |= 2
+        if paved or fl & 1: fl |= 4
+        decks.append((g, z, fl))
+    return floats, decks
+
+
+def deck_ground(g8, decks):
+    """the ground as the rules see it: under a deck, the deck's top (tools/geom_rules.py)"""
+    if not decks: return g8
+    pg = [(d, z) for d, z, _ in decks]
+    for d, _ in pg: shapely.prepare(d)
+    def f(x, y):
+        h = g8(x, y); x_, y_ = np.asarray(x, float), np.asarray(y, float)
+        for d, z in pg: h = np.where(shapely.contains_xy(d, x_, y_), np.maximum(h, z), h)
+        return h
+    return f
 
 
 ITER, DAMP, HOLD = 60, 0.45, 0.3  # road_ground's fit: rounds, step, how hard a node holds its own height
@@ -2714,7 +2811,7 @@ def line_bytes(out, sel, detail):
     return bytes(lb)
 
 
-def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None, shops=(), beach=(), foreign=(), hand=None):
+def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, water_only, pois=(), boats=(), holes=None, shops=(), beach=(), foreign=(), hand=None, piers=()):
     tb = box(tx, ty, tx + size, ty + size)
     n = terr.shape[0]
     out.section('TERR', struct.pack('<H', n) + np.clip(np.round(terr * 10), -32768, 32767).astype('<i2').tobytes())
@@ -2726,6 +2823,8 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
     water_u = unary_union(wat) if wat else None
     # per class: the union clipped to the tile and simplified, small bits dropped (the class below fills in); land is
     # the whole tile, under every other class
+    decks_here = [(g, z, f) for d, z, f in piers for g in [d.intersection(tb)] if g.area > 0.5] if detail else []
+    deck_u = unary_union([g for g, _, _ in decks_here]) if decks_here else None
     per = {}
     for k in GROUND:
         cand = [tb] if k == 'land' else near(polys.get(k, []))
@@ -2734,6 +2833,7 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
         except Exception: g = unary_union([c.buffer(0) for c in cand]).intersection(tb)
         if wat and k not in ('water', 'pier', 'land') and k not in ('road', 'arterial', 'sidewalk', 'blvd', 'walk', 'cycle', 'trail', 'ballast'): g = g.difference(water_u)
         if detail and holes is not None and g.intersects(holes): g = g.difference(holes)  # tunnel portals: the page draws their boxes there
+        if deck_u is not None and k in PIER_OVER: g = g.difference(deck_u)  # (a path's paving does not lie on the water under a deck: its line still draws and routes on the deck)
         g = g.simplify(tol)
         if k != 'land':
             parts = [p for p in (g.geoms if hasattr(g, 'geoms') else [g]) if p.geom_type == 'Polygon' and p.area >= min_area]
@@ -2760,6 +2860,15 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
         gb += struct.pack('<BI', GI[k], len(geoms)) + body
         runs += 1
     out.section('GRND', struct.pack('<H', runs) + bytes(gb))
+    if decks_here:  # fixed piers (tile-worker.js readDecks): flags, z in dm, the polygon's rings; clipped to the tile
+        pb = bytearray(); np_ = 0
+        for g, z, f in decks_here:
+            for q in (g.geoms if hasattr(g, 'geoms') else [g]):
+                if q.geom_type != 'Polygon' or q.area < 0.5: continue
+                rings = [list(q.exterior.coords)[:-1]] + [list(r.coords)[:-1] for r in q.interiors]
+                rings = [r for r in rings if len(r) >= 3]
+                pb += struct.pack('<BhH', f, int(round(z * 10)), len(rings)) + b''.join(pack_ring(out, r) for r in rings); np_ += 1
+        out.section('PIER', struct.pack('<H', np_) + bytes(pb))
     # lines, with a node table so pieces can join across tiles
     sel = []
     if sw: lines = off_walls(lines, sw)
@@ -3270,6 +3379,18 @@ def selftest():
     (a, c, r, t), (b, c2, r2, t2) = retunnel([(7, [(0.0, 0.0), (100.0, 0.0)], [1, 2], {'highway': 'primary'})])
     RETUN.clear()
     assert t['tunnel'] == 'yes' and c == [(70.0, 0.0), (100.0, 0.0)] and r[1] == 2 and r2 == [1, r[0]] and c2 == [(0.0, 0.0), (70.0, 0.0)] and b == 7 and a > 1 << 33 and r[0] < 1 << 53 and 'tunnel' not in t2
+    # piers: a 5 x 40 m floating=no area from a 3 m bank over water at -2.1 is one deck at the bank's 3.0 m; the same untagged over a flat
+    # DSM, and a floating=yes area, are floats
+    N = 128; X0, Y0 = 0.0, N * HR - L1  # a 256 m square of 2 m cells whose north edge is y = 256 (row 0 north)
+    dtm_ = np.full((N, N), -2.1, np.float32); dtm_[:, :20] = 3.0  # (the bank west of x = 40)
+    ar = lambda tag: [(Polygon([(36, 100), (80, 100), (80, 105), (36, 105)]), tag)]
+    f, d = pier_decks(ar({'man_made': 'pier', 'floating': 'no'}), dtm_, dtm_, [], X0, Y0)
+    assert len(d) == 1 and not f and d[0][1] == 3.0 and d[0][2] == 2, (d, f)
+    f, d = pier_decks(ar({'man_made': 'pier'}), dtm_, dtm_, [], X0, Y0)
+    assert len(f) == 1 and not d, 'untagged over a flat DSM: a float'
+    f, d = pier_decks(ar({'man_made': 'pier', 'floating': 'yes'}), dtm_, dtm_, [], X0, Y0)
+    assert len(f) == 1 and not d, 'floating=yes: a float'
+    assert dtm_.min() == -2.1 and (dtm_[:, :20] == 3.0).all(), 'the sea under all three unchanged'
     rules_selftest()
     # stairs that start on a wall's line (#579): cut, the piece starting past the gap; a path 5 m off is left whole
     wl = [(np.array([[0.0, 0], [20, 0]]), np.full(2, 3.0), np.zeros(2), np.full(2, 3.0), np.ones(2), np.zeros(2), None)]

@@ -830,7 +830,8 @@ drawn_rule = lambda kind: lambda ij, d: [f for f in _cell(ij, d, 'drawn') if f['
 DRAWN = {'paint-ground': 'core/tile-worker.js roads()', 'paint-deck': 'core/tile-worker.js roads()', 'deck-gap': 'core/tile-worker.js roads()',
          'deck-overlap': 'tools/tiles.py', 'lane-surface': 'plugins/life/worker.js', 'crosswalk': 'core/tile-worker.js crosswalks()',
          'pole': 'core/tile-worker.js lights()', 'ground-crack': 'core/tile-worker.js ground() (T-junctions); tools/tiles.py (ground polygons sharing borders)',
-         'object': 'core/tile-worker.js solids() (poles, parked cars); tools/tiles.py (beach logs)', 'deck-zfight': 'core/tile-worker.js unstack()'}
+         'object': 'core/tile-worker.js solids() (poles, parked cars); tools/tiles.py (beach logs)', 'deck-zfight': 'core/tile-worker.js unstack()',
+         'pier-air': 'tools/tiles.py pier_decks(); core/tile-worker.js ground() (floats ride)', 'pier-land': 'tools/tiles.py pier_decks()'}
 
 # Rule(name, check, fix, on): on 'tile' the check and fix run on the bake's tile (tools/tiles.py, every cell it bakes:
 # fix, then check), their counts kept in OUT/manifest.json; on 'baked' the check runs over the baked tiles (check(ij,

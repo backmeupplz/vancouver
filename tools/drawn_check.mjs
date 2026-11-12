@@ -16,6 +16,10 @@
 //   object        things inside each other: parked cars, lamp poles, tree trunks, beach logs and the buildings' footprints
 //   ground-seam   a step over 2 cm between a tile's ground and the next tile's along their shared edge (#557)
 //   deck-zfight   two deck strips drawn over each other within 3 cm (they flicker; not where they only meet along an edge)
+//   pier-air      a fixed pier's deck (section PIER) over water lower than 0.6 m over high water; a float's vertex over water that
+//                 does not ride the tide (tile-worker.js ground(): the tidal byte 255; only where the page builds floats at all)
+//   pier-land     a fixed pier (its pieces joined across tiles) with no rim point where the ground outside (0.5 m out, raw, not water)
+//                 lies within 0.3 m of its top, and no street or path ending at it ('allowed': detached, no ground within 3 m)
 import fs from 'node:fs'
 import zlib from 'node:zlib'
 import vm from 'node:vm'
@@ -24,12 +28,19 @@ const ROOT = new URL('../public/', import.meta.url)
 const W = await import(new URL('core/tile-worker.js', ROOT).href)
 const { parse, readLines, terrain, roads, pois, build, carEnds, crosswalks, eachPoly } = W
 const onCarriage = W.onCarriage || ((c) => c), roadMask = W.roadMask || (() => null) // (an older tile-worker.js: measuring before a change)
-const { sampleTerr, inPoly, wallHeight } = await import(new URL('core/util.js', ROOT).href)
+const { sampleTerr, inPoly, wallHeight, SEA0, SEA_RISE } = await import(new URL('core/util.js', ROOT).href)
 const [DIR, ...CELLS] = process.argv.slice(2)
 const TOL = { paint: 0.15, lane: 0.3, deck: 0.15, plinth: 1.2 }
 const CARR = new Set([25, 29, 30]) // cycle, road, arterial (tile-worker.js roadMask)
 const LIFT = (kind) => 0.36 + (18 - kind) * 0.004 // tile-worker.js roads(): a deck strip over its z
 
+function readRingAt(t, o) { // tile-worker.js readRing (not exported): count + delta-encoded int16 points -> [tile-local pts, next offset]
+  const dv = t.dv, n = dv.getUint32(o, true), pts = new Float32Array(n * 2)
+  let x = 0, y = 0
+  o += 4
+  for (let i = 0; i < n; i++) { x += dv.getInt16(o, true); y += dv.getInt16(o + 2, true); o += 4; pts[i * 2] = x * t.k; pts[i * 2 + 1] = y * t.k }
+  return [pts, o]
+}
 const cache = new Map()
 function tile(k) {
   if (cache.has(k)) return cache.get(k)
@@ -323,6 +334,76 @@ function check(cell) {
       if (Math.abs(off) > TOL.lane && (!worst || Math.abs(off) > worst[4])) worst = [o.x, o.y, o.h, off]
     }
     if (worst) { const p = g.conn ? g.from.p : g.p; add('lane-surface', worst[0], worst[1], worst[2], Math.abs(worst[3]), `${g.conn ? 'junction path after' : 'lane on'} ${p.z ? 'deck' : 'ground'} piece ${p.a}-${p.b} kind ${p.kind} ${worst[3].toFixed(2)} m off`) }
+  }
+  // ---- piers (tools/tiles.py pier_decks): the decks of section PIER (tile-worker.js readDecks, once the page has it), the floats the page draws
+  {
+    const HI = SEA0 + SEA_RISE, pieces = []
+    for (const k of own) {
+      const T = tile(k), sec = T.t.sections.PIER
+      if (!sec) continue
+      const dv = T.t.dv, n = dv.getUint16(sec.off, true)
+      let o = sec.off + 2
+      for (let i = 0; i < n; i++) {
+        const flags = dv.getUint8(o), z = dv.getInt16(o + 1, true) / 10, nr = dv.getUint16(o + 3, true), rings = []
+        o += 5
+        for (let r = 0; r < nr; r++) { const [pts, o2] = readRingAt(T.t, o); o = o2; rings.push(pts) }
+        pieces.push({ k, T, flags, z, rings, link: null })
+      }
+    }
+    const raw = (T, x, y) => sampleTerr(T.terr, x, y)
+    for (const d of pieces) { // pier-air: the deck's top at its ring points and edge middles
+      for (const ring of d.rings) for (let i = 0; i < ring.length / 2; i++) {
+        const j = (i + 1) % (ring.length / 2)
+        for (const [x, y] of [[ring[i * 2], ring[i * 2 + 1]], [(ring[i * 2] + ring[j * 2]) / 2, (ring[i * 2 + 1] + ring[j * 2 + 1]) / 2]]) {
+          const g = raw(d.T, x, y), top = Math.max(d.z, g + 0.06)
+          if (g < SEA0 + 0.3 && top < Math.max(g, HI) + 0.6) { add('pier-air', x + d.T.ox, y + d.T.oy, top, top - Math.max(g, HI) - 0.6, `a fixed deck at ${top.toFixed(2)} over water (ground ${g.toFixed(2)}), high water ${HI.toFixed(2)}`); break }
+        }
+      }
+    }
+    for (const k of own) { // the floats: a vertex over water that does not ride (a page that builds them: ground.pier)
+      const g = drawn.get(k) || build(tile(k).t, 0).ground, T = tile(k)
+      if (!g?.pier) continue
+      for (let i = 0; i < g.cls.length; i++) {
+        if (g.cls[i] !== 20 || g.tidal[i] === 255) continue
+        const x = g.position[i * 3], y = -g.position[i * 3 + 2], h = raw(T, x, y)
+        if (h < SEA0 + 0.3 && Math.abs(g.position[i * 3 + 1] - h) < 0.05) { add('pier-air', x + T.ox, y + T.oy, h, 0, 'a float vertex over water that does not ride'); break }
+      }
+    }
+    // pier-land: pieces that share a ring point (across a tile's edge) are one pier
+    const par = pieces.map((_, i) => i), find = (i) => (par[i] === i ? i : (par[i] = find(par[i])))
+    const at = new Map()
+    pieces.forEach((d, i) => { for (const ring of d.rings) for (let q = 0; q < ring.length; q += 2) { const key = Math.round((ring[q] + d.T.ox) * 10) * 1e7 + Math.round((ring[q + 1] + d.T.oy) * 10); const j = at.get(key); if (j === undefined) at.set(key, i); else par[find(i)] = find(j) } })
+    const comps = new Map()
+    pieces.forEach((d, i) => { const r = find(i); if (!comps.has(r)) comps.set(r, []); comps.get(r).push(d) })
+    const ends = [] // where a street or path ends: world x, y
+    for (const k of own) for (const L of tile(k).lines) if (L.kind >= 8 && L.kind <= 12 || L.z) { const T = tile(k), n = L.pts.length; ends.push([L.pts[0] + T.ox, L.pts[1] + T.oy], [L.pts[n - 2] + T.ox, L.pts[n - 1] + T.oy]) }
+    const land = (x, y) => { const g = ground(x, y); return g !== null && g - 0.02 > SEA0 + 0.3 ? g - 0.02 : null }
+    for (const ds of comps.values()) {
+      let best = Infinity, any3 = false, cx = 0, cy = 0, cn = 0, z0 = ds[0].z, touch = false
+      for (const d of ds) d.rings.forEach((ring, r) => {
+        const m = ring.length / 2; let area = 0
+        for (let i = 0; i < m; i++) { const j = (i + 1) % m; area += ring[i * 2] * ring[j * 2 + 1] - ring[j * 2] * ring[i * 2 + 1] }
+        const sg = (area > 0 ? 1 : -1) * (r ? -1 : 1), edge = (u) => u < 1e-3 || u > 1024 - 1e-3
+        for (let i = 0; i < m; i++) {
+          const j = (i + 1) % m, ax = ring[i * 2], ay = ring[i * 2 + 1], bx = ring[j * 2], by = ring[j * 2 + 1], L = Math.hypot(bx - ax, by - ay)
+          if (L < 1e-3 || (edge(ax) && edge(bx) && Math.abs(ax - bx) < 1e-3) || (edge(ay) && edge(by) && Math.abs(ay - by) < 1e-3)) continue
+          const nx = ((by - ay) / L) * sg, ny = (-(bx - ax) / L) * sg
+          for (let u = 0; u < L; u += 2) {
+            const x = ax + ((bx - ax) * u) / L, y = ay + ((by - ay) * u) / L, wx = x + d.T.ox, wy = y + d.T.oy, top = Math.max(d.z, raw(d.T, x, y) + 0.06)
+            cx += wx; cy += wy; cn++
+            const g = land(wx + nx * 0.5, wy + ny * 0.5)
+            if (g !== null) best = Math.min(best, Math.abs(g - top))
+            if (ends.some(([ex, ey]) => Math.hypot(ex - wx, ey - wy) < 1.5)) touch = true
+            if (!any3 && (land(wx + nx * 3, wy + ny * 3) !== null || g !== null)) any3 = true
+          }
+        }
+      })
+      if (touch || best <= 0.3 || !cn) continue
+      const [x, y] = [cx / cn, cy / cn]
+      if (!inCell(x, y)) continue
+      add('pier-land', x, y, z0, best === Infinity ? 99 : best, `a fixed pier at ${z0.toFixed(1)} m meets no ground${best === Infinity ? '' : ` (nearest ${best.toFixed(2)} m off its top)`}`)
+      if (!any3) issues[issues.length - 1].allowed = 'detached'
+    }
   }
   return issues
 }

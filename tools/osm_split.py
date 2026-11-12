@@ -21,7 +21,7 @@ GROUND_KEYS = ('landuse', 'natural', 'leisure', 'amenity', 'aeroway', 'man_made'
 LINE_KEYS = ('highway', 'railway', 'aeroway', 'waterway', 'natural', 'man_made', 'barrier', 'route', 'power')
 KEEP_LINE = ('turn:lanes', 'turn:lanes:forward', 'turn:lanes:backward', 'highway', 'railway', 'aeroway', 'waterway', 'natural', 'man_made', 'barrier', 'name', 'ref', 'lanes', 'lanes:forward', 'lanes:backward', 'oneway',
              'junction', 'bridge', 'tunnel', 'layer', 'level', 'width', 'surface', 'sidewalk', 'cycleway', 'cycleway:left', 'cycleway:right', 'cycleway:both', 'service',
-             'access', 'foot', 'bicycle', 'maxspeed', 'bridge:structure', 'covered', 'usage', 'gauge', 'electrified', 'crossing', 'footway', 'area', 'power')
+             'access', 'foot', 'bicycle', 'maxspeed', 'bridge:structure', 'covered', 'usage', 'gauge', 'electrified', 'crossing', 'footway', 'area', 'power', 'floating')
 
 
 def keep(tags, names):
