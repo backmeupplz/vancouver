@@ -654,6 +654,30 @@ CUT = 3.0  # metres: the deepest road_ground cuts a street down under a deck (de
 DECK_TOP = 0.38  # a deck's drawn road over its height, less the ground's (the page's tile-worker.js strip lift, drive surface())
 
 
+GRADE_BUMP = 1.0  # metres: the LiDAR's ground over a street's own grade under a deck this much is the deck's or its fill (not the street's)
+BRIDGE_END = 12.0  # metres: not within this of a deck's end (the street there meets the deck: abutments and the cut under it)
+
+
+def bridged(P, h, L, dk, reach, dend):
+    """the ground wanted along a piece (2 m samples P, LiDAR heights h) with the bumps under decks taken out: where it runs
+    under a deck it doesn't share a node with, and the LiDAR's ground there lies over the straight line between the clear samples either side by more than
+    GRADE_BUMP (the deck's fill or its shadow, tools/audit_elev.py 'under'), it takes the line (never raised). A run reaching the piece's end, or whose clear
+    sample is within BRIDGE_END of a deck's end, is left to road_ground's abutment and cut"""
+    ui, di = reach.query(shapely.points(P), predicate='intersects')
+    und = np.zeros(len(P), bool)
+    for a, b in zip(ui, di):
+        if not {L.get('a', -1), L.get('b', -2)} & {dk[b][1]['a'], dk[b][1]['b']}: und[a] = True
+    if not und.any() or und.all(): return h
+    s = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
+    d = np.diff(np.concatenate([[0], und.astype(int), [0]]))
+    for r0, r1 in zip(np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]):
+        if r0 == 0 or r1 == len(P): continue
+        if (np.hypot(*(dend - P[r0 - 1]).T).min() < BRIDGE_END) or (np.hypot(*(dend - P[r1]).T).min() < BRIDGE_END): continue
+        line = h[r0 - 1] + (h[r1] - h[r0 - 1]) * (s[r0:r1] - s[r0 - 1]) / max(s[r1] - s[r0 - 1], 1e-6)
+        if np.max(h[r0:r1] - line) > GRADE_BUMP: h[r0:r1] = np.minimum(h[r0:r1], line)
+    return h
+
+
 def road_ground(dtm, pieces, X0, Y0, decks=()):
     """the detail tiles' 8 m terrain grid over a whole 4 km tile (513 x 513 nodes, row 0 north), fitted to the at-grade
     roads, paths and rail (paths held half as hard): an 8 m node near a road can land in the cut, the ravine or the yard beside it and drag the street
@@ -666,6 +690,11 @@ def road_ground(dtm, pieces, X0, Y0, decks=()):
     G = terrain_grid(dtm, 0, 0, L1, 513)
     at = lambda P: ndimage.map_coordinates(dtm, [(Y0 + L1 - P[:, 1]) / HR - 0.5, (P[:, 0] - X0) / HR - 0.5], order=1, mode='nearest')
     S = []  # x, y, weight, the ground wanted there
+    dk = [(shapely.LineString(L['pts']), L) for L in decks if L['z'] and not L.get('tube') and len(L['pts']) > 1]
+    if dk:
+        from shapely.strtree import STRtree
+        reach = STRtree([g.buffer(under_reach(L['w'], L.get('band')) + 4, cap_style='flat') for g, L in dk])
+        dend = np.array([p for g, L in dk for p in (L['pts'][0], L['pts'][-1])], float)  # (where the decks end: the street there is the abutment's, not ours to bridge)
     for L in pieces:
         if L['z'] is not None or KI[L['kind']] >= KI['runway'] or len(L['pts']) < 2: continue  # (paths too: tools/audit_elev.py 'grade')
         P = np.array(densify(L['pts'], 2.0), float)
@@ -674,6 +703,7 @@ def road_ground(dtm, pieces, X0, Y0, decks=()):
         e = max(0.0, L['w'] / 2 - 0.5)
         Q = [P] if e < 1 else [P, P + n * e, P - n * e]
         h = np.median([at(q) for q in Q], axis=0)  # level across, as a street is (a line drawn a metre or two off the street puts a kerb on the cut's or the embankment's slope)
+        if dk and len(P) > 4: h = bridged(P, h, L, dk, reach, dend)
         for q in Q: S.append(np.c_[q, np.full(len(q), 0.3 if L['kind'] in ('rail', 'lightrail') else 1.0 if L['kind'] in DRIVE else 0.5), h, np.full(len(q), L.get('a', -1)), np.full(len(q), L.get('b', -1))])
     if not S: return G, np.zeros((L1 // FINE + 1,) * 2, np.float32)
     S = np.concatenate(S)
@@ -704,9 +734,7 @@ def road_ground(dtm, pieces, X0, Y0, decks=()):
         held |= near
     # under a deck: the street 3 m under its underside (tools/audit_elev.py 'under'; the LiDAR has no ground under a
     # bridge, its ground there is filled in from round it): a street drawn up into the deck is cut down, up to CUT
-    dk = [(shapely.LineString(L['pts']), L) for L in decks if L['z'] and not L.get('tube') and len(L['pts']) > 1]
     if dk:
-        from shapely.strtree import STRtree
         tree = STRtree([g.buffer(under_reach(L['w'], L.get('band')), cap_style='flat') for g, L in dk]); pts = shapely.points(S[:, :2])
         for si, q in zip(*tree.query(pts, predicate='intersects')):
             g, L = dk[q]; f = g.project(pts[si])
@@ -3433,6 +3461,12 @@ def selftest():
     street = [dict(z=None, kind='primary', w=12.0, pts=[(1400.0, -2000.0), (1700.0, -2000.0)], a=3, b=4)]
     G, F = road_ground(dtm, street, 0, -L1, [deck])
     assert all(gx(x, -2000) <= 29.6 for x in range(1514, 1587, 2)), [gx(x, -2000) for x in range(1514, 1587, 12)]
+    # a 12 m wide plateau 6 m high (a deck's fill) across a level street, the deck over it: the street's ground stays level
+    dtm = np.full((2048, 2048), 30.0, np.float32); dtm[:, 1007:1013] = 36.0  # (x 2014..2026)
+    deck = dict(z=[40.0] * 61, kind='primary', w=12.0, band=None, tube=None, a=1, b=2, pts=[(2020.0, -2060.0 + 2 * i) for i in range(61)])
+    street = [dict(z=None, kind='primary', w=12.0, pts=[(1900.0, -2000.0), (2150.0, -2000.0)], a=3, b=4)]
+    G, F = road_ground(dtm, street, 0, -L1, [deck])
+    assert abs(gx(2020, -2000) - 30) < 1.0 and abs(gx(2000, -2000) - 30) < 1.0, (gx(2020, -2000), gx(2000, -2000))
     # pct is np.percentile to the bit; a CPU slot is held while its job runs and given back after
     rng = np.random.default_rng(2)
     for n in (1, 2, 7, 100, 1001):
