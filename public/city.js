@@ -361,17 +361,22 @@ function makeUI(startCard) {
 }
 
 // Plugins listed in plugins/index.json, plus ?plugin=<path> for local development (same origin only).
-export async function loadPlugins(city) {
+// The modules are all fetched at once, from page start (pluginModules(): [path, module promise] pairs; one after
+// another they were 33 round trips), and started in the list's order once the city is up (loadPlugins).
+export async function pluginModules() {
   const list = await fetch('plugins/index.json').then((r) => r.json()).catch(() => [])
   for (const p of new URLSearchParams(location.search).getAll('plugin')) {
     const u = new URL(p, location.href)
     if (u.origin === location.origin) list.push(u.pathname)
     else console.warn('plugin from another origin ignored:', p)
   }
+  return list.map((path) => { const m = import(new URL(path, location.href).href); m.catch(() => {}); return [path, m] }) // (an error: loadPlugins reports it)
+}
+export async function loadPlugins(city, mods = pluginModules()) {
   const loaded = []
-  for (const path of list) {
+  for (const [path, mod] of await mods) {
     try {
-      const m = await import(new URL(path, location.href).href)
+      const m = await mod
       loaded.push({ path, instance: (await m.default(city)) || {} })
     } catch (e) { console.error('plugin', path, e) }
   }

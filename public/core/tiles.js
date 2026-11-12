@@ -160,8 +160,9 @@ export class Tiles {
     this.workers = Array.from({ length: WORKERS }, () => new Worker(new URL('./tile-worker.js', import.meta.url), { type: 'module' }))
     this.pending = new Map()
     let seq = 0
-    this.request = (msg) => new Promise((ok) => { const id = ++seq; this.pending.set(id, ok); this.workers[id % WORKERS].postMessage({ id, ...msg }) })
-    for (const w of this.workers) w.onmessage = ({ data }) => { const ok = this.pending.get(data.id); this.pending.delete(data.id); ok?.(data) }
+    // each tile to the worker with the fewest in hand (in turn, a tile waited seconds behind another's build while a worker idled)
+    this.request = (msg) => new Promise((ok) => { const id = ++seq, w = this.workers.reduce((a, b) => (b.n < a.n ? b : a)); w.n++; this.pending.set(id, ok); w.postMessage({ id, ...msg }) })
+    for (const w of this.workers) { w.n = 0; w.onmessage = ({ data }) => { w.n--; const ok = this.pending.get(data.id); this.pending.delete(data.id); ok?.(data) } }
     this.unitMat = new THREE.MeshLambertMaterial()
     this.quad = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0)
     this.boatGeo = boatGeos()
@@ -416,7 +417,8 @@ export class Tiles {
     }
     if (res.missing) { t.state = 'missing'; this.onChange?.(); return }
     if (t.state !== 'loading') return // evicted while loading
-    t.res = res
+    if (res.masks < (this.masks?.length || 0) && this.masked(t, res.masks)) return this.load(t) // a mask on it came while it was built
+    t.res = res; t.maskN = res.masks || 0
     this.made.push(t)
   }
 
@@ -701,22 +703,36 @@ export class Tiles {
   }
 
   // generic buildings inside these rings (world metres, y north) are skipped: a plugin draws its own there.
-  // Collected for a moment, then sent to the workers and the affected tiles rebuilt.
+  // Collected until the task ends, then sent to the workers and the affected ready tiles rebuilt (main.js adds a
+  // plugin's exported `masks` as soon as its module loads, before the first tiles are built: none is built twice).
   addMask(ring) {
-    (this.masks ||= []).push(ring)
-    clearTimeout(this.maskT)
-    this.maskT = setTimeout(() => {
+    (this.masks ||= []).push(ring); (this.maskBB ||= []).push([Math.min(...ring.map((p) => p[0])), Math.min(...ring.map((p) => p[1])), Math.max(...ring.map((p) => p[0])), Math.max(...ring.map((p) => p[1]))])
+    if (this.maskQ) return
+    this.maskQ = true
+    queueMicrotask(() => {
+      this.maskQ = false
       for (const w of this.workers) w.postMessage({ masks: this.masks })
-      const bb = this.masks.map((r) => [Math.min(...r.map((p) => p[0])), Math.min(...r.map((p) => p[1])), Math.max(...r.map((p) => p[0])), Math.max(...r.map((p) => p[1]))])
       for (const t of [...this.tiles.values()]) {
-        const s = SIZES[t.level]
-        if (t.state !== 'ready' || !bb.some((b) => b[2] >= t.ox && b[0] <= t.ox + s && b[3] >= t.oy && b[1] <= t.oy + s)) continue
+        if (!(t.state === 'ready' || t.state === 'warming' || t.res) || !this.masked(t, t.maskN)) continue // (one still being fetched or built: load() checks it)
         const visible = t.visible
         this.drop(t)
         const n = this.get(t.level, t.i, t.j); n.visible = visible; n.used = this.frame
       }
       this.onChange?.()
-    }, 50)
+    })
+  }
+
+  // the workers fetch meanwhile but build only once p settles (its masks added) or after ms: no tile built twice
+  holdBuilds(p, ms = 4000) {
+    for (const w of this.workers) w.postMessage({ hold: ms })
+    p.finally(() => { for (const w of this.workers) w.postMessage({ release: true }) }) // (after addMask's microtask: the masks first)
+  }
+
+  // whether a mask from the from-th on touches tile t
+  masked(t, from = 0) {
+    const s = SIZES[t.level]
+    for (let k = from; k < (this.maskBB?.length || 0); k++) { const b = this.maskBB[k]; if (b[2] >= t.ox && b[0] <= t.ox + s && b[3] >= t.oy && b[1] <= t.oy + s) return true }
+    return false
   }
 
   // ready tiles, for plugins that start after some have loaded

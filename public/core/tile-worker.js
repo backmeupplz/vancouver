@@ -10,8 +10,11 @@ const KIND = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'resident
 const K = Object.fromEntries(KIND.map((k, i) => [k, i]))
 
 let MASKS = [] // world-metre rings where plugins draw their own buildings (landmarks): generic ones are skipped
+let held = null, open = null // builds wait for the masks the page has on the way ('hold', at most that many ms), tiles.js holdBuilds()
 globalThis.onmessage = async ({ data }) => { // (globalThis: tools/crosswalk_check.mjs imports this under node)
   if (data.masks) { MASKS = data.masks.map((r) => ({ r, bb: bbox(r) })); return }
+  if (data.hold) { let go; held = new Promise((k) => (go = k)); open = go; setTimeout(go, data.hold); return } // (the page's masks are on their way)
+  if (data.release) { open?.(); return }
   const { id, url, level } = data
   try {
     const r = await fetch(url)
@@ -19,13 +22,14 @@ globalThis.onmessage = async ({ data }) => { // (globalThis: tools/crosswalk_che
     if (!r.ok) throw new Error(`${url}: ${r.status}`)
     const buf = await new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer()
     const t = parse(buf)
+    await held // (fetched meanwhile; built with the masks)
     const out = build(t, level)
     for (const g of [out.ground, out.roads, out.paint, out.buildings, out.balconies, out.ao]) if (g?.position) g.box = box(g.position)
     const size = level ? 4096 : 1024
     if (out.ground?.index) { out.ground.cells = cells(out.ground, 'index', size); if (out.ground.coarse) out.ground.coarseCells = cells(out.ground, 'coarse', size) }
     if (out.buildings?.position.length) out.buildings.cells = cells(out.buildings, null, size)
     if (out.lights) out.lights.box = box(out.lights.pos, 4)
-    postMessage({ id, ...out }, transferables(out))
+    postMessage({ id, masks: MASKS.length, ...out }, transferables(out)) // (masks: how many it was built with, tiles.js load())
   } catch (e) { postMessage({ id, error: String(e) }) }
 }
 
@@ -77,7 +81,7 @@ function box(p, stride = 3) {
 
 function transferables(o, list = []) {
   for (const v of Object.values(o)) {
-    if (ArrayBuffer.isView(v)) list.push(v.buffer)
+    if (ArrayBuffer.isView(v)) { if (v.byteLength >= 4096) list.push(v.buffer) } // (small ones are copied: in Chrome `.buffer` of thousands of tiny arrays took up to 2 s a tile)
     else if (v && typeof v === 'object') transferables(v, list)
   }
   return [...new Set(list)]
@@ -583,15 +587,22 @@ function conform(tri, flat) {
   const on = (p, q) => { // a point right inside edge p-q, else -1
     const ax = flat[p * 2], ay = flat[p * 2 + 1], dx = flat[q * 2] - ax, dy = flat[q * 2 + 1] - ay, L = Math.hypot(dx, dy)
     if (L < 1e-6) return -1
-    for (let s = 0; s < L + G / 2; s += G / 2) {
+    let pi = NaN, pj = NaN
+    for (let s = 0; s < L + G; s += G) { // (a point between two samples is within G / 2 of one: in the 3 x 3 cells round it)
       const f = Math.min(1, s / L), ci = Math.floor((ax + dx * f) / G), cj = Math.floor((ay + dy * f) / G)
-      for (let u = -1; u <= 1; u++) for (let v = -1; v <= 1; v++) for (const m of grid.get((ci + u) * 65536 + cj + v) || []) {
-        const px = flat[m * 2] - ax, py = flat[m * 2 + 1] - ay, g = (px * dx + py * dy) / (L * L)
-        if (g > 1e-6 && g < 1 - 1e-6 && Math.abs(px * dy - py * dx) / L < 1e-5) return m
+      for (let u = -1; u <= 1; u++) for (let v = -1; v <= 1; v++) {
+        if (Math.abs(ci + u - pi) <= 1 && Math.abs(cj + v - pj) <= 1) continue // (scanned from the sample before)
+        const l = grid.get((ci + u) * 65536 + cj + v)
+        if (l) for (const m of l) {
+          const px = flat[m * 2] - ax, py = flat[m * 2 + 1] - ay, g = (px * dx + py * dy) / (L * L)
+          if (g > 1e-6 && g < 1 - 1e-6 && Math.abs(px * dy - py * dx) / L < 1e-5) return m
+        }
       }
+      pi = ci; pj = cj
     }
     return -1
   }
+  const np = flat.length / 2, seen = new Map()
   for (let i = 0; i < tri.length; i += 3) {
     const work = [tri[i], tri[i + 1], tri[i + 2]]
     for (let n = 0; work.length; n++) {
@@ -599,7 +610,9 @@ function conform(tri, flat) {
       const w = work.pop(), v = work.pop(), u = work.pop()
       let cut = false
       for (const [p, q, o] of [[u, v, w], [v, w, u], [w, u, v]]) {
-        const m = on(p, q)
+        const k = p < q ? p * np + q : q * np + p // (the triangle across asks the same of its side: half the walks)
+        let m = seen.get(k)
+        if (m === undefined) seen.set(k, (m = on(p, q)))
         if (m < 0) continue
         if (m !== o) work.push(p, m, o, m, q, o) // (o on the edge: a flat triangle, none at all)
         cut = true; break

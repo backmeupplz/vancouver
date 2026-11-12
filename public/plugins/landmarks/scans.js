@@ -141,7 +141,6 @@ export default function scans(city) {
   check()
   const offFrame = city.on('frame', (dt) => { if ((t += dt) > 0.4) { t = 0; check() } })
   const offView = city.on('view', check)
-  for (const r of scanMasks) city.world.suppressBuildings?.(r)
   return {
     dispose() {
       dead = true; offFrame(); offView(); offTile()

@@ -4,7 +4,7 @@
 // per terminal), built once; nothing animates.
 // Map data (c) OpenStreetMap contributors, ODbL. Ground under the bridges: MRDEM (NRCan), OGL-Canada.
 import { mulberry32 as mulberry, inPoly, getJSON } from '../../core/util.js'
-import scans, { scanned } from './scans.js'
+import scans, { scanned, scanMasks } from './scans.js'
 const data = await getJSON(new URL('./data.json', import.meta.url))
 const pairs = (f) => { const o = []; for (let i = 0; i < f.length; i += 2) o.push([f[i], f[i + 1]]); return o }
 
@@ -12,8 +12,10 @@ const pairs = (f) => { const o = []; for (let i = 0; i < f.length; i += 2) o.pus
 // (lat, lon pairs, one every `step` metres from the southern end), `deck` the deck top there in metres above
 // the water under the bridge (MRDEM sea level; `ground` is the MRDEM ground under each point, so a frame
 // whose water sits at W puts the deck at W + deck[i]), `half` the half-width of the deck in metres.
-// Footprints (rings of [lat, lon]) where generic OSM buildings should not be drawn: the landmarks stand there.
+// Footprints (rings of [lat, lon]) where generic OSM buildings should not be drawn: the landmarks and the scans stand
+// there (the host sends them to the tile workers as soon as this module is in, PLUGINS.md)
 export const masks = [
+  ...scanMasks,
   ...Object.entries(data.landmarks).filter(([k]) => k !== 'vancouverhouse').flatMap(([, l]) => l.rings.map(pairs)),
   ...data.landmarks.vancouverhouse.parts.map((p) => pairs(p.r)),
   ...Object.values(data.terminals).flatMap((t) => t.silos.map(pairs)),
@@ -898,7 +900,6 @@ export default function landmarks(city) {
   const offView = city.on('view', showYards)
   showYards()
   for (const o of objs) { o.userData.landmarks = true; city.scene.add(o) }
-  for (const r of masks) city.world.suppressBuildings?.(r)
   const scan = scans(city)
   city.landmarks = { piers }
   city.requestRender()

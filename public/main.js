@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { MapControls } from './vendor/MapControls.js'
-import { createCity, loadPlugins } from './city.js'
+import { createCity, loadPlugins, pluginModules } from './city.js'
 import { Tiles, holed, holedTrees } from './core/tiles.js'
 import { groundMaterial, roadMaterial, buildingMaterial, aoMaterial, treeAtlas, treeMaterial, night, late, surface, occluder } from './core/materials.js'
 import { StreetLights } from './core/lights.js'
@@ -94,9 +94,13 @@ tiles.cached = quality.tier.cached; trees3d.share = quality.tier.trees3d; trees3
 const tileInfo = (t) => ({ level: t.level, i: t.i, j: t.j, ox: t.ox, oy: t.oy, size: t.level ? 4096 : 1024, graph: t.graph, terrain: t.terrain, footprints: t.footprints, overhangs: t.overhangs, signs: t.signs, water: t.water,
   trees: t.trees ? { pos: t.trees.geometry.attributes.iPos.array, size: t.trees.geometry.attributes.iSize.array } : null })
 status('Loading the map…', 0.05)
+const plugins = pluginModules() // (fetched alongside the tiles; started at the end)
 const index = await tiles.init()
 const [LAT_O, LON_O] = index.origin, [KX, KY] = index.k
 const ll = (lat, lon) => [(lon - LON_O) * KX, (lat - LAT_O) * KY]
+// a plugin's exported `masks` (rings of [lat, lon], PLUGINS.md) reach the tile workers before they build, so the tiles
+// under them are built once, without the generic buildings (from the plugin's start they were built twice)
+tiles.holdBuilds(plugins.then((l) => Promise.allSettled(l.map(([, m]) => m.then((m) => { for (const r of m.masks || []) tiles.addMask(r.map(([lat, lon]) => ll(lat, lon))) })))))
 const zAt = (x, n, raw) => tiles.heightAt(x, n, raw)
 
 // ---------- camera ----------
@@ -789,4 +793,4 @@ $('#hint').hidden = false
     else if (!on && placed) { placed = 0; el.style.top = '' }
   }, 100)
 }
-loadPlugins(city)
+loadPlugins(city, plugins)
