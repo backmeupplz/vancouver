@@ -321,7 +321,10 @@ def build(ij):
     sol = [Polygon(o) for _, prs, t in feat.get('areas', []) if t.get('generator:source') == 'solar' for o, _ in prs if len(o) >= 4] \
         + [shapely.geometry.Point(p) for _, p, t in feat.get('nodes', []) if t.get('generator:source') == 'solar']
     tops = (STRtree(polys['pool']) if polys.get('pool') else None, STRtree(sol) if sol else None)
-    builds = buildings(feat.get('buildings', []), dsm, dtm, X0, Y0, rnd, under, shops, ind, STRtree(sl) if sl else None, tops)
+    lots = [p for p in polys.get('parking', []) if p.area >= 600]
+    com = unary_union(polys['commercial']) if polys.get('commercial') else None
+    if com is not None: shapely.prepare(com)
+    builds = buildings(feat.get('buildings', []), dsm, dtm, X0, Y0, rnd, under, shops, ind, STRtree(sl) if sl else None, tops, (STRtree(lots) if lots else None, com))
     fp = Image.new('L', (N, N), 0); dfp = ImageDraw.Draw(fp)
     for b in builds:
         dfp.polygon([pix(*c) for c in b['ring']], fill=1)
@@ -802,7 +805,10 @@ def terrain_grid(dtm, ox, oy, size, n):
 # rooftop plant where the surface shows it. Looks come from OSM tags (material, colours, heritage, shops) and from
 # where in town the building stands.
 # style ids: the page's palettes and facade patterns (public/core/tile-worker.js PALETTES)
-HOUSE, APT, OFFICE, BRICK, COMM, CIVIC, GLASS, CONCRETE, SHED, BIGBOX, STONE, CHARACTER, SPECIAL = range(13)
+from archetype import HOUSE, APT, OFFICE, BRICK, COMM, CIVIC, GLASS, CONCRETE, SHED, BIGBOX, STONE, CHARACTER, SPECIAL
+import archetype as ARCH
+TRACE = os.environ.get('ARCH_TRACE')  # a file the bake appends each building's archetype to (archetype.py validate)
+PITCHED_SLOPE = 0.15  # a house roof whose median LiDAR slope is under this is flat (the plan's 0.25 left a third of East Van's shallow gables flat; real flat roofs read 0.05); bigger buildings keep 0.25
 STYLE = {
     'house': HOUSE, 'detached': HOUSE, 'semidetached_house': HOUSE, 'bungalow': HOUSE, 'cabin': HOUSE, 'garage': HOUSE, 'garages': HOUSE, 'shed': HOUSE, 'terrace': HOUSE,
     'apartments': APT, 'residential': APT, 'dormitory': APT, 'hotel': APT,
@@ -1004,6 +1010,29 @@ def fit_roof(r, z, ok, fx, shape=''):
     return code | bits, float(eaves), float(ridge), float(abs(k))
 
 
+def slope_roof(r, a, z, roofm, only7=False, floor=0.25):
+    """a pitched roof from the LiDAR's slope alone, where no hip or gable fits: (roof byte, eaves, ridge, pitch) or None.
+    A near-rectangular outline gets the box hip (2, or 3 pyramidal); any other a hip by inset (7: the page insets the outline)"""
+    gy, gx = np.gradient(z, HR)
+    g = np.hypot(gx, gy)
+    m = ndimage.binary_erosion(roofm)
+    if m.sum() < 6: m = roofm
+    if m.sum() < 3: return None
+    s = float(np.median(g[m]))
+    if not np.isfinite(s) or s < floor: return None
+    zz = z[roofm]
+    eaves = float(np.clip(pct(zz, 20), 2.4, 9)); pitch = float(np.clip(s, 0.3, 0.8))
+    _, _, _, hl, hw, ar = obb(r)
+    if a > 0.8 * ar and not only7 and hw >= 2:
+        code = 3 if hl / hw < 1.15 else 2
+        ridge = min(float(pct(zz, 97)), eaves + pitch * hw)
+    else:
+        per = sum(math.hypot(r[k][0] - r[k - 1][0], r[k][1] - r[k - 1][1]) for k in range(len(r)))
+        code, ridge = 7, eaves + pitch * 0.55 * 2 * a / per
+    if ridge - eaves < 0.8: return None
+    return code, eaves, float(ridge), pitch
+
+
 def roof_units(z, part, h, fx, ang, hidden):
     """rooftop plant, lift overruns and stair towers: small blobs standing 1-6 m proud of a flat roof, away from its
     edge (an overhanging tree crown touches the edge). -> [(x, y, along, across, height, angle)]"""
@@ -1097,6 +1126,9 @@ def from_lidar(r, a, z, ok, fx, shape, rnd, roofm):
     return parts
 
 
+FLATTYPES = ('retail', 'commercial', 'industrial', 'warehouse', 'supermarket', 'parking', 'garage', 'garages', 'carport', 'roof')
+
+
 def house_kind(info, main):
     """Vancouver's two classic houses, told apart by their roofs: the character house (1900s-1930s, steep gables, wood
     siding, a porch) and the Vancouver Special (1965-85, two storeys, a shallow gable, stucco over a brick base)"""
@@ -1140,7 +1172,7 @@ def style_of(info, h, rnd, kind):
     if s == SHED or info['ind'] and a > 300 and h < 20 and s in (None, COMM): return SHED
     if (btype in ('retail', 'commercial', 'supermarket') or t.get('shop') in ('mall', 'supermarket', 'department_store', 'doityourself', 'wholesale')) and a > 2500 and h < 16:
         return BIGBOX
-    if s is None: s = HOUSE if h < 9 else APT if h > 14 else COMM
+    if s is None: s = HOUSE if h < 9 and a < 450 else APT if h > 14 else COMM  # (a big `yes` is not a house)
     if s == APT and h > 24 and btype != 'hotel':
         p = {'core': 0.9, 'westend': 0.2}.get(zn, 0.55)
         if year: p = 0.0 if year < 1985 else 1.0 if year >= 1995 else p
@@ -1160,9 +1192,9 @@ def floor_h(style, top, lv, shop):
     return FLOOR.get(style, 2.9)
 
 
-def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, streets=None, tops=(None, None)):
+def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, streets=None, tops=(None, None), land=(None, None)):
     """under: bridge decks overhead (bridge_mask); shops: STRtree of shop/office points; ind: industrial land;
-    streets: STRtree of street lines (which way a house faces); tops: STRtrees of outdoor pools and solar panels (roof_bits)"""
+    streets: STRtree of street lines (which way a house faces); land: (STRtree of car parks of 600 m2 or more, commercial land); tops: STRtrees of outdoor pools and solar panels (roof_bits)"""
     N = dtm.shape[0]
     pix = lambda x, y: ((x - X0) / HR, (Y0 + L1 - y) / HR)
     own = lambda c: X0 <= c[0] < X0 + L1 and Y0 <= c[1] < Y0 + L1
@@ -1249,7 +1281,17 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
                     fac=fac, year=start_year(t) or fac.get('year') or None, ring=r)
         gid = rnd.randrange(1, 1 << 30)
         parts = [dict(ring=r, h=cap, mn=0, roof=0, ridge=0, pitch=0, units=None, cap=True)] if cap else None  # under its parts
+        # a pitched roof on every low building that has one, before the LiDAR massing (a 3-storey house keeps its roof)
         ms = massing_lookup(r) if not mn and not cap else None  # tools/lidar_massing.py: the 2022 LiDAR's own massing, where it has one
+        if not is_part and not cap and not mn and chm is not None and len(chm) and not (ms and max(p['ridge'] or p['h'] for p in ms) >= 12.5):  # (its massing says it is not a house)
+            p97 = float(pct(chm, 97))
+            houseish = a < 700 and p97 < 12 and zone(c) not in ('historic', 'core', 'granville') and btype not in FLATTYPES and shape in ('', 'gabled', 'hipped', 'pyramidal', 'half-hipped', 'gambrel')
+            # (p97 under 12, not the plan's 14: at 14 m a 4-storey Gastown brick block became a character house with a shed roof)
+            block = 700 <= a < 5000 and p97 < 16 and btype in ('apartments', 'residential', 'terrace', 'dormitory', 'house') and shape in ('', 'gabled', 'hipped', 'pyramidal', 'half-hipped', 'gambrel')
+            f = fit_roof(r, z, roofm, fx, shape) or slope_roof(r, a, z, roofm, floor=PITCHED_SLOPE if a < 400 else 0.25) if houseish else slope_roof(r, a, z, roofm, True) if block else None
+            if f and not (tag_h and abs(tag_h - f[2]) > max(6, 0.3 * tag_h)):
+                parts = [dict(ring=r, h=f[1], mn=0, roof=f[0], ridge=f[2], pitch=f[3], units=[])]
+        if parts is not None: ms = None
         if ms and not parts and not (tag_h and abs(tag_h - max(p['ridge'] or p['h'] for p in ms)) > max(6, 0.3 * tag_h)):
             parts = [dict(p, pitch=0, m22=True) for p in ms]
         if parts is None and chm is not None and not is_part and not mn and pct(chm, 90) > 2.2:
@@ -1288,6 +1330,22 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
         kind = house_kind(info, main)
         style = style_of(info, top, rnd, kind)
         shop = info['shop'] and style not in (HOUSE, CHARACTER, SPECIAL, SHED) and top >= 5
+        # archetype (tools/archetype.py): type x era from the data, with its colours
+        gid = main['gid']
+        cx_, cy_, _, hl_, hw_, _ = obb(main['ring'])
+        big = style not in (HOUSE, CHARACTER, SPECIAL) and top < 8.5 and info['a'] > 350
+        lot = bool(big and land[0] is not None and len(land[0].query(Polygon(main['ring']).buffer(12), predicate='intersects')))
+        comm = bool(big and land[1] is not None and shapely.contains_xy(land[1], cx_, cy_))
+        am = dict(main, aspect=hl_ / max(hw_, 0.1))
+        shop_ = info['shop'] and style not in (HOUSE, CHARACTER, SPECIAL, SHED) and top >= 5
+        arch, era, _, aflags = ARCH.archetype(dict(info, shop=shop_), am, top, style, lot, comm)
+        awall, atrim = ARCH.finish(arch, era, gid, aflags)
+        if TRACE:
+            blind = dict(info, year=None, fac=dict(fac_ for fac_ in info['fac'].items() if fac_[0] != 'year'))
+            style_n = style_of(blind, top, random.Random(0), house_kind(blind, main))  # (the year hidden from the style too)
+            n_, en_, _, _ = ARCH.archetype(dict(blind, shop=shop_), am, top, style_n, lot, comm, noyear={ARCH.CRAFTSMAN, ARCH.SPECIAL_A, ARCH.BUNGALOW, ARCH.BUILDER})
+            with open(TRACE, 'a') as f_:
+                f_.write(json.dumps(dict(px=round(cx_), py=round(cy_), a=arch, n=n_, en=en_, year=info['year'] or 0, house=style in (HOUSE, CHARACTER, SPECIAL))) + '\n')
         tagc = colour(t.get('roof:colour'))
         matc = ROOF_MAT.get((t.get('roof:material') or '').lower(), 0) and ROOF_MAT[t['roof:material'].lower()] | 0x1000000
         mainc = 0 if tagc else photo_roof(main)
@@ -1298,6 +1356,7 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
         # is the sky in it), else the palette
         wall = colour(t.get('building:colour'))
         if not wall and fac.get('wall') and (fac['wsrc'] == 2 or style not in (GLASS, OFFICE)): wall = fac['wall'] | 0x1000000
+        if not wall and awall: wall = awall | 0x1000000
         if not wall and info['zone'] == 'granville' and style == SHED:  # Granville Island's painted tin
             wall = rnd.choice((0xb84a3a, 0xd8a838, 0x3a6a9a, 0x4a7a5a, 0x8a8c8e, 0xc86a3a, 0x5a8aa0)) | 0x1000000
         res = info['btype'] != 'hotel' and (style in (APT, GLASS) or style == CONCRETE and info['btype'] in RESID and top > 24)
@@ -1307,8 +1366,11 @@ def buildings(items, dsm, dtm, X0, Y0, rnd, under=None, shops=None, ind=None, st
             ps.append(porch(main, streets))
         for p in ps:  # roof colour: the mapper's, else the 2022 photo's (this part's, else the building's), else the material's
             roofc = tagc or (photo_roof(p) if p is not main else mainc) or mainc or matc
+            if not roofc and arch:
+                rc_ = ARCH.roof_colour(arch, p['roof'], gid)
+                roofc = rc_ | 0x1000000 if rc_ else 0
             p['fd'] = edge_looks(p['ring'], p['mn'] or 0, p['h'], walls_near(p['ring']), fac.get('pattern'))  # each wall's look (tools/lidar_walls.py)
-            p.update(style=style, wall=wall, roofc=roofc, fh=fh, shop=shop, res=res, gh=gh, fx=fx, rb=roof_bits(p, t, *tops), ring=inset(p['ring'], d), h=p['h'] + rnd.random() * 0.1)
+            p.update(arch=arch, era=era, atrim=atrim, aflags=aflags, style=style, wall=wall, roofc=roofc, fh=fh, shop=shop, res=res, gh=gh, fx=fx, rb=roof_bits(p, t, *tops), ring=inset(p['ring'], d), h=p['h'] + rnd.random() * 0.1)
             del p['info']
     return out
 
@@ -1446,6 +1508,7 @@ def apply_sections(out, X0, Y0, rnd, measure, under):
         cov = sum(ring_area(s[0]) for s in segs) / max(1.0, b['a'])
         top = max(s[1] for s in segs)
         if cov < 0.6 or b['mn'] > 0 or abs(top - gh) > max(6, 0.3 * gh): continue  # rebuilt since 2009, or a mismatch
+        if b['roof'] and gh < 11 and len(segs) == 1 and cov > 0.8: continue  # one section, and a house that already has the pitched roof its LiDAR fits
         new = []
         for r, hg, rt in segs:
             p = dict(b, ring=r, h=hg, roof=0, ridge=0, mn=0, pitch=0, units=b['units'] if b['units'] is None else [], a=ring_area(r))
@@ -2887,7 +2950,7 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
         tun = [(n, L['tube']) for n, L in enumerate(sel) if L.get('tube') and L['z']]
         out.section('TUNL', struct.pack('<I', len(tun)) + b''.join(struct.pack('<I', n) + bytes(c) for n, c in tun))
     # buildings: compact header, optional fields behind flags
-    bb = bytearray(); nb = 0; fb = bytearray()
+    bb = bytearray(); nb = 0; fb = bytearray(); ab = bytearray()
     for b in builds:
         r = b['ring']
         c = b.get('centre') or b.setdefault('centre', (sum(p[0] for p in r) / len(r), sum(p[1] for p in r) / len(r)))  # once, not per tile
@@ -2923,6 +2986,7 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
                 bb += struct.pack('<hhBBBB', *out.q(x, y), int(min(255, su * 10)), int(min(255, sv * 10)), int(min(255, uh * 20)), int((ang % math.pi) / math.pi * 256) & 255)
         bb += pack_ring(out, r)
         nb += 1
+        ab += bytes([b.get('arch', 0) | b.get('era', 0) << 4, b.get('atrim', 0) | b.get('aflags', 0) << 3])  # BARC: archetype, era, trim, flags
         # each wall's own look (tools/lidar_walls.py), in the FACD section: per building its wall count (0: none) and 4
         # bytes a wall, the ring counter-clockwise as the page draws it
         fd = b.get('fd') if detail and r is b['ring'] else None
@@ -2933,6 +2997,7 @@ def write_tile(out, tx, ty, size, terr, polys, lines, builds, trees, detail, wat
         else: fb += b'\0'
     out.section('BLDG', struct.pack('<I', nb) + bytes(bb))
     if detail: out.section('FACD', bytes(fb))
+    out.section('BARC', bytes(ab))  # 2 bytes a building, BLDG's order: arch | era << 4, trim | flags << 3 (tools/archetype.py)
     tr_ = bytearray(); nt = 0
     for x, y, shape, col, h in trees:
         if not (tx <= x < tx + size and ty <= y < ty + size): continue

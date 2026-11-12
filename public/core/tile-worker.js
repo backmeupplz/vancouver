@@ -1358,6 +1358,12 @@ function buildings(t, terr, level, lines, carriage, lot) {
     if (k && k === recs[bi].pts.length) recs[bi].looks = new Uint8Array(t.buf, q, k * 4)
     q += k * 4
   }
+  // the baked archetype (tools/archetype.py, BARC: 2 bytes a building: arch | era << 4, trim | flags << 3); old tiles have none
+  const bs = t.sections.BARC
+  if (bs && detail && bs.len >= n * 2) for (let bi = 0; bi < n; bi++) {
+    const b0 = dv.getUint8(bs.off + bi * 2), b1 = dv.getUint8(bs.off + bi * 2 + 1)
+    recs[bi].barc = { arch: b0 & 15, era: b0 >> 4, trim: b1 & 7, aflags: b1 >> 3 }
+  }
   // which walls a neighbour covers (party walls: windowless), from every footprint of the tile (detail tiles)
   const G = 16, grid = new Map(), gk = (i, j) => i * 4096 + j
   if (detail) for (const b of recs) {
@@ -1368,7 +1374,7 @@ function buildings(t, terr, level, lines, carriage, lot) {
   // neighbour standing beside it (not one overlapping it: a part over a bigger outline, a duplicate)
   const covered = (self, x, y, ix, iy, y0, y1) => grid.get(gk(Math.floor(x / G), Math.floor(y / G)))?.some((b) => b !== self && b.base + b.mn < y0 + 2 && b.base + b.h >= y0 + 0.6 * (y1 - y0) && inPoly(x, y, b.pts) && !inPoly(ix, iy, b.pts))
   for (const rec of recs) {
-    const { fl, style0, base, h, mn, roofShape, roofBits, ridge, wallHex, roofHex, gH, fh, bits, fx, facing, plant, pts, looks } = rec
+    const { fl, style0, base, h, mn, roofShape, roofBits, ridge, wallHex, roofHex, gH, fh, bits, fx, facing, plant, pts, looks, barc } = rec
     let { gid } = rec
     const np = pts.length
     if (MASKS.length) {
@@ -1408,16 +1414,21 @@ function buildings(t, terr, level, lines, carriage, lot) {
     const style1 = style, parea = area(pts), flatTop = !roofShape || !ridge || ridge <= h
     const shopEdges = (front || style0 === 0 && parea > 500 && flatTop) && carriage ? pts.map((a, i) => { const p = pts[(i + 1) % np]; return streetSide(a, p, carriage) || (lot && streetSide(a, p, lot, 12)) }) : null
     let arch = 0
-    if (detail && !(fx >> 4) && style > 0) {
+    // baked: 1 craftsman (siding), 2 bungalow 4 builder 5 contemporary 6 row (stucco), 3 Special, 7 walk-up, 8 mid-rise, 12 heritage, 13 main street, 14 strip.
+    // A house the bake knows no era for (no year: it is 0) keeps the guess's house walls; every other 0 is "none"
+    if (barc?.arch && !(fx >> 4) && style > 0) arch = BARC_ARCH[barc.arch]
+    else if (detail && !(fx >> 4) && style > 0) {
       if (style0 === 11) arch = 1
       else if (style0 === 12) arch = 3
       else if (style0 === 0 && parea < 450 && h - mn >= 2.5 && mn < 0.5) arch = style === 5 ? 1 : 2
+      else if (barc) arch = 0
       else if (style0 === 0 && parea > 500 && flatTop && shopEdges?.some((e) => e)) arch = 14
       else if ((style0 === 1 || style0 === 7) && bits & 2 && gH >= 5) arch = gH < 14 ? 7 : gH < 24 ? 8 : 0
       else if ((style0 === 3 || style0 === 10) && gH < 45) arch = 12
       else if (style0 === 4 && bits & 1 && gH < 8 && shopEdges) arch = 13
     }
-    const trim = [0, 0, 0, 1, 2, 6][Math.floor(seed * 6)]
+    if (barc && arch >= 13 && !(arch === 14 ? shopEdges?.some((e) => e) : shopEdges)) arch = 0 // (a shop front needs a street to face, as the guess did)
+    const trim = barc ? barc.trim : [0, 0, 0, 1, 2, 6][Math.floor(seed * 6)]
     if (arch === 1 || arch === 2) style = 21
     else if (arch === 7 || arch === 8) style = 22
     else if (arch === 12) style = 23
@@ -2046,6 +2057,7 @@ function pack(B) {
 }
 // the wall look (tools/lidar_walls.py's 4 bytes) the triangles being added carry: materials.js aFac
 // the trim colours of the wall patterns (materials.js TRIM: keep in step); a building's own comes from its seed
+const BARC_ARCH = [0, 1, 2, 3, 2, 2, 2, 7, 8, 0, 0, 0, 12, 13, 14, 0] // the baked archetype -> the page's (towers and tilt-ups keep their style's look)
 const TRIM = [0xf2f0ea, 0xe8e2d0, 0x3a3d40, 0x5a4634, 0x2f3e36, 0x7a2f2a, 0xc8ccd0, 0x8a8f94]
 const NOFAC = [0, 0, 0, 0]
 let FAC = NOFAC
@@ -2066,6 +2078,7 @@ function quad(B, a, b, c, d, col, want, wa, wb, wc, wd) {
 // pitched roofs over the footprint's rectangle: gable (ridge along the long side, or across it with bit 16), hipped,
 // pyramidal, shed (high side flipped with bit 32), domes
 function roof(W, pts, y1, yr, shape, bits, rc, wall, seed, trimC) {
+  if (shape === 7 && !hipByInset(W, pts, y1, yr, rc, seed, trimC)) shape = 2 // (an old page draws 7 as the box hip, which is also the fallback)
   const o = obb(pts), O = 0.45
   let { cx, cy, a, hl, hw } = o
   a = ((a % Math.PI) + Math.PI) % Math.PI // the same frame as tools/tiles.py fit_roof, so "+v" means the same side
@@ -2132,6 +2145,32 @@ function obb(pts) {
   let hl = (u1 - u0) / 2, hw = (v1 - v0) / 2, ang = a
   if (hw > hl) { [hl, hw] = [hw, hl]; ang += Math.PI / 2 }
   return { cx: uc * Math.cos(a) - vc * Math.sin(a), cy: uc * Math.sin(a) + vc * Math.cos(a), a: ang, hl, hw }
+}
+// shape 7, a hip by inset (tools/tiles.py slope_roof): every wall's slope runs up to the outline inset by D = 0.55 x the
+// outline's inradius estimate (2 area / perimeter), and a flat cap closes it. False (nothing drawn) if the inset turned
+// inside out, so the caller draws the box hip
+function hipByInset(W, pts, y1, yr, rc, seed, trimC) {
+  const n = pts.length, A = area(pts)
+  if (n < 3 || A <= 0) return false
+  let per = 0
+  for (let i = 0; i < n; i++) per += Math.hypot(pts[(i + 1) % n][0] - pts[i][0], pts[(i + 1) % n][1] - pts[i][1])
+  const D = (0.55 * 2 * A) / per
+  const ring = offset(pts.slice().reverse(), D).reverse() // (offset grows a counter-clockwise outline: shrink it as a clockwise one)
+  if (!(area(ring) > 0.02 * A && area(ring) < A)) return false
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n], c = ring[i], d = ring[(i + 1) % n]
+    if ((b[0] - a[0]) * (d[0] - c[0]) + (b[1] - a[1]) * (d[1] - c[1]) <= 0) return false
+  }
+  const pw = ROOFW(seed)
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n], c = ring[i], d = ring[(i + 1) % n], len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1
+    const nrm = [(b[1] - a[1]) / len, 0.8, (b[0] - a[0]) / len]
+    quad(W, [a[0], y1, -a[1]], [b[0], y1, -b[1]], [d[0], yr, -d[1]], [c[0], yr, -c[1]], rc, nrm, pw)
+    if (trimC) quad(W, [a[0], y1, -a[1]], [b[0], y1, -b[1]], [b[0], y1 - 0.22, -b[1]], [a[0], y1 - 0.22, -a[1]], trimC, [nrm[0], 0, nrm[2]], pw)
+  }
+  const tris = earcut2(ring)
+  for (let i = 0; i < tris.length; i += 3) { const P = ring[tris[i]], Q = ring[tris[i + 1]], R = ring[tris[i + 2]]; tri(W, [P[0], yr, -P[1]], [Q[0], yr, -Q[1]], [R[0], yr, -R[1]], rc, [0, 1, 0], pw) }
+  return true
 }
 function offset(pts, D) {
   const n = pts.length
