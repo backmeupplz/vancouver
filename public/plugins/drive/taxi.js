@@ -627,7 +627,7 @@ export function taxiGame(ctx, choice) {
       countT += dt
       car.parked = true
       const n = 3 - Math.floor(countT / 0.8)
-      if (n !== S.n) { S.n = n; if (n > 0) { banner(String(n)); beep(440) } else { banner('Go!'); beep(880, 0.4) } }
+      if (n !== S.n) { S.n = n; if (n > 0) { banner(String(n)); beep(440) } else { banner('Go!'); beep(880, 0.4); city.progress?.run('taxi') } }
       if (countT > 2.4) { state = 'play'; car.parked = false }
     } else if (state === 'play') {
       S.time -= dt

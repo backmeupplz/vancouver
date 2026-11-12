@@ -231,11 +231,21 @@ throws). Everything is kept in `localStorage` (`progress.v1`); no accounts. **Th
   `+$amount`); `quiet: true` never toasts (use it for a stream of small awards; awards that do toast add up in one pop while it is on screen);
   `score` (with optional `board`, default `kind`) also reports a finished run, see `score()`.
   Award when the thing happens, not per frame: at most a few calls a second.
-- `city.progress.score(board, value)` → `true` when it is the player's best. A finished run's score for the
+- `city.progress.run(board)` → a ticket `{ board, n, live }`. Call it **when a scored run starts** (delivery: first pickup,
+  taxi: "Go!", bus: shift start, sail/dock: `startRace`, a per-day board like `d-dash`: "Go"). The live server starts its own
+  clock for that board and answers `{t:'ticket', board, n}` (`n` fills in a moment later, `live` is false offline). One
+  ticket per board; a new `run` replaces it; single use.
+- `city.progress.ghost(board)` → Promise of `{ name, v, pts: [[x, z, heading], …] }` (a sample a second, multiplayer world
+  x, z and heading) for today's best run of a per-day board, or `null` (none, offline).
+- `city.progress.score(board, value, { ticket, ghost })` → `true` when it is the player's best. A finished run's score for the
   leaderboard `board` (`[a-z][a-z0-9-]{0,15}`; in use: `delivery` cash in one shift, `taxi` fares in one Rush Fare run,
   `bus` a bus shift's score, `sail` a race's points, `hike` metres climbed in one hike, `fish` the biggest fish in mm; new ones just appear in the
   panel). An integer 0–10 000 000, **higher is better** (for a time, pass points that fall with the seconds). Call it
-  once, when the run ends. The best is kept locally and sent to the live server (name from the multiplayer plugin).
+  once, when the run ends. The best is kept locally. With a ticket (`run()` before it, or `opts.ticket`) the run is sent to the live
+  server with its `n`; without one (offline, or `run()` was never called) it stays local, except `fish`, which needs none. The server
+  checks the ticket (below). `ghost` (per-day boards only, `d-*`): `[[x, z, heading], …]` one sample a second, at most 241; it is
+  uploaded only when the board then shows this run as the day's best. The Top tab shows Today / All-time for `d-*` boards, the
+  player's own row, and unverified rows (old pages, no ticket) dimmed below the verified ones.
   Give your results card the attribute `data-results`: the first score posted under a generated name ("Heron 44")
   adds one line there offering to choose a username (`city.multiplayer.profile()`; `.chosen` says whether one is set).
   The username prompt never opens by itself during play: the chat, the progress panel and that line offer it.
@@ -254,8 +264,17 @@ throws). Everything is kept in `localStorage` (`progress.v1`); no accounts. **Th
   `'progress:unlock'` `({ id, name })`, `'progress:collect'` `({ id, name, area })`, `'progress:choice'` `(slot)`.
 
 Collectibles (the hidden maple leaves all over the map) are picked up by `city.player` coming within a few metres,
-in any mode: games need to do nothing for them. Scores go to the live server as `{t:'score', board, v}` through
-`city.multiplayer.send` and come back from `GET /live/boards` (server/src/world.rs).
+in any mode: games need to do nothing for them. Runs and scores go to the live server as `{t:'run', board}` →
+`{t:'ticket', board, n}` and `{t:'score', board, v, n}` through `city.multiplayer.send`, and come back from `GET /live/boards`
+(`{day, boards: {board: [{name, chosen, v, ok}]}, all: {…}}`: `boards` is today's for `daily` and `d-*`, all-time for the rest;
+`all` every all-time board; `ok: false` = unverified) (server/src/world.rs, `RULES`). The server drops, silently, a score that is
+over the board's max, has no ticket (or a spent, stale, wrong-`n` one; a missing ticket is accepted as unverified until the
+server runs with `REQUIRE_TICKETS=1`), came sooner than the board's minimum after its ticket, or is more than the board pays
+for that long: `delivery` 120 s, max 1500, ≤ 8/s; `taxi` 45 s, 5000, ≤ 6/s + 50; `bus` 120 s, 1000; `sail` 60 s, 2000; `dock` 20 s,
+2000; `hike` 60 s, 1200, ≤ 1.2/s; `d-dash` (v = 600000 − ms) 40 s, ≤ 602000 − 1000·elapsed; `fish` max 4000, `daily` max
+3 999 999 with v % 10⁶ ≤ 20 000: no ticket. Other boards: max 100 000, unverified. A new scored board = a `RULES` row. Ghosts:
+`POST /live/ghost?board=d-dash` (header `x-token`, binary body, see `ghost_ok`; only the day's verified top score's owner, one a
+30 s per address) and `GET /live/ghost?board=` (`x-name` percent-encoded, `x-v`; 404 when none). Check: `node tools/boards_check.mjs`.
 
 ## Fishing
 

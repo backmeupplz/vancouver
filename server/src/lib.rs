@@ -1,7 +1,8 @@
 //! HTTP and WebSocket front of the live service. Routes answer both with and without the `/live`
 //! prefix, so it works whether or not the proxy strips it:
 //!   GET /live/stats   {now, day, week}
-//!   GET /live/boards  {day, boards: {name: [{name, chosen, v}]}}: the leaderboards' top 10 (scores come in over the socket)
+//!   GET /live/boards  {day, boards: {name: [{name, chosen, v, ok}]}, all: {...}}: the leaderboards' top 10 (scores come in over the socket)
+//!   GET|POST /live/ghost?board=d-dash  the day's best run's path (a blob, see world::ghost_ok; POST needs x-token)
 //!   GET /live/ws      WebSocket: presence (counts as a visit), multiplayer and chat (see world.rs)
 //!   GET /live/health  ok
 pub mod db;
@@ -11,6 +12,7 @@ pub mod world;
 use axum::Router;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
+use axum::extract::{DefaultBodyLimit, Query};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -51,6 +53,7 @@ impl App {
 pub fn router(cfg: Config) -> Router {
     let db = db::Db::open(&cfg.db).expect("opening the database");
     let mut world = World::new(db, cfg.max_per_ip);
+    world.require_tickets = std::env::var("REQUIRE_TICKETS").is_ok_and(|v| v == "1");
     world.hold = cfg.hold.iter().map(|n| text::name_key(n)).filter(|k| !k.is_empty()).collect();
     let app = App { world: Arc::new(Mutex::new(world)), origins: Arc::new(cfg.origins), ip_key: rand::random() };
     let w = app.world.clone();
@@ -62,7 +65,7 @@ pub fn router(cfg: Config) -> Router {
             w.lock().unwrap_or_else(|e| e.into_inner()).tick(Instant::now());
         }
     });
-    let routes = Router::new().route("/stats", get(stats)).route("/boards", get(boards)).route("/ws", get(ws)).route("/health", get(|| async { "ok" }));
+    let routes = Router::new().route("/stats", get(stats)).route("/boards", get(boards)).route("/ghost", get(ghost_get).post(ghost_post).options(|| async { ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"), (header::ACCESS_CONTROL_ALLOW_HEADERS, "x-token"), (header::ACCESS_CONTROL_ALLOW_METHODS, "POST")], StatusCode::NO_CONTENT) }).layer(DefaultBodyLimit::max(4096))).route("/ws", get(ws)).route("/health", get(|| async { "ok" }));
     Router::new().nest("/live", routes.clone()).merge(routes).with_state(app)
 }
 
@@ -90,6 +93,42 @@ async fn boards(State(app): State<App>) -> Response {
 }
 
 /// The visitor's address as the proxy saw it (Tugport sets X-Real-IP), else the socket's.
+#[derive(serde::Deserialize)]
+struct GhostQ {
+    board: String,
+}
+
+async fn ghost_get(State(app): State<App>, Query(q): Query<GhostQ>) -> Response {
+    let cors = (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+    let g = app.world().ghost_get(&q.board);
+    match g {
+        Some((name, v, blob)) => {
+            let mut h = HeaderMap::new();
+            for (k, val) in [("cache-control", "max-age=5".to_string()), ("content-type", "application/octet-stream".into()), ("access-control-expose-headers", "x-name, x-v".into()), ("x-name", urlenc(&name)), ("x-v", v.to_string())] {
+                h.insert(header::HeaderName::from_static(k), header::HeaderValue::from_str(&val).unwrap());
+            }
+            ([cors], h, blob).into_response()
+        }
+        None => ([cors], StatusCode::NOT_FOUND).into_response(),
+    }
+}
+
+/// Names are plain text, but a header must be ASCII: percent-encoded.
+fn urlenc(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+async fn ghost_post(State(app): State<App>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Query(q): Query<GhostQ>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    if !origin_ok(&headers, &app.origins) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let ip = real_ip(&headers, peer);
+    let key = u64::from_le_bytes(Sha256::new().chain_update(app.ip_key).chain_update(ip.as_bytes()).finalize()[..8].try_into().unwrap());
+    let token = headers.get("x-token").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let code = app.world().ghost_put(token, &q.board, &body, key, Instant::now());
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], StatusCode::from_u16(code).unwrap()).into_response()
+}
+
 fn real_ip(h: &HeaderMap, peer: SocketAddr) -> String {
     let header = |k: &str| h.get(k).and_then(|v| v.to_str().ok()).map(|v| v.split(',').next().unwrap_or("").trim().to_string()).filter(|v| !v.is_empty());
     header("x-real-ip").or_else(|| header("x-forwarded-for")).unwrap_or_else(|| peer.ip().to_string())

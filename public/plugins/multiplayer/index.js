@@ -479,6 +479,7 @@ export default function multiplayer(city) {
       case 'join': join(m); break
       case 'leave': { const p = roster.get(m.s); if (p) { drop3d(p); dropMark(p); roster.delete(m.s) } break }
       case 'chat': addLine(m); break
+      case 'ticket': city.emit('live:ticket', m); break
       case 'you': you(m); break
       case 'check': onCheck(m); break
       case 'stats': showStats(m.stats); break
@@ -707,6 +708,7 @@ export default function multiplayer(city) {
     },
     get connected() { return connected },
     get name() { return me.name },
+    get token() { return store.get('token', undefined) }, // signs the ghost upload (progress)
     get chosen() { return !!me.chosen }, // false: still the generated name
     profile() { toggleChat(true, 'profile') }, // the profile view, where the username is chosen (the progress plugin offers it)
     send: out, // a message for the live server (the progress plugin's scores)

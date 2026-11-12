@@ -19,8 +19,9 @@
 //!   text   {"t":"check","name"}                          is this username free? (debounce it: ≤ 4/s)
 //!   text   {"t":"chat","ch":"g"|"n","text"}              global, or players within 1.5 km
 //!   text   {"t":"block","id"} / {"t":"unblock","id"}
-//!   text   {"t":"score","board","v"}                     a finished run's score (kept if it is their best; the
-//!                                                        board "daily" is per day); read them at GET /live/boards
+//!   text   {"t":"run","board"}                           a scored run starts: answered {"t":"ticket","board","n"} (see RULES)
+//!   text   {"t":"score","board","v","n"?}                 a finished run's score, with the ticket's n (kept if it is their best; per-day boards
+//!                                                        (daily, d-*) also keep each day's best); read them at GET /live/boards
 //!   binary [1][mode u8: 0 stopped, 1 car, 2 foot, 3 boat, 4 bus][x f32][y f32][z f32][heading i16 ×1e4][speed i16 ×100]   ≤ 10 Hz while playing
 //! server → client
 //!   text   {"t":"welcome","s","id","token","name","chosen","colour","blocks":[id],"players":[{s,id,name,chosen,colour}],"chat":[…],"stats"}
@@ -161,6 +162,8 @@ pub struct Client {
     blocking: Bucket,
     teleports: Bucket,
     scores: Bucket,
+    run_rl: Bucket,
+    runs: HashMap<String, (Instant, String)>, // run tickets by board: (server clock at the start, nonce); single use
     strikes: u32,
     strikes_at: Instant,
     last_chat: Option<(String, Instant)>,
@@ -200,7 +203,8 @@ enum In {
     Chat { ch: String, text: String },
     Block { id: String },
     Unblock { id: String },
-    Score { board: String, v: i64 },
+    Score { board: String, v: i64, n: Option<String> },
+    Run { board: String },
 }
 
 struct Line {
@@ -224,9 +228,90 @@ pub struct World {
     coarse_empty: bool,
     sent_now: usize,
     boards: Option<(String, Instant)>,
+    /// seconds added to the clock (tests turn the day over with it)
+    pub skew: i64,
+    /// scored runs without a valid ticket are dropped (off while old pages are around; env REQUIRE_TICKETS)
+    pub require_tickets: bool,
+    ip_rl: HashMap<(u64, u8), Bucket>, // per (hashed address, kind) limits for tickets, scores and ghosts; memory only
 }
 
+/// What a scored board accepts. `per_sec` bounds v by `per_sec * elapsed + base`; `timed` boards (v falls with the
+/// seconds, v = 600000 - ms) bound it by 600000 - 1000 * elapsed + 2000; `low` caps v % 1_000_000.
+#[derive(Clone, Copy)]
+pub struct Rule {
+    pub min_secs: u64,
+    pub max: i64,
+    pub per_sec: f32,
+    pub base: i64,
+    pub timed: bool,
+    pub ticket: bool,
+    pub low: i64,
+}
+const R0: Rule = Rule { min_secs: 0, max: 0, per_sec: 0.0, base: 0, timed: false, ticket: true, low: 0 };
+pub const RULES: &[(&str, Rule)] = &[
+    ("delivery", Rule { min_secs: 120, max: 1_500, per_sec: 8.0, ..R0 }),
+    ("taxi", Rule { min_secs: 45, max: 5_000, per_sec: 6.0, base: 50, ..R0 }),
+    ("bus", Rule { min_secs: 120, max: 1_000, ..R0 }),
+    ("sail", Rule { min_secs: 60, max: 2_000, ..R0 }),
+    ("dock", Rule { min_secs: 20, max: 2_000, ..R0 }),
+    ("hike", Rule { min_secs: 60, max: 1_200, per_sec: 1.2, ..R0 }),
+    ("fish", Rule { max: 4_000, ticket: false, ..R0 }),
+    ("daily", Rule { max: 3_999_999, ticket: false, low: 20_000, ..R0 }),
+    ("d-dash", Rule { min_secs: 40, max: 600_000, timed: true, ..R0 }),
+];
+pub fn rule(board: &str) -> Option<&'static Rule> {
+    RULES.iter().find(|(b, _)| *b == board).map(|(_, r)| r)
+}
+/// Boards that turn over at midnight (the day's best, plus an all-time best for the d-* ones).
+pub fn per_day(board: &str) -> bool {
+    board == "daily" || board.starts_with("d-")
+}
+const MAX_AGE: f32 = 3.0 * 3600.0; // a ticket older than this is stale
+const MAX_TICKETS: usize = 8;
+
 pub const MAX_SCORE: i64 = 10_000_000;
+
+fn named(board: &str) -> bool {
+    !board.is_empty() && board.len() <= 16 && board.bytes().enumerate().all(|(i, b)| b.is_ascii_lowercase() || (i > 0 && (b.is_ascii_digit() || b == b'-')))
+}
+
+/// A ghost blob (little endian): `[v i32][n u16][x0 f32][z0 f32]` then n × `[dx i16][dz i16][heading i8]` (decimetres from
+/// the previous sample, one a second; the heading is radians × 127 / π). The shape, the length for the score's time
+/// (a timed board's v = 600000 - ms: n within 40 %..100 % of that many seconds, plus 3), every step at most 45 m and
+/// every point inside EXTENT. Returns its score.
+pub fn ghost_ok(b: &[u8]) -> Option<i64> {
+    if b.len() < 14 || b.len() > 2048 {
+        return None;
+    }
+    let v = i32::from_le_bytes(b[0..4].try_into().ok()?) as i64;
+    let n = u16::from_le_bytes(b[4..6].try_into().ok()?) as usize;
+    if !(1..=240).contains(&n) || b.len() != 14 + 5 * n || !(0..=600_000).contains(&v) {
+        return None;
+    }
+    let secs = (600_000 - v) as f32 / 1000.0;
+    if n as f32 > secs + 3.0 || (n as f32) < 0.4 * secs {
+        return None;
+    }
+    let f = |i: usize| f32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+    let (mut x, mut z) = (f(6), f(10));
+    let [x0, x1, z0, z1, ..] = EXTENT;
+    for i in 0..n {
+        let o = 14 + 5 * i;
+        let (dx, dz) = (i16::from_le_bytes([b[o], b[o + 1]]) as f32, i16::from_le_bytes([b[o + 2], b[o + 3]]) as f32);
+        if dx.hypot(dz) > 450.0 {
+            return None;
+        }
+        x += dx / 10.0;
+        z += dz / 10.0;
+        if !x.is_finite() || !z.is_finite() || !(x0..=x1).contains(&x) || !(z0..=z1).contains(&z) {
+            return None;
+        }
+    }
+    if !(x0..=x1).contains(&f(6)) || !(z0..=z1).contains(&f(10)) {
+        return None;
+    }
+    Some(v)
+}
 /// The day of the daily challenges and their board, the same sum in the page (plugins/progress):
 // ponytail: days turn at midnight Pacific Standard Time all year (1 am in summer); a tz database if that matters
 pub fn day_of(unix: i64) -> i64 {
@@ -252,7 +337,7 @@ impl World {
             Ok(n) => eprintln!("moved {n} blocks to UUIDs"),
             Err(e) => eprintln!("moving blocks to UUIDs: {e}"),
         }
-        World { clients: HashMap::new(), next: 1, ticks: 0, history: VecDeque::new(), per_ip: HashMap::new(), max_per_ip, hold: HashSet::new(), db, secret, stats: None, coarse_empty: true, sent_now: 0, boards: None }
+        World { clients: HashMap::new(), next: 1, ticks: 0, history: VecDeque::new(), per_ip: HashMap::new(), max_per_ip, hold: HashSet::new(), db, secret, stats: None, coarse_empty: true, sent_now: 0, boards: None, skew: 0, require_tickets: false, ip_rl: HashMap::new() }
     }
 
     // ------------------------------------------------------------------ identity tokens
@@ -318,6 +403,8 @@ impl World {
                 blocking: b(5.0, 60.0),
                 teleports: b(0.1, 2.0),
                 scores: b(0.2, 6.0),
+                run_rl: b(0.2, 6.0),
+                runs: HashMap::new(),
                 strikes: 0,
                 strikes_at: now,
                 last_chat: None,
@@ -379,7 +466,8 @@ impl World {
             In::Chat { ch, text } => self.chat(slot, &ch, &text, now),
             In::Block { id } => return self.block(slot, &id, true, now),
             In::Unblock { id } => return self.block(slot, &id, false, now),
-            In::Score { board, v } => return self.score(slot, &board, v, now),
+            In::Score { board, v, n } => return self.score(slot, &board, v, n.as_deref(), now),
+            In::Run { board } => return self.run(slot, &board, now),
         }
         Ok(())
     }
@@ -551,23 +639,128 @@ impl World {
         }
     }
 
-    /// A run's score from the page (nothing here can check it: the boards are for fun). Kept if it is the
-    /// player's best on that board; "daily" is one board a day.
-    fn score(&mut self, slot: u32, board: &str, v: i64, now: Instant) -> Result<(), Kick> {
-        let c = self.clients.get_mut(&slot).unwrap();
-        let named = !board.is_empty() && board.len() <= 16 && board.bytes().enumerate().all(|(i, b)| b.is_ascii_lowercase() || (i > 0 && (b.is_ascii_digit() || b == b'-')));
-        if !named || !(0..=MAX_SCORE).contains(&v) {
+    fn day(&self) -> i64 {
+        day_of(unix() + self.skew)
+    }
+
+    /// One more of `kind` for this address (a keyed hash)? Kept in memory only, bounded.
+    fn ip_take(&mut self, ip: u64, kind: u8, rate: f32, burst: f32, now: Instant) -> bool {
+        if self.ip_rl.len() > 4096 {
+            self.ip_rl.clear();
+        }
+        self.ip_rl.entry((ip, kind)).or_insert_with(|| Bucket::new(rate, burst, now)).take(now)
+    }
+
+    /// A run starts: the server's clock starts a ticket for the board (one per board per connection, a new one
+    /// replaces the old). Boards without a rule, or that need no ticket, answer nothing; too many are ignored.
+    fn run(&mut self, slot: u32, board: &str, now: Instant) -> Result<(), Kick> {
+        if !named(board) {
             return self.strike(slot, now);
         }
+        let c = self.clients.get_mut(&slot).unwrap();
+        let ip = c.ip;
+        if !rule(board).is_some_and(|r| r.ticket) || !c.run_rl.take(now) {
+            return Ok(());
+        }
+        if !self.ip_take(ip, 0, 1.0, 30.0, now) {
+            return Ok(());
+        }
+        let c = self.clients.get_mut(&slot).unwrap();
+        if c.runs.len() >= MAX_TICKETS && !c.runs.contains_key(board) {
+            let old = c.runs.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| k.clone());
+            if let Some(k) = old {
+                c.runs.remove(&k);
+            }
+        }
+        let n = format!("{:08x}", rand::random::<u32>());
+        c.runs.insert(board.to_string(), (now, n.clone()));
+        c.json(&json!({ "t": "ticket", "board": board, "n": n }));
+        Ok(())
+    }
+
+    /// A run's score from the page, kept if it is the player's best on that board (per-day boards: that day's best
+    /// and the all-time one). A board with a rule is checked against it, in silence (an honest old page is never
+    /// kicked): too big; no ticket when one is needed (or one that was already used or is for another run); the
+    /// server clock says it came too fast or too late; more than the board can pay for that long. Without a
+    /// ticket (old pages, until `require_tickets`) a score under `max` is kept but not verified.
+    fn score(&mut self, slot: u32, board: &str, v: i64, n: Option<&str>, now: Instant) -> Result<(), Kick> {
+        if !named(board) || !(0..=MAX_SCORE).contains(&v) {
+            return self.strike(slot, now);
+        }
+        let c = self.clients.get_mut(&slot).unwrap();
+        let ip = c.ip;
         if !c.scores.take(now) {
             return Ok(()); // one every 5 s (6 at once): the page sends a best only when it is beaten
         }
-        let day = if board == "daily" { day_of(unix()) } else { 0 };
-        if let Err(e) = self.db.score(board, day, c.id.as_deref().unwrap(), v, unix()) {
-            eprintln!("score: {e}");
+        let ticket = c.runs.remove(board);
+        let id = c.id.clone().unwrap();
+        if !self.ip_take(ip, 1, 1.0, 30.0, now) {
+            return Ok(());
+        }
+        let rule = rule(board);
+        if v > rule.map_or(100_000, |r| r.max) || rule.is_some_and(|r| r.low > 0 && v % 1_000_000 > r.low) {
+            return Ok(());
+        }
+        let mut ok = rule.is_some();
+        if let Some(r) = rule.filter(|r| r.ticket) {
+            ok = false;
+            match ticket {
+                Some((at, nonce)) => {
+                    let e = now.saturating_duration_since(at).as_secs_f32();
+                    let bound = if r.timed { 602_000.0 - 1000.0 * e } else if r.per_sec > 0.0 { r.per_sec * e + r.base as f32 } else { f32::MAX };
+                    if n.is_some_and(|n| n != nonce) || e < r.min_secs as f32 || e > MAX_AGE || v as f32 > bound {
+                        return Ok(());
+                    }
+                    ok = true;
+                }
+                None if self.require_tickets || n.is_some() => return Ok(()), // (a ticket named but already spent: a replay)
+                None => {}
+            }
+        }
+        let day = self.day();
+        let now = unix() + self.skew;
+        let mut days = vec![if per_day(board) { day } else { 0 }];
+        if per_day(board) && board != "daily" {
+            days.push(0); // the all-time best of a per-day board
+        }
+        for d in days {
+            if let Err(e) = self.db.score(board, d, &id, v, ok, now) {
+                eprintln!("score: {e}");
+            }
         }
         self.boards = None;
         Ok(())
+    }
+
+    /// POST /live/ghost: the day's best run of a timed board, as a small path. 204, or 400 (shape), 401 (token),
+    /// 403 (not today's top, verified score of that value), 429.
+    pub fn ghost_put(&mut self, token: &str, board: &str, body: &[u8], ip: u64, now: Instant) -> u16 {
+        let Some(id) = self.verify(token) else { return 401 };
+        if !named(board) || !per_day(board) || !rule(board).is_some_and(|r| r.timed) {
+            return 400;
+        }
+        let day = self.day();
+        let Some(v) = ghost_ok(body) else { return 400 };
+        match self.db.top(board, day) {
+            Ok(Some((tid, tv, true))) if tid == id && tv == v => {}
+            _ => return 403,
+        }
+        if !self.ip_take(ip, 2, 1.0 / 30.0, 1.0, now) {
+            return 429; // (only a valid ghost costs the address its one per 30 s)
+        }
+        match self.db.put_ghost(board, day, &id, v, body) {
+            Ok(()) => 204,
+            Err(e) => {
+                eprintln!("ghost: {e}");
+                400
+            }
+        }
+    }
+
+    /// GET /live/ghost: (name, score, blob) of today's ghost.
+    pub fn ghost_get(&self, board: &str) -> Option<(String, i64, Vec<u8>)> {
+        let (id, name, v, data) = self.db.ghost(board, self.day()).ok()??;
+        Some((name.unwrap_or_else(|| placeholder(&id)), v, data))
     }
 
     /// GET /live/boards: {"day", "boards": {board: [{"name","chosen","v"}]}}, the top 10 of each (names only, no ids),
@@ -578,13 +771,20 @@ impl World {
         {
             return json.clone();
         }
-        let day = day_of(unix());
-        let mut boards = serde_json::Map::new();
-        for (board, id, name, v) in self.db.boards(day, 10).unwrap_or_default() {
-            let row = json!({ "chosen": name.is_some(), "name": name.unwrap_or_else(|| placeholder(&id)), "v": v });
-            boards.entry(board).or_insert_with(|| json!([])).as_array_mut().unwrap().push(row);
+        let day = self.day();
+        // boards: the all-time ones, and today's for the per-day ones; all: every all-time one (the Top tab's second view)
+        let (mut boards, mut all) = (serde_json::Map::new(), serde_json::Map::new());
+        for (board, d, id, name, v, ok) in self.db.boards(day, 10).unwrap_or_default() {
+            let row = json!({ "chosen": name.is_some(), "name": name.unwrap_or_else(|| placeholder(&id)), "v": v, "ok": ok });
+            let put = |m: &mut serde_json::Map<String, Value>| m.entry(board.clone()).or_insert_with(|| json!([])).as_array_mut().unwrap().push(row.clone());
+            if d == 0 {
+                put(&mut all);
+            }
+            if d == day || (d == 0 && !per_day(&board)) {
+                put(&mut boards);
+            }
         }
-        let json = json!({ "day": day, "boards": boards }).to_string();
+        let json = json!({ "day": day, "boards": boards, "all": all }).to_string();
         self.boards = Some((json.clone(), now));
         json
     }
@@ -915,7 +1115,7 @@ mod tests {
         send(&mut t, &a, "taxi", 100).unwrap(); // not their best
         send(&mut t, &a, "daily", 2_000_150).unwrap();
         let v: Value = serde_json::from_str(&t.w.boards(t.now)).unwrap();
-        assert_eq!(v["boards"]["taxi"], json!([{ "name": "Ben", "chosen": true, "v": 900 }, { "name": "Ada", "chosen": true, "v": 300 }]));
+        assert_eq!(v["boards"]["taxi"], json!([{ "name": "Ben", "chosen": true, "v": 900, "ok": false }, { "name": "Ada", "chosen": true, "v": 300, "ok": false }]));
         assert_eq!(v["boards"]["daily"][0]["v"], 2_000_150);
         assert_eq!(v["day"], day_of(unix()));
         assert!(!v.to_string().contains(&t.id(&a)), "no ids in the boards");
@@ -1392,5 +1592,212 @@ mod tests {
         t.w.tick(t.now);
         assert!(b.texts().iter().any(|m| m["t"] == "leave" && m["s"] == a.slot));
         assert!(t.w.clients[&a.slot].state.is_none());
+    }
+
+    // ---- run tickets, bounds, per-day boards, ghosts
+    fn ticket(t: &mut T, c: &mut C, board: &str) -> String {
+        t.w.text(c.slot, &json!({ "t": "run", "board": board }).to_string(), t.now).unwrap();
+        let m = c.texts();
+        assert_eq!((&m[0]["t"], &m[0]["board"]), (&json!("ticket"), &json!(board)));
+        m[0]["n"].as_str().unwrap().to_string()
+    }
+    fn post(t: &mut T, c: &C, board: &str, v: i64, n: Option<&str>) {
+        t.w.text(c.slot, &json!({ "t": "score", "board": board, "v": v, "n": n }).to_string(), t.now).unwrap();
+    }
+    fn rows(t: &mut T, key: &str, board: &str) -> Vec<(String, i64, bool)> {
+        let v: Value = serde_json::from_str(&t.w.boards(t.now)).unwrap();
+        v[key][board].as_array().cloned().unwrap_or_default().iter().map(|r| (r["name"].as_str().unwrap().to_string(), r["v"].as_i64().unwrap(), r["ok"].as_bool().unwrap())).collect()
+    }
+
+    #[test]
+    fn tickets_accept_an_honest_run_and_reject_the_rest() {
+        let mut t = T::new();
+        let (mut a, mut b) = (t.join("Ada"), t.join("Ben"));
+        // honest: a taxi run of 60 s worth 300 (bound 6 * 60 + 50)
+        let n = ticket(&mut t, &mut a, "taxi");
+        t.later(60_000);
+        post(&mut t, &a, "taxi", 300, Some(&n));
+        assert_eq!(rows(&mut t, "boards", "taxi"), vec![("Ada".into(), 300, true)]);
+        // the same ticket again (a replay), with or without its n: nothing
+        t.later(6000);
+        post(&mut t, &a, "taxi", 400, Some(&n));
+        post(&mut t, &a, "taxi", 400, None); // no n: an old page's message, kept but unverified, and below the verified best
+        assert_eq!(rows(&mut t, "boards", "taxi"), vec![("Ada".into(), 300, true)]);
+        // too fast: a 45 s minimum
+        t.later(6000);
+        let n = ticket(&mut t, &mut b, "taxi");
+        t.later(10_000);
+        post(&mut t, &b, "taxi", 100, Some(&n));
+        assert_eq!(rows(&mut t, "boards", "taxi").len(), 1, "too fast");
+        // over the bound for the time (6 * 50 + 50 = 350) and over the board's max
+        let n = ticket(&mut t, &mut b, "taxi");
+        t.later(50_000);
+        post(&mut t, &b, "taxi", 351, Some(&n));
+        t.later(6000);
+        let n = ticket(&mut t, &mut b, "taxi");
+        t.later(3600_000);
+        post(&mut t, &b, "taxi", 5001, Some(&n));
+        assert_eq!(rows(&mut t, "boards", "taxi").len(), 1, "bound and max");
+        // a stale ticket (3 h) and a ticket for another run (wrong n)
+        t.later(6000);
+        let n = ticket(&mut t, &mut b, "delivery");
+        t.later(4 * 3600_000);
+        post(&mut t, &b, "delivery", 100, Some(&n));
+        t.later(6000);
+        let n = ticket(&mut t, &mut b, "delivery");
+        t.later(130_000);
+        post(&mut t, &b, "delivery", 100, Some("deadbeef"));
+        assert!(rows(&mut t, "boards", "delivery").is_empty(), "stale and wrong n");
+        // the wrong-n attempt spent the ticket: the right n now has none
+        t.later(6000);
+        post(&mut t, &b, "delivery", 100, Some(&n));
+        assert!(rows(&mut t, "boards", "delivery").is_empty());
+        // a fresh honest delivery, then a ticket for one board is no ticket for another
+        t.later(6000);
+        let n = ticket(&mut t, &mut b, "delivery");
+        t.later(130_000);
+        post(&mut t, &b, "bus", 100, Some(&n));
+        post(&mut t, &b, "delivery", 100, Some(&n));
+        assert_eq!(rows(&mut t, "boards", "delivery"), vec![("Ben".into(), 100, true)]);
+        assert!(rows(&mut t, "boards", "bus").is_empty());
+        // none of this kicked anyone
+        assert!(t.w.clients.contains_key(&a.slot) && t.w.clients.contains_key(&b.slot));
+    }
+
+    #[test]
+    fn unverified_scores_rank_below_verified_and_tickets_can_be_required() {
+        let mut t = T::new();
+        let (mut a, b) = (t.join("Ada"), t.join("Ben"));
+        post(&mut t, &b, "taxi", 900, None); // an old page
+        t.later(6000);
+        let n = ticket(&mut t, &mut a, "taxi");
+        t.later(60_000);
+        post(&mut t, &a, "taxi", 100, Some(&n));
+        assert_eq!(rows(&mut t, "boards", "taxi"), vec![("Ada".into(), 100, true), ("Ben".into(), 900, false)]);
+        // unverified over the board's max: dropped even without a ticket; unknown boards cap at 100,000
+        t.later(6000);
+        post(&mut t, &b, "taxi", 5001, None);
+        post(&mut t, &b, "zoo", 100_001, None);
+        post(&mut t, &b, "zoo", 100_000, None);
+        assert_eq!(rows(&mut t, "boards", "taxi").len(), 2);
+        assert_eq!(rows(&mut t, "boards", "zoo"), vec![("Ben".into(), 100_000, false)]);
+        t.w.require_tickets = true;
+        t.later(6000);
+        post(&mut t, &b, "taxi", 1000, None);
+        assert_eq!(rows(&mut t, "boards", "taxi")[1].1, 900, "a missing ticket is dropped once required");
+        post(&mut t, &b, "fish", 300, None); // fish and daily need no ticket
+        assert_eq!(rows(&mut t, "boards", "fish"), vec![("Ben".into(), 300, true)]);
+        post(&mut t, &b, "daily", 2_030_000, None); // %1e6 over 20,000
+        assert!(rows(&mut t, "boards", "daily").is_empty());
+    }
+
+    #[test]
+    fn tickets_are_rate_limited_and_capped() {
+        let mut t = T::new();
+        let mut a = t.join("Ada");
+        for board in ["delivery", "taxi", "bus", "sail", "dock", "hike"] {
+            ticket(&mut t, &mut a, board);
+        }
+        // the burst of 6 is spent: a 7th is ignored (no strike); boards without a rule or a ticket answer nothing
+        t.w.text(a.slot, &json!({ "t": "run", "board": "d-dash" }).to_string(), t.now).unwrap();
+        t.w.text(a.slot, &json!({ "t": "run", "board": "fish" }).to_string(), t.now).unwrap();
+        assert!(a.texts().iter().all(|m| m["t"] != "ticket"));
+        assert!(t.w.clients[&a.slot].runs.len() <= MAX_TICKETS);
+        assert!(t.w.text(a.slot, &json!({ "t": "run", "board": "Taxi;" }).to_string(), t.now).is_ok(), "a bad name is a strike, not a kick (the first)");
+        // per address: 30 at once across connections, then dropped
+        let mut t = T::new();
+        let mut got = 0;
+        for name in ["Aaron", "Beth", "Cora", "Dale", "Edna", "Finn", "Gwen", "Hugo"] {
+            let mut c = t.join(name);
+            for _ in 0..6 {
+                t.w.text(c.slot, &json!({ "t": "run", "board": "taxi" }).to_string(), t.now).unwrap();
+            }
+            got += c.texts().iter().filter(|m| m["t"] == "ticket").count();
+            t.w.disconnect(c.slot);
+        }
+        assert!(got <= 31, "{got}");
+    }
+
+    #[test]
+    fn per_day_boards_turn_over_with_the_day_and_keep_all_time() {
+        let mut t = T::new();
+        let mut a = t.join("Ada");
+        let n = ticket(&mut t, &mut a, "d-dash");
+        t.later(60_000);
+        post(&mut t, &a, "d-dash", 540_000, Some(&n));
+        assert_eq!(rows(&mut t, "boards", "d-dash"), vec![("Ada".into(), 540_000, true)]);
+        assert_eq!(rows(&mut t, "all", "d-dash"), vec![("Ada".into(), 540_000, true)]);
+        assert_eq!(rows(&mut t, "all", "taxi"), vec![], "taxi has no rows yet");
+        // too good for the elapsed time on a timed board (v <= 600000 - 1000 * 60 + 2000 = 542000)
+        t.later(6000);
+        let n = ticket(&mut t, &mut a, "d-dash");
+        t.later(60_000);
+        post(&mut t, &a, "d-dash", 545_000, Some(&n));
+        assert_eq!(rows(&mut t, "boards", "d-dash")[0].1, 540_000);
+        // midnight: today's board is empty, the all-time one remembers; daily has no all-time rows
+        t.w.skew += 86_400;
+        t.later(6000);
+        assert_eq!(rows(&mut t, "boards", "d-dash"), vec![]);
+        assert_eq!(rows(&mut t, "all", "d-dash"), vec![("Ada".into(), 540_000, true)]);
+        post(&mut t, &a, "daily", 1_000_100, None);
+        assert_eq!(rows(&mut t, "boards", "daily").len(), 1);
+        assert!(rows(&mut t, "all", "daily").is_empty());
+        t.w.skew += 86_400;
+        t.later(6000);
+        assert!(rows(&mut t, "boards", "daily").is_empty());
+    }
+
+    fn blob(v: i64, steps: &[(i16, i16)], x0: f32, z0: f32) -> Vec<u8> {
+        let mut b = (v as i32).to_le_bytes().to_vec();
+        b.extend((steps.len() as u16).to_le_bytes());
+        b.extend(x0.to_le_bytes());
+        b.extend(z0.to_le_bytes());
+        for (dx, dz) in steps {
+            b.extend(dx.to_le_bytes());
+            b.extend(dz.to_le_bytes());
+            b.push(10);
+        }
+        b
+    }
+
+    #[test]
+    fn ghosts_only_from_the_days_top_run_and_only_sane_paths() {
+        let mut t = T::new();
+        let (mut a, mut b) = (t.join("Ada"), t.join("Ben"));
+        let (ta, tb) = (t.w.token(&t.id(&a)), t.w.token(&t.id(&b)));
+        let n = ticket(&mut t, &mut a, "d-dash");
+        t.later(60_000);
+        post(&mut t, &a, "d-dash", 540_000, Some(&n)); // 60 s
+        let good = blob(540_000, &vec![(100, 0); 60], 0.0, 0.0); // 10 m a second
+        let now = t.now;
+        assert_eq!(t.w.ghost_put("junk", "d-dash", &good, 1, now), 401);
+        assert_eq!(t.w.ghost_put(&tb, "d-dash", &good, 2, now), 403, "Ben is not on the board");
+        assert_eq!(t.w.ghost_put(&ta, "taxi", &good, 1, now), 400, "not a timed per-day board");
+        assert_eq!(t.w.ghost_put(&ta, "d-dash", &blob(540_000, &vec![(600, 0); 60], 0.0, 0.0), 1, now), 400, "a 60 m step");
+        t.later(31_000);
+        let now = t.now;
+        assert_eq!(t.w.ghost_put(&ta, "d-dash", &blob(540_000, &vec![(100, 0); 20], 0.0, 0.0), 1, now), 400, "20 samples for a 60 s run");
+        t.later(31_000);
+        let now = t.now;
+        assert_eq!(t.w.ghost_put(&ta, "d-dash", &blob(540_000, &vec![(100, 0); 60], 1e9, 0.0), 1, now), 400, "outside the map");
+        t.later(31_000);
+        let now = t.now;
+        assert_eq!(t.w.ghost_put(&ta, "d-dash", &blob(539_000, &vec![(100, 0); 60], 0.0, 0.0), 1, now), 403, "not the stored score");
+        assert_eq!(t.w.ghost_put(&ta, "d-dash", &good, 1, now), 204);
+        assert_eq!(t.w.ghost_put(&ta, "d-dash", &good, 1, now), 429, "one every 30 s per address");
+        assert_eq!(t.w.ghost_get("d-dash"), Some(("Ada".to_string(), 540_000, good.clone())));
+        assert_eq!(t.w.ghost_get("d-other"), None);
+        // Ben beats Ada: only he may replace the ghost; the next day there is none
+        t.later(6000);
+        let n = ticket(&mut t, &mut b, "d-dash");
+        t.later(60_000);
+        post(&mut t, &b, "d-dash", 541_000, Some(&n));
+        let now = t.now;
+        assert_eq!(t.w.ghost_put(&ta, "d-dash", &good, 3, now), 403);
+        let better = blob(541_000, &vec![(100, 0); 59], 0.0, 0.0);
+        assert_eq!(t.w.ghost_put(&tb, "d-dash", &better, 4, now), 204);
+        assert_eq!(t.w.ghost_get("d-dash").unwrap().0, "Ben");
+        t.w.skew += 86_400;
+        assert_eq!(t.w.ghost_get("d-dash"), None);
     }
 }

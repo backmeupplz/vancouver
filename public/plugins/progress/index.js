@@ -3,6 +3,7 @@
 // map, three daily challenges and a streak, and leaderboards on the live server. Everything is kept in
 // localStorage; no accounts. One toolbar button (a tile in the phone ⋯ sheet) opens the panel.
 import { clamp, mulberry32, esc, getJSON } from '../../core/util.js'
+import { encodeGhost, decodeGhost } from './ghost.js'
 import { audioContext, tone, buzz } from '../../core/play.js'
 import { AREAS } from './leaves.js'
 
@@ -47,7 +48,10 @@ const POOL = [
   [2, 'leaf', (n) => `Find ${n} maple ${n > 1 ? 'leaves' : 'leaf'}`, 1, 3, 1], [2, 'cash', (n) => `Earn ${money(n)} any way you like`, 300, 800, 100],
   [2, 'stunt', (n) => `Pull off ${n} stunts`, 5, 15, 5, 'stunt'], [2, 'pet', (n) => `Pet ${n} dogs`, 2, 4, 1, 'pet'],
 ]
-const BOARD_NAMES = { daily: 'Today', taxi: 'Rush Fare', delivery: 'Deliveries', bus: 'Bus', sail: 'Sailing', hike: 'Hiking', fish: 'Biggest fish (mm)' }
+// boards the server takes without a run ticket (everything else is submitted only with one; see city.progress.run)
+const NO_TICKET = ['fish']
+const perDay = (b) => b === 'daily' || b.startsWith('d-')
+const BOARD_NAMES = { daily: 'Today', taxi: 'Rush Fare', delivery: 'Deliveries', bus: 'Bus', sail: 'Sailing', hike: 'Hiking', fish: 'Biggest fish (mm)', dock: 'Docking' }
 const DAILY_PAY = 150, LEAF_PAY = 50
 
 const CSS = `
@@ -86,6 +90,7 @@ const CSS = `
 .pg ol li { display: flex; gap: 8px; padding: 3px 0; }
 .pg ol li span:nth-child(2) { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pg ol li.me { color: var(--accent); font-weight: 600; }
+.pg ol li.dim { opacity: .6; }
 .pg ol li span:first-child { width: 1.6em; color: var(--muted); }
 .pg label { display: flex; align-items: center; gap: 6px; min-height: 28px; cursor: pointer; }
 .pg-pops { display: contents; } /* its pops stack in the host's column, with the toast (city.ui.toasts) */
@@ -103,7 +108,7 @@ const CSS = `
 export default function progress(city) {
   const { THREE } = city
   // ================================================================ the save
-  const S = { xp: 0, cash: 0, stats: {}, found: {}, best: {}, sent: {}, own: {}, pick: {}, daily: null, streak: 0, streakDay: 0, areas: {}, mute: false, onMap: false }
+  const S = { xp: 0, cash: 0, stats: {}, found: {}, best: {}, sent: {}, own: {}, pick: {}, today: null, daily: null, streak: 0, streakDay: 0, areas: {}, mute: false, onMap: false }
   try { Object.assign(S, JSON.parse(localStorage.getItem(KEY)) || {}) } catch {}
   let saveT = 0
   const saveNow = () => { clearTimeout(saveT); saveT = 0; try { localStorage.setItem(KEY, JSON.stringify(S)) } catch {} }
@@ -194,11 +199,53 @@ export default function progress(city) {
   // ================================================================ leaderboards
   const dev = new URLSearchParams(location.search).get('live')
   const BOARDS_URL = dev && /^wss?:\/\//.test(dev) ? dev.replace(/^ws/, 'http').replace(/\/ws$/, '/boards') : '/live/boards'
-  function score(board, value) {
-    board = String(board); value = Math.round(clamp(+value || 0, 0, 1e7))
-    if (!/^[a-z][a-z0-9-]{0,15}$/.test(board) || board === 'daily' || value <= (S.best[board] || 0)) return false
-    S.best[board] = value; save(); sync()
-    pop(`New best: ${BOARD_NAMES[board] || board}`); askName(); return true
+  const LIVE = BOARDS_URL.replace(/boards$/, '')
+  // run tickets: the server starts a clock when a scored run starts (city.progress.run) and checks the score against
+  // it. { board, n, live }: n is the server's answer (a moment later); live: it was asked on the open connection.
+  const runs = {}
+  const offTicket = city.on('live:ticket', (m) => { const r = runs[m.board]; if (r && r.live && !r.n) r.n = m.n })
+  function run(board) {
+    board = String(board); const mp = city.multiplayer
+    if (!/^[a-z][a-z0-9-]{0,15}$/.test(board)) return null
+    const live = !!(mp?.connected && mp.send), tk = { board, n: null, live }
+    runs[board] = tk; if (live) mp.send({ t: 'run', board })
+    return tk
+  }
+  // A finished run. The best (all-time, and the day's for per-day boards) is kept here; a run with a ticket goes to
+  // the server with it (and its ghost: [[x, z, heading], …] a sample a second, kept there only for the day's best).
+  // No ticket (offline, or run() never called): local only, except for boards that need none.
+  function score(board, value, opt = {}) {
+    board = String(board); value = Math.round(clamp(+value || 0, 0, 1e7)); opt = opt || {}
+    if (!/^[a-z][a-z0-9-]{0,15}$/.test(board) || board === 'daily') return false
+    const tk = opt.ticket || runs[board]; delete runs[board]
+    const day = dayOf(); if (S.today?.day !== day) S.today = { day, best: {} }
+    const dayBest = value > (S.today.best[board] || 0), best = value > (S.best[board] || 0)
+    if (dayBest) S.today.best[board] = value
+    if (best) S.best[board] = value
+    if (dayBest || best) save()
+    const mp = city.multiplayer
+    if ((perDay(board) ? dayBest : value > (S.sent[board] || 0)) && tk?.live && mp?.connected && mp.send) {
+      mp.send({ t: 'score', board, v: value, n: tk.n || undefined }); S.sent[board] = Math.max(S.sent[board] || 0, value)
+      if (opt.ghost && perDay(board) && dayBest) setTimeout(() => uploadGhost(board, value, opt.ghost), 1500)
+    } else if (best && NO_TICKET.includes(board)) sync()
+    if (best) { pop(`New best: ${BOARD_NAMES[board] || board}`); askName() }
+    return best
+  }
+  // the ghost goes up only when the board shows this run as the day's best (the server checks that too)
+  async function uploadGhost(board, v, pts) {
+    try {
+      const mp = city.multiplayer, buf = encodeGhost(v, pts); if (!buf || !mp?.token) return
+      const b = await getJSON(BOARDS_URL + '?t=' + Date.now()), top = b.boards?.[board]?.[0]
+      if (!top || top.v !== v || top.name !== mp.name || !top.ok) return
+      await fetch(`${LIVE}ghost?board=${board}`, { method: 'POST', headers: { 'x-token': mp.token }, body: buf })
+    } catch {}
+  }
+  // today's best run of a per-day board: { name, v, pts: [[x, z, heading], …] } (a sample a second) or null
+  async function ghost(board) {
+    try {
+      const r = await fetch(`${LIVE}ghost?board=${encodeURIComponent(board)}`); if (!r.ok) return null
+      const g = decodeGhost(await r.arrayBuffer()); return g && { name: decodeURIComponent(r.headers.get('x-name') || ''), v: g.v, pts: g.pts }
+    } catch { return null }
   }
   // the first score someone posts under a generated name ("Heron 44"): a line on the game's results card (an element
   // with data-results) offers to choose one. Once; the panel and the chat offer it at any time.
@@ -218,7 +265,7 @@ export default function progress(city) {
   function sync() { // bests the server hasn't had yet (it lets 6 through at once, then one every 5 s)
     const mp = city.multiplayer; if (!mp?.connected || !mp.send) return
     let n = 0
-    for (const b in S.best) if (S.sent[b] !== S.best[b] && n++ < 4) { mp.send({ t: 'score', board: b, v: S.best[b] }); S.sent[b] = S.best[b] }
+    for (const b of NO_TICKET) if (S.best[b] && S.sent[b] !== S.best[b] && n++ < 4) { mp.send({ t: 'score', board: b, v: S.best[b] }); S.sent[b] = S.best[b] }
     const d = S.daily, v = d ? d.done.filter(Boolean).length * 1e6 + Math.min(999999, Math.round((S.stats.cash || 0) - d.cash0)) : 0
     if (v > 0 && v !== d.sent && Date.now() - dailySent > 20000) { mp.send({ t: 'score', board: 'daily', v }); d.sent = v; dailySent = Date.now() }
     if (n) save()
@@ -360,7 +407,7 @@ export default function progress(city) {
   const root = document.createElement('div'); root.className = 'pg'; tool.panel.append(root)
   const open = () => !tool.panel.hidden
   function label() { tool.set({ label: `Lv ${levelOf(S.xp)} · ${money(S.cash)}` }) }
-  let tab = 'today', board = 'daily', boards = null, boardsAt = 0
+  let tab = 'today', span = 'today', board = 'daily', boards = null, boardsAt = 0
   const bar = (v, max) => `<div class="pg-bar${v >= max ? ' done' : ''}"><i style="width:${clamp((v / max) * 100, 0, 100)}%"></i></div>`
   function loadBoards() {
     if (Date.now() - boardsAt < 10000) return
@@ -391,11 +438,19 @@ export default function progress(city) {
     },
     top() {
       loadBoards()
-      const names = [...new Set(['daily', ...Object.keys(boards?.boards || {}), ...Object.keys(S.best)])], me = city.multiplayer?.name
-      const rows = boards?.boards?.[board] || [], fmt = (v) => board === 'daily' ? `${'★'.repeat(Math.floor(v / 1e6)) || '·'} ${money(v % 1e6)}` : v.toLocaleString('en-CA')
-      return `<div class="pg-chips">${names.map((b) => `<button data-board="${esc(b)}" aria-pressed="${b === board}">${esc(BOARD_NAMES[b] || b)}</button>`).join('')}</div>
-        ${!boards ? '<div class="dim">Loading…</div>' : rows.length ? `<ol>${rows.map((r, i) => `<li class="${r.name === me ? 'me' : ''}"><span>${i + 1}</span><span>${esc(r.name)}</span><span>${fmt(r.v)}</span></li>`).join('')}</ol>` : `<div class="dim">${boards.off ? 'The leaderboards are offline right now.' : 'Nobody yet: be the first.'}</div>`}
-        <div class="pg-row dim">${board === 'daily' ? 'Today’s dailies done (★) and cash earned; a new board every day.' : `Your best: ${(S.best[board] || 0).toLocaleString('en-CA')}`}${me ? ` · You are ${esc(me)}` : ''}</div>`
+      const names = [...new Set(['daily', ...Object.keys(boards?.boards || {}), ...Object.keys(boards?.all || {}), ...Object.keys(S.best), ...Object.keys(S.today?.best || {})])]
+        .sort((a, b) => perDay(b) - perDay(a)) // the per-day boards first
+      const me = city.multiplayer?.name, day = perDay(board) && board !== 'daily', all = day && span === 'all'
+      const rows = (all ? boards?.all?.[board] : boards?.boards?.[board]) || []
+      const fmt = (v) => board === 'daily' ? `${'★'.repeat(Math.floor(v / 1e6)) || '·'} ${money(v % 1e6)}` : v.toLocaleString('en-CA')
+      const mine = all ? S.best[board] : day || board === 'daily' ? S.today?.best?.[board] : S.best[board]
+      const li = (r, i, own) => `<li class="${r.name === me || own ? 'me' : ''}${r.ok === false ? ' dim' : ''}"><span>${own ? '–' : i + 1}</span><span>${esc(r.name)}${r.ok === false ? ' <small>(unverified)</small>' : ''}</span><span>${fmt(r.v)}</span></li>`
+      const own = mine && !rows.some((r) => r.name === me && r.v >= mine) && !(boards?.off) ? li({ name: me ? `${me} (you)` : 'You', v: mine }, 0, true) : ''
+      const empty = boards?.off ? 'The leaderboards are offline right now.' : day ? 'Be the first today.' : 'Nobody yet: be the first.'
+      return `<div class="pg-chips">${names.map((b) => `<button data-board="${esc(b)}" aria-pressed="${b === board}">${esc(BOARD_NAMES[b] || b)}${perDay(b) && b !== 'daily' ? ' · today' : ''}</button>`).join('')}</div>
+        ${day ? `<div class="pg-chips"><button data-span="today" aria-pressed="${!all}">Today only</button><button data-span="all" aria-pressed="${all}">All-time</button></div>` : ''}
+        ${!boards ? '<div class="dim">Loading…</div>' : rows.length || own ? `<ol>${rows.map((r, i) => li(r, i)).join('')}${own}</ol>` : `<div class="dim">${empty}</div>`}
+        <div class="pg-row dim">${board === 'daily' ? 'Today’s dailies done (★) and cash earned; a new board every day.' : `Your best${day && !all ? ' today' : ''}: ${(mine || 0).toLocaleString('en-CA')}`}${me ? ` · You are ${esc(me)}` : ''}</div>`
     },
   }
   function draw() {
@@ -413,6 +468,7 @@ export default function progress(city) {
     if (b.dataset.name !== undefined) return city.multiplayer?.profile()
     if (b.dataset.tab) tab = b.dataset.tab
     else if (b.dataset.board) board = b.dataset.board
+    else if (b.dataset.span) span = b.dataset.span
     else if (b.dataset.item) {
       const it = items.get(b.dataset.item); if (!it) return
       if (!unlocked(it.id)) {
@@ -433,7 +489,7 @@ export default function progress(city) {
   tool.button.addEventListener('click', () => { if (open()) { dailies(); draw() } })
 
   city.progress = {
-    award, stat, score, unlocked,
+    award, stat, score, run, ghost, unlocked,
     choice(slot) { const it = items.get(S.pick[slot]); return it && it.lv !== 1 && unlocked(it.id) ? { id: it.id, name: it.name, value: it.value } : null },
     get level() { return levelOf(S.xp) }, get xp() { return S.xp }, get cash() { return S.cash }, get stats() { return { ...S.stats } },
     get leaves() { return LEAVES }, // (for tools and the console)
@@ -448,7 +504,7 @@ export default function progress(city) {
       offTiles(); offView(); offPlayer(); offFrame()
       city.scene.remove(mesh); leafGeo.dispose(); leafMat.dispose(); out?.disconnect()
       for (const el of [css, pops]) el.remove()
-      tool.remove(); delete city.progress; city.requestRender()
+      tool.remove(); offTicket(); delete city.progress; city.requestRender()
     },
   }
 }

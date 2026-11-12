@@ -107,6 +107,7 @@ export function makeGoals(THREE, city, { chime, popup, makeBoat, wind, polar, to
   function startRace(id) {
     const c = courses.find((q) => q.id === id)
     if (!c) return null
+    city.progress?.run(c.dock ? 'dock' : 'sail')
     S.mode = 'race'; S.race = { c, next: 0, t0: 0, t: 0, started: false, rec: [], par: 0, place: 0, fast: false }
     for (let i = 0; i < buoys.length; i++) { const b = buoys[i], p = c.pts[i]; b.visible = !!p && !(i === c.pts.length - 1 && dist(p, c.pts[0]) < 5); if (p) b.position.set(p.x, 0, p.z) }
     // set off 70 m before the start mark, heading for it

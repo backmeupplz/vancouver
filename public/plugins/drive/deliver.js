@@ -97,6 +97,7 @@ export function deliveryGame(ctx) {
     const o = aimed.offer
     offers.splice(offers.indexOf(o), 1)
     run = { shop: o.shop, parcels: o.parcels, rush: o.rush, fragile: o.fragile, stage: 'pickup', cur: null }
+    if (!S.started) city.progress?.run('delivery')
     S.started = true
     aim()
   }

@@ -385,6 +385,7 @@ export function busGame(ctx, pick, d0) {
 
   // ---------------------------------------------------------------- the shift's state
   const S = { i0: 0, aboard: 0, mood: 90, served: 0, missed: 0, onTime: 0, timed: 0, carried: 0, harsh: 0, sway: 0, bumps: 0, dewire: 0, km: 0, t0: performance.now(), end: false, summary: false }
+  city.progress?.run('bus') // the shift starts: the server's clock for its score
   const ride = {} // busComfort's state
   let d = 0, dLast = 0, next = 0, doors = false, doorK = 0, serving = null, boardQ = 0, alightQ = 0, tick = 0, leftAt = 0, ringAt = 0, jerkAt = -1e5, swayAt = -1e5, decel = 0, offRoute = 0
   let headway = 10, pole = { on: trolley, k: trolley ? 1 : 0, fix: 0, pitch: 0.38, yaw: 0, lat: 0 }

@@ -52,8 +52,14 @@ impl Db {
              CREATE TABLE IF NOT EXISTS blocks (owner TEXT NOT NULL, target TEXT NOT NULL, PRIMARY KEY (owner, target));
              CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, at INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS scores (board TEXT NOT NULL, day INTEGER NOT NULL, id TEXT NOT NULL, v INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (board, day, id));
-             CREATE INDEX IF NOT EXISTS scores_top ON scores (board, day, v DESC);",
+             CREATE INDEX IF NOT EXISTS scores_top ON scores (board, day, v DESC);
+             CREATE TABLE IF NOT EXISTS ghosts (board TEXT NOT NULL, day INTEGER NOT NULL, id TEXT NOT NULL, v INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (board, day));",
         )?;
+        // `ok`: the score came with a run ticket the server checked (old rows and old pages: 0, shown below the verified ones)
+        let has_ok = conn.prepare("SELECT 1 FROM pragma_table_info('scores') WHERE name = 'ok'")?.exists([])?;
+        if !has_ok {
+            conn.execute("ALTER TABLE scores ADD COLUMN ok INTEGER NOT NULL DEFAULT 0", [])?;
+        }
         Ok(Db { conn, salt: None })
     }
 
@@ -119,30 +125,57 @@ impl Db {
         self.conn.query_row("SELECT name FROM users WHERE id = ?1", [id], |r| r.get(0)).optional()
     }
 
-    /// Keeps `id`'s best score on `board` (`day` 0: all time, else that day's board). A board holds its best
-    /// BOARD_ROWS scores and there are at most MAX_BOARDS boards, so made-up ids and names can't grow the file.
-    pub fn score(&self, board: &str, day: i64, id: &str, v: i64, now: i64) -> rusqlite::Result<()> {
+    /// Keeps `id`'s best score on `board` (`day` 0: all time, else that day's board); a verified score (`ok`) beats
+    /// any unverified one, then the higher wins. A board holds its best BOARD_ROWS scores and there are at most
+    /// MAX_BOARDS boards, so made-up ids and names can't grow the file.
+    pub fn score(&self, board: &str, day: i64, id: &str, v: i64, ok: bool, now: i64) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO scores (board, day, id, v, at) SELECT ?1, ?2, ?3, ?4, ?5
+            "INSERT INTO scores (board, day, id, v, at, ok) SELECT ?1, ?2, ?3, ?4, ?5, ?7
              WHERE EXISTS (SELECT 1 FROM scores WHERE board = ?1) OR (SELECT COUNT(DISTINCT board) FROM scores) < ?6
-             ON CONFLICT (board, day, id) DO UPDATE SET v = excluded.v, at = excluded.at WHERE excluded.v > scores.v",
-            rusqlite::params![board, day, id, v, now, MAX_BOARDS],
+             ON CONFLICT (board, day, id) DO UPDATE SET v = excluded.v, at = excluded.at, ok = excluded.ok
+               WHERE excluded.ok > scores.ok OR (excluded.ok = scores.ok AND excluded.v > scores.v)",
+            rusqlite::params![board, day, id, v, now, MAX_BOARDS, ok as i64],
         )?;
         self.conn.execute(
-            "DELETE FROM scores WHERE board = ?1 AND day = ?2 AND rowid NOT IN (SELECT rowid FROM scores WHERE board = ?1 AND day = ?2 ORDER BY v DESC, at LIMIT ?3)",
+            "DELETE FROM scores WHERE board = ?1 AND day = ?2 AND rowid NOT IN (SELECT rowid FROM scores WHERE board = ?1 AND day = ?2 ORDER BY ok DESC, v DESC, at LIMIT ?3)",
             rusqlite::params![board, day, BOARD_ROWS],
         )?;
         self.conn.execute("DELETE FROM scores WHERE day > 0 AND day < ?1", [day - 7])?; // (day 0 deletes nothing)
+        self.conn.execute("DELETE FROM ghosts WHERE day > 0 AND day < ?1", [day - 7])?;
         Ok(())
     }
 
-    /// The top `n` of every all-time board and of the boards of `day`: (board, id, chosen name, score), best first.
-    pub fn boards(&self, day: i64, n: i64) -> rusqlite::Result<Vec<(String, String, Option<String>, i64)>> {
+    /// The top `n` of every all-time board and of the boards of `day`: (board, day, id, chosen name, score, verified),
+    /// verified first, then best first.
+    pub fn boards(&self, day: i64, n: i64) -> rusqlite::Result<Vec<(String, i64, String, Option<String>, i64, bool)>> {
         let mut q = self.conn.prepare_cached(
-            "SELECT board, id, name, v FROM (SELECT s.board, s.id, u.name, s.v, ROW_NUMBER() OVER (PARTITION BY s.board ORDER BY s.v DESC, s.at) r
-               FROM scores s LEFT JOIN users u ON u.id = s.id WHERE s.day = 0 OR s.day = ?1) WHERE r <= ?2 ORDER BY board, r",
+            "SELECT board, day, id, name, v, ok FROM (SELECT s.board, s.day, s.id, u.name, s.v, s.ok, ROW_NUMBER() OVER (PARTITION BY s.board, s.day ORDER BY s.ok DESC, s.v DESC, s.at) r
+               FROM scores s LEFT JOIN users u ON u.id = s.id WHERE s.day = 0 OR s.day = ?1) WHERE r <= ?2 ORDER BY board, day, r",
         )?;
-        q.query_map([day, n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect()
+        q.query_map([day, n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get::<_, i64>(5)? != 0)))?.collect()
+    }
+
+    /// The top row of a board's day: (id, score, verified).
+    pub fn top(&self, board: &str, day: i64) -> rusqlite::Result<Option<(String, i64, bool)>> {
+        self.conn
+            .query_row("SELECT id, v, ok FROM scores WHERE board = ?1 AND day = ?2 ORDER BY ok DESC, v DESC, at LIMIT 1", rusqlite::params![board, day], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)))
+            .optional()
+    }
+
+    /// The one ghost a board keeps for a day (its best run).
+    pub fn put_ghost(&self, board: &str, day: i64, id: &str, v: i64, data: &[u8]) -> rusqlite::Result<()> {
+        self.conn.execute("INSERT OR REPLACE INTO ghosts (board, day, id, v, data) VALUES (?1, ?2, ?3, ?4, ?5)", rusqlite::params![board, day, id, v, data])?;
+        Ok(())
+    }
+    /// (owner id, chosen name, score, blob)
+    pub fn ghost(&self, board: &str, day: i64) -> rusqlite::Result<Option<(String, Option<String>, i64, Vec<u8>)>> {
+        self.conn
+            .query_row(
+                "SELECT g.id, u.name, g.v, g.data FROM ghosts g LEFT JOIN users u ON u.id = g.id WHERE g.board = ?1 AND g.day = ?2",
+                rusqlite::params![board, day],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
     }
 
     /// Who has the name with this key (see text::name_key).
@@ -241,23 +274,42 @@ mod tests {
     #[test]
     fn scores_keep_the_best_and_stay_bounded() {
         let db = Db::open(":memory:").unwrap();
-        db.score("taxi", 0, "a", 50, 1).unwrap();
-        db.score("taxi", 0, "a", 20, 2).unwrap(); // lower: kept at 50
-        db.score("taxi", 0, "b", 70, 3).unwrap();
-        db.score("daily", 100, "a", 5, 4).unwrap();
-        db.score("daily", 90, "a", 9, 4).unwrap();
-        let top = |day| db.boards(day, 10).unwrap().into_iter().map(|(b, id, _, v)| (b, id, v)).collect::<Vec<_>>();
+        db.score("taxi", 0, "a", 50, true, 1).unwrap();
+        db.score("taxi", 0, "a", 20, true, 2).unwrap(); // lower: kept at 50
+        db.score("taxi", 0, "b", 70, true, 3).unwrap();
+        db.score("daily", 100, "a", 5, true, 4).unwrap();
+        db.score("daily", 90, "a", 9, true, 4).unwrap();
+        let top = |day| db.boards(day, 10).unwrap().into_iter().map(|(b, _, id, _, v, _)| (b, id, v)).collect::<Vec<_>>();
         assert_eq!(top(100), vec![("daily".into(), "a".into(), 5), ("taxi".into(), "b".into(), 70), ("taxi".into(), "a".into(), 50)]);
-        db.score("daily", 101, "a", 1, 5).unwrap(); // a daily write drops days over a week old
+        db.score("daily", 101, "a", 1, true, 5).unwrap(); // a daily write drops days over a week old
         assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM scores WHERE day = 90", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         for i in 0..BOARD_ROWS + 20 {
-            db.score("bus", 0, &format!("p{i}"), i, 6).unwrap();
+            db.score("bus", 0, &format!("p{i}"), i, true, 6).unwrap();
         }
         assert_eq!(db.conn.query_row("SELECT COUNT(*), MIN(v) FROM scores WHERE board = 'bus'", [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).unwrap(), (BOARD_ROWS, 20));
         for i in 0..MAX_BOARDS + 5 {
-            db.score(&format!("x{i}"), 0, "a", 1, 7).unwrap();
+            db.score(&format!("x{i}"), 0, "a", 1, true, 7).unwrap();
         }
         assert_eq!(db.conn.query_row("SELECT COUNT(DISTINCT board) FROM scores", [], |r| r.get::<_, i64>(0)).unwrap(), MAX_BOARDS);
+    }
+
+    #[test]
+    fn old_database_gets_the_verified_column_and_unverified_rank_below() {
+        let path = std::env::temp_dir().join(format!("live-old-{}.db", std::process::id()));
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+        {
+            let c = Connection::open(path).unwrap(); // the production schema from before run tickets
+            c.execute_batch("CREATE TABLE scores (board TEXT NOT NULL, day INTEGER NOT NULL, id TEXT NOT NULL, v INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (board, day, id)); INSERT INTO scores VALUES ('taxi', 0, 'old', 900, 1);").unwrap();
+        }
+        let db = Db::open(path).unwrap();
+        drop(Db::open(path).unwrap()); // opening twice is fine
+        db.score("taxi", 0, "new", 100, true, 2).unwrap();
+        let rows = db.boards(5, 10).unwrap();
+        assert_eq!(rows.iter().map(|r| (r.2.as_str(), r.4, r.5)).collect::<Vec<_>>(), vec![("new", 100, true), ("old", 900, false)]);
+        db.score("taxi", 0, "old", 50, true, 3).unwrap(); // a verified run replaces the unverified best even when lower
+        assert_eq!(db.top("taxi", 0).unwrap().unwrap().0, "new");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
