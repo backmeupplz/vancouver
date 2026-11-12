@@ -123,7 +123,8 @@ function drawn(name, dtOf, lateOf, frames = 1800) {
     } else h.v.length = 0
     h.x = x; h.z = z; h.dt = dt; h.f = f
   }
-  let f = 0
+  let f = 0, tWas = null, rWas = null
+  const clock = { back: 0, jerk: 0, n: 0 } // the drawn clock (#604): frames it ran backwards; its rate (drawn time / frame time) changed by > 0.1 from the frame before
   for (; f < frames; f++) {
     for (const d of due) if (d.at <= f) { // the answers that have come since the last frame
       busy = false; spare = d.m.buf
@@ -143,6 +144,8 @@ function drawn(name, dtOf, lateOf, frames = 1800) {
         for (let i = 0; i < m.nPeople; i++) if (a[(m.cars + i) * 8 + 5] < 1) see('gait', 'g' + a[m.pbase + i], a[(m.cars + i) * 8 + 4], 0, dt)
       } else {
         const t = sm.step(elapsed, dt), B = sm.b, np = B.pn + B.bn
+        if (tWas !== null && f > 120) { const r = (t - tWas) / dt; clock.n++; if (r < -1e-9) clock.back++; if (rWas !== null && Math.abs(r - rWas) > 0.1) clock.jerk++; rWas = r }
+        tWas = t
         if (P.length < B.n * 8) P = new Float32Array(B.n * 12)
         if (Q.length < np * 8) Q = new Float32Array(np * 12)
         sm.cars(P, t); sm.people(Q, t)
@@ -160,16 +163,18 @@ function drawn(name, dtOf, lateOf, frames = 1800) {
   buf = due.at(-1)?.m.buf || spare
   const out = {}
   for (const [k, [n, g, acc]] of Object.entries(st)) { acc.sort((x, y) => x - y); out[k] = { glitch: +((1000 * g) / (n || 1)).toFixed(2), accel: +(acc[Math.floor(acc.length * 0.99)] || 0).toFixed(1) } }
+  if (!OLD) out.clock = { back: clock.back, jerk: +((1000 * clock.jerk) / (clock.n || 1)).toFixed(2) }
   console.log(`${name.padEnd(22)} ${JSON.stringify(out)}`)
   return out
 }
 const even = (fps) => () => 1 / fps, uneven = (r) => [1 / 60, 1 / 30, 1 / 20][Math.floor(r() * 3)]
-const prompt = () => 0, late = (r) => Math.floor(r() * 3), stall = (r, f) => (f % 120 === 60 ? 15 : Math.floor(r() * 2))
+const prompt = () => 0, late = (r) => Math.floor(r() * 3), stall = (r, f) => (f % 120 === 60 ? 15 : Math.floor(r() * 2)), slow = () => 20 // (slow: every answer a third of a second late, each tick losing a tenth: a worker that cannot keep up, #604)
 let worst = 0
 for (const [name, dtOf, lateOf] of [['60 fps', even(60), prompt], ['30 fps', even(30), prompt], ['60 fps, late answers', even(60), late], ['30 fps, late answers', even(30), late],
-  ['uneven frames, late', uneven, late], ['60 fps, stalls', even(60), stall], ['30 fps, stalls', even(30), stall]]) {
+  ['uneven frames, late', uneven, late], ['60 fps, stalls', even(60), stall], ['30 fps, stalls', even(30), stall], ['60 fps, slow worker', even(60), slow]]) {
   const o = drawn(name, dtOf, lateOf)
-  if (!name.includes('stalls')) for (const k in o) if (k !== 'cyclist') worst = Math.max(worst, o[k].glitch) // (a cyclist turns round on the spot at a path's dead end, and the test has two)
+  if (!name.includes('stalls') && !name.includes('slow')) for (const k in o) if (k !== 'cyclist' && k !== 'clock') worst = Math.max(worst, o[k].glitch) // (a cyclist turns round on the spot at a path's dead end, and the test has two)
+  if (!OLD) assert(o.clock.back === 0 && (!name.includes('slow') || o.clock.jerk < 1), `${name}: the drawn clock ran backwards or changed rate in a step`)
 }
 // how busy by the hour, the day and the weather (#606): what the worker aims for (cars, people)
 const aim = (o) => { send({ type: 'opts', opts: { density: 6, maxCars: 4000, maxPeople: 3000, weekend: false, wet: 0, ...o } }); got.length = 0; send({ type: 'debug', x: 0, y: 0, r: 0 }); const d = got.find((x) => x.type === 'debug'); return [d.carTarget, d.pedTarget] }

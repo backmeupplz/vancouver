@@ -44,7 +44,7 @@ export function smoother() {
   // the answers, oldest first, as far back as the time being drawn (more than two: with answers up to three frames
   // late the world is drawn five frames back, and there are newer ones than that), and the two being drawn between
   const H = [shot()]
-  let A = H[0], B = H[0], delay = 0, fresh = false, T = 0, age = 0, hiT = 0, lost = 0, late = 0, simT = null, sentT = 0
+  let A = H[0], B = H[0], delay = 0, fresh = false, T = 0, age = 0, hiT = 0, lost = 0, late = 0, simT = null, sentT = 0, rate = 0, v = 0
   const hi = [0, 0]
   const last = () => H[H.length - 1]
   // how far from A to B the world is at clock time t (an answer over a quarter second late: they wait)
@@ -55,10 +55,11 @@ export function smoother() {
     get delay() { return delay },
     // the worker's answer m to the tick sent at clock time t (its own clock, m.simT, falls behind that when it drops
     // time: a tick over a quarter second long. `lost` is by how much, and the world is drawn that much later: `late`,
-    // eased to it)
+    // eased to it; `rate`: how fast it loses time lately, seconds a second)
     push(m, t) {
       const drop = simT == null ? 0 : t - sentT - (m.simT - simT)
       if (drop > 1e-3) lost += drop
+      if (simT != null && t > sentT) rate += ((drop > 1e-3 ? drop : 0) / (t - sentT) - rate) * Math.min(1, (t - sentT) / 2)
       simT = m.simT; sentT = t; t -= lost
       while (H.length > 3 && H[2].t <= T) H.shift() // (no longer drawn)
       const S = H.length >= 40 || (H.length > 2 && H[1].t <= T) ? H.shift() : shot(), was = last()
@@ -77,7 +78,11 @@ export function smoother() {
     },
     // a frame, dt after the last, at clock time `elapsed`: the time to draw the world at
     step(elapsed, dt) {
-      late = Math.max(late + Math.min(0.1 * dt, lost - late), lost - 0.25) // (eased, like the delay; over a quarter second behind, at once: a worker that gets no time, and the world stood still meanwhile anyway)
+      // `late` grows at v: the rate time is lost at plus a pull towards what is lost so far, v itself changing by at most
+      // 1 a second, and under 0.9 (with the delay's 0.1: the world is drawn slower, never backwards; a snap back to a
+      // quarter second behind made 98% of the stutters with a worker that could not keep up, #604)
+      v += Math.max(-dt, Math.min(dt, Math.max(-0.2, Math.min(0.9, rate + 0.5 * (lost - late))) - v))
+      late += v * dt
       const e0 = elapsed - late
       elapsed -= lost
       // how old the latest answer had grown by the frame before a new one came (the tick after it is sent only when it

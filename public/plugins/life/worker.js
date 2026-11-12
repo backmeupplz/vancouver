@@ -57,6 +57,7 @@ onmessage = ({ data: m }) => {
     for (const k of m.drop) tiles.delete(k)
     for (const t of m.add) tiles.set(t.key, t)
     if (m.masks) masks = m.masks.map((r) => ({ ox: -1e9, oy: -1e9, size: 2e9, fp: { pts: Float32Array.from(r.flat()), start: [0, r.length * 2] } }))
+    wallCells.clear()
     dirty = walkDirty = true
   } else if (m.type === 'area') {
     area = m.area; dirty = walkDirty = true
@@ -1485,23 +1486,39 @@ function fpGrid(t) {
   }
 }
 const wout = { x: 0, y: 0 }
-function wallOut(x, y, m) {
-  const k = Math.floor(x / FC) * 65536 + Math.floor(y / FC)
+// per FC cell: [tile, ring, tile, ring, ...] in the order tiles then masks are walked (cleared when the tiles change):
+// a person asks for the same few cells step after step, and walking every loaded tile was half the worker's time
+let wallCells = new Map()
+function wallCell(k, cx, cy) {
+  const a = []
   for (const t of [...tiles.values(), ...masks]) {
-    if (!t.fp || x < t.ox - 100 || x > t.ox + t.size + 100 || y < t.oy - 100 || y > t.oy + t.size + 100) continue
+    if (!t.fp || cx + FC < t.ox - 100 || cx > t.ox + t.size + 100 || cy + FC < t.oy - 100 || cy > t.oy + t.size + 100) continue
     if (!t.fg) fpGrid(t)
-    const P = t.fp.pts, B = t.fbb
-    for (const r of t.fg.get(k) || []) {
-      if (x < B[r * 4] || y < B[r * 4 + 1] || x > B[r * 4 + 2] || y > B[r * 4 + 3]) continue
-      let inside = false, bd = Infinity, bx = 0, by = 0
-      for (let q = t.fp.start[r], e = t.fp.start[r + 1], w = e - 2; q < e; w = q, q += 2) {
-        const ax = P[w], ay = P[w + 1], cx = P[q], cy = P[q + 1]
-        if ((cy > y) !== (ay > y) && x < ((ax - cx) * (y - cy)) / (ay - cy) + cx) inside = !inside
-        const dx = cx - ax, dy = cy - ay, u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy || 1))), d = Math.hypot(ax + dx * u - x, ay + dy * u - y)
-        if (d < bd) { bd = d; bx = ax + dx * u; by = ay + dy * u }
-      }
-      if (inside && bd > 1e-4) { wout.x = ((bx - x) / bd) * (bd + m); wout.y = ((by - y) / bd) * (bd + m); return wout }
+    for (const r of t.fg.get(k) || []) a.push(t, r)
+  }
+  wallCells.set(k, a)
+  return a
+}
+function wallOut(x, y, m) {
+  const cx = Math.floor(x / FC), cy = Math.floor(y / FC), k = cx * 65536 + cy
+  const a = wallCells.get(k) || wallCell(k, cx * FC, cy * FC)
+  for (let i = 0; i < a.length; i += 2) {
+    const t = a[i], r = a[i + 1], P = t.fp.pts, B = t.fbb
+    if (x < t.ox - 100 || x > t.ox + t.size + 100 || y < t.oy - 100 || y > t.oy + t.size + 100) continue // (as before: the tile's own margin)
+    if (x < B[r * 4] || y < B[r * 4 + 1] || x > B[r * 4 + 2] || y > B[r * 4 + 3]) continue
+    let inside = false, bd = Infinity, bx = 0, by = 0
+    const q0 = t.fp.start[r], e = t.fp.start[r + 1]
+    for (let q = q0, w = e - 2; q < e; w = q, q += 2) {
+      const ay = P[w + 1], cx = P[q], cy = P[q + 1]
+      if ((cy > y) !== (ay > y) && x < ((P[w] - cx) * (y - cy)) / (ay - cy) + cx) inside = !inside
     }
+    if (!inside) continue // (most are outside: the nearest wall only for those in)
+    for (let q = q0, w = e - 2; q < e; w = q, q += 2) {
+      const ax = P[w], ay = P[w + 1], cx = P[q], cy = P[q + 1]
+      const dx = cx - ax, dy = cy - ay, u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy || 1))), d = Math.hypot(ax + dx * u - x, ay + dy * u - y)
+      if (d < bd) { bd = d; bx = ax + dx * u; by = ay + dy * u }
+    }
+    if (bd > 1e-4) { wout.x = ((bx - x) / bd) * (bd + m); wout.y = ((by - y) / bd) * (bd + m); return wout }
   }
   return null
 }
