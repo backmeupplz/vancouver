@@ -1,6 +1,6 @@
 # GDAL that reads the City of Vancouver's ECW orthophotos: Debian's GDAL plus its ECW driver built as a plugin
 # against the open-source libecwj2 3.3 SDK (reads ECW v2). Used by tools/ortho.sh; nothing else needs ECW.
-FROM debian:bookworm
+FROM debian:bookworm@sha256:1d04200c2ece1d4d75a2a6f8e11ebce7d86a2ae28b34bb2c9cbb3ee9f4953e75
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential unzip ca-certificates curl cmake \
     gdal-bin libgdal-dev libproj-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
